@@ -7,7 +7,7 @@
 | 当前工资核对 Skill | `/Users/macos/.workbuddy/skills/工资核对表制作/SKILL.md` | SKILL.md | 2026-09-08 | 工资表制作与核查规则 | 是，候选最新版 | 含业务规则和教师名单，未含工资明细 | 是 |
 | 当前 Skill 旧备份 | `/Users/macos/.workbuddy/skills/工资核对表制作/SKILL.md.bak-20260805` | SKILL.md 备份 | 2026-08-05 | 保留版本关系 | 待确认 | 业务规则 | 是 |
 | 工资 Skill Python 脚本 | `/Users/macos/.workbuddy/skills/工资核对表制作/scripts/` | Python | 2026-07/08 | 年级提取、排课导入、AE/AF 检查 | 待确认 | 代码内可能含教师名单/业务规则 | 是 |
-| 工资 Skill 规则文件 | `/Users/macos/.workbuddy/skills/工资核对表制作/references/` | Markdown/CSV | 2026-07/09 | 档位、星级和年级规则 | 待确认 | 学生年级 CSV 含真实姓名 | 部分；敏感 CSV 未复制 |
+| 工资 Skill 规则文件 | `/Users/macos/.workbuddy/skills/工资核对表制作/references/` | Markdown/CSV | 2026-07/09 | 档位、星级和年级规则 | 待确认 | 学生年级 CSV/Markdown 含真实姓名 | 部分；敏感文件未复制 |
 | 工资 Skill Excel 模板 | `/Users/macos/.workbuddy/skills/工资核对表制作/assets/工资核对表模板.xlsx` | Excel | 2026-07 | 工资核对模板 | 待确认 | 是，含 1,892 行排课/教师数据 | 否 |
 | 管理岗位考核 Skill | `/Users/macos/.workbuddy/skills/管理岗位考核/` | Skill/Python/规则 | 2026-08 | 管理岗位考核指标 | 待确认 | 参考规则，未复制真实考核表 | 是 |
 | 8 月续费校对脚本 | `/Users/macos/Desktop/8月工资表/parse_续费校对.py` | Python | 2026-08 | 续费校对 | 是/待确认 | 代码资产，未复制数据 | 是 |

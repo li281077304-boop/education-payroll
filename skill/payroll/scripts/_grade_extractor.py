@@ -139,7 +139,7 @@ def extract_grade(class_name):
         stu = _extract_student_name(name)
         if stu and stu in STUDENT_GRADE:
             return _norm(STUDENT_GRADE[stu])
-    # 5. 班级名直接含学生姓名（如「孙新梦生物1班」，不带赠送关键词）→ 查表
+    # 5. 班级名直接含学生姓名（如「某学生生物1班」，不带赠送关键词）→ 查表
     for stu in sorted(STUDENT_GRADE, key=len, reverse=True):
         if stu in name:
             return _norm(STUDENT_GRADE[stu])
@@ -170,6 +170,6 @@ if __name__ == "__main__":
     print("学生表条数:", len(STUDENT_GRADE))
     print("初三1v1_张三 ->", extract_grade("初三1v1_张三"))
     print("高一小班数学1班（北师大） ->", extract_grade("高一小班数学1班（北师大）"))
-    print("亲属赠送_黄小满 ->", extract_grade("亲属赠送_黄小满"))
+    print("亲属赠送_某学生 ->", extract_grade("亲属赠送_某学生"))
     print("02-数学 清洗 ->", clean_subject("02-数学"))
     print("F/G/H @2:", build_switch_formulas(2))

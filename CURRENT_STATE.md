@@ -18,8 +18,8 @@
 - `SKILL.md`
 - `SKILL.md.bak-20260805`
 - 3 个 Python 脚本：`_grade_extractor.py`、`import_paikeshi.py`、`verify_ae_af.py`
-- 3 个规则/模板类文本：`ae_tier_rules.md`、`star_override_template.csv`、`学生年级查表.md`
-- 原始目录另有 2 个学生年级 CSV 和 1 个工资核对表 Excel 模板；它们含真实学生/排课/教师数据，本仓库没有复制。
+- 2 个安全规则/模板类文本：`ae_tier_rules.md`、`star_override_template.csv`
+- 原始目录另有学生年级 CSV、学生年级 Markdown 查表和 1 个工资核对表 Excel 模板；它们含真实学生/排课/教师数据，本仓库没有复制。
 
 ## 3. 2026-09-08 全盘复查加固
 
