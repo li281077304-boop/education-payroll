@@ -8,6 +8,7 @@ from .models.reconciliation import (
 )
 from .models.records import (
     PayrollRecord,
+    PayrollCheckRecord,
     RefundRecord,
     RenewalRecord,
     ScheduleRecord,
@@ -16,6 +17,7 @@ from .models.records import (
 __all__ = [
     "ManualDecision",
     "PayrollRecord",
+    "PayrollCheckRecord",
     "RefundRecord",
     "RenewalRecord",
     "ScheduleRecord",

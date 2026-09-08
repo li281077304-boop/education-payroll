@@ -16,14 +16,21 @@ outputs/
 *.sqlite3
 *.jsonl
 
+# Intentionally deidentified Excel fixtures for adapter tests only
+!tests/fixtures/
+!tests/fixtures/excel/
+!tests/fixtures/excel/*.xlsx
+
 # Local/runtime files
 .DS_Store
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 venv/
 .env
 .env.*
+work/
 
 # Explicitly excluded sensitive Skill assets
 skill/payroll/references/学生年级查表.csv
