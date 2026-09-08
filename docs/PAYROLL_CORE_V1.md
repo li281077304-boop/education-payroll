@@ -74,3 +74,29 @@ dry-run 确认的未映射层为：真实 Excel 多布局、xls 读取、公式�
 ## 当前已知限制
 
 V1 能证明“给定标准化 expected/actual 后，哪些字段被检查、差异是否解释、coverage 是否完整”。它还不能证明“从真实 Excel 到标准化字段的每一步都正确”。因此当前 CLI 的 PASS 只适用于已确认 schema 的标准化输入，不应被解释成真实 8 月工资已经自动复核通过。
+
+## Phase 2：真实 Excel 导致的模型调整
+
+### 发现
+
+真实 8 月文件不是单一、稳定的表格：原始排课导出、学科工资表和最终核对工作簿各自有不同布局；部分公式只有公式文本、没有缓存值，隐藏页还存在外部引用。单纯保存一个数值无法解释它来自哪里、是否可靠、是否可重算。
+
+### 原设计
+
+V1 的记录只保存标准字段和一个概括性的 `source` 字符串；`ScheduleRecord.attended` 默认是数值，难以区别真实的 0 和“没有读到实到人数”。
+
+### 真实数据
+
+同一业务字段可能来自不同 Sheet、不同列；工资字段含公式和批注；最终核对页依赖不可读的公式缓存或外部引用。把缺失缓存当作 0 会制造假差异或假通过。
+
+### 调整
+
+- 新增 `SourceEvidence`：保留源文件、Sheet、单元格、源字段、原始值、标准化值及可靠性状态。
+- 新增 `CellValueState`：明确区分 `RAW_VALUE`、`CACHED_VALUE`、`MISSING_CACHE` 与 `EXTERNAL_REFERENCE`。
+- 新增 `CommentRecord` 和通用 `AdapterResult`，让读取结果同时携带 records、warnings、errors、coverage、unsupported fields 和只读批注。
+- `ScheduleRecord.attended` 改为允许 `None`，不再把无法读取的实到人数伪造为 0。
+- 新增 `PayrollCheckRecord`，以保留最终核对页的“期望 / 填报 / 差值”事实，而不假定它就是可计算的工资规则。
+
+### 原因
+
+这些调整让 Adapter 把真实文件当作事实来源，并把不可靠或不支持的部分显式暴露给对账层。它们没有改写旧脚本或业务规则，也没有把真实数据保存进仓库。
