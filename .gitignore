@@ -1,0 +1,31 @@
+# Sensitive business data and generated workbooks
+data/
+private_data/*
+!private_data/.gitkeep
+real_data/
+output/
+outputs/
+*.xlsx
+*.xls
+*.xlsm
+*.zip
+*.7z
+*.rar
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+
+# Local/runtime files
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+
+# Explicitly excluded sensitive Skill assets
+skill/payroll/references/学生年级查表.csv
+skill/payroll/references/学生年级查表.csv.bak_20260901
+skill/payroll/assets/
