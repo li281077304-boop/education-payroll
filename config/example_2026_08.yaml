@@ -1,0 +1,11 @@
+period: "2026-08"
+tolerance: 0.000001
+excluded_roles: ["management_only"]
+rules:
+  reconciliation_adjustments:
+    - target: "李四"
+      field: "class_value"
+      delta: 1.0
+      effective_from: "2026-08"
+      effective_to: "2026-08"
+      reason: "Deidentified fixture for a confirmed special class adjustment"

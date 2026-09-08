@@ -1,0 +1,5 @@
+period: "2026-08"
+tolerance: 0.000001
+excluded_roles: []
+rules:
+  reconciliation_adjustments: []
