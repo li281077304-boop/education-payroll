@@ -1,0 +1,11 @@
+case,target,field,expected,actual,expected_status
+1,张三,one_to_one,36,36,MATCH
+2,张三,one_to_one,36,30,UNEXPLAINED_DIFFERENCE
+3,李四,class_value,10,10,MATCH
+4,李四,class_value,10,11,EXPLAINED_DIFFERENCE
+5,王五,renewal_hours,3,3,MATCH
+6,王五,refund_amount,-10,-10,MATCH
+7,赵六,class_value,10,12,EXPLAINED_DIFFERENCE
+8,钱七,one_to_one,8,,MISSING_TARGET
+9,孙八,one_to_one,,8,MISSING_SOURCE
+10,周九,refund_amount,,,NEEDS_MANUAL_REVIEW

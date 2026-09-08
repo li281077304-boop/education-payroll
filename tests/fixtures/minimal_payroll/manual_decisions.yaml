@@ -1,0 +1,9 @@
+- period: "2026-08"
+  target: "赵六"
+  field: "class_value"
+  system_value: 10.0
+  override_value: 12.0
+  reason: "人工确认的特殊班课折算"
+  source: "fixture/manual_decisions.yaml"
+  confirmed_by: "审核人甲"
+  note: "仅用于测试，不对应真实业务"
