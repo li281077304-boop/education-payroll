@@ -13,6 +13,7 @@ class RunStore:
         with sqlite3.connect(self.path) as db:
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS rating_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS policy_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -48,4 +49,21 @@ class RunStore:
             row = db.execute("SELECT payload FROM rating_versions WHERE id=?", (version_id,)).fetchone()
         if row is None:
             raise ValueError("未找到教师星级版本。")
+        return json.loads(row[0])
+
+    def save_policy_version(self, version: dict) -> None:
+        payload = json.dumps(version, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO policy_versions(id,effective_from,effective_to,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (version["id"], version["effective_from"], version["effective_to"], payload))
+
+    def list_policy_versions(self) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT payload FROM policy_versions ORDER BY effective_from DESC").fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_policy_version(self, version_id: str) -> dict:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT payload FROM policy_versions WHERE id=?", (version_id,)).fetchone()
+        if row is None:
+            raise ValueError("未找到教师工资政策版本。")
         return json.loads(row[0])

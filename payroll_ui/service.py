@@ -14,7 +14,7 @@ from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.formula_audit import audit_payroll_formulas
-from payroll_core.rules.authority import TeacherRating, default_compensation_bands, rating_and_rate_checks
+from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
 from payroll_core.reconcile.payroll_scope import FieldCheck, rate_and_fee_checks, schedule_field_checks, total_salary_read_checks
 
 from .storage import RunStore
@@ -71,7 +71,8 @@ class PayrollService:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
             raise ValueError("请选择有效月份。")
         versions = [item for item in self.store.list_rating_versions() if item["effective_from"] <= period <= item["effective_to"]]
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "decisions": [], "management": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
+        policies = [item for item in self.store.list_policy_versions() if item["effective_from"] <= period <= item["effective_to"]]
+        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "decisions": [], "management": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
         self.store.save(run)
         return self.render(run)
 
@@ -96,6 +97,22 @@ class PayrollService:
         version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "source_version": source_version.strip() or effective_from, "ratings": cleaned, "created_at": datetime.now(timezone.utc).isoformat()}
         self.store.save_rating_version(version)
         return self.rating_versions()
+
+    def policy_versions(self) -> list[dict]:
+        return self.store.list_policy_versions()
+
+    def save_policy_version(self, effective_from: str, effective_to: str, source: str, profiles: list[dict]) -> list[dict]:
+        if len(effective_from) != 7 or len(effective_to) != 7 or effective_from > effective_to or not source.strip() or not profiles:
+            raise ValueError("请填写生效期、来源和至少一位教师的工资政策。")
+        cleaned = []
+        for item in profiles:
+            teacher, role = str(item.get("teacher", "")).strip(), str(item.get("role", "")).strip()
+            if not teacher or not role:
+                raise ValueError("每条工资政策必须包含教师和身份。")
+            cleaned.append({"teacher": teacher, "role": role, "rating": item.get("rating"), "rating_override": item.get("rating_override"), "special_approval": str(item.get("special_approval", "")).strip(), "obligation_hours": float(item.get("obligation_hours", 0)), "obligation_hours_deduction_enabled": bool(item.get("obligation_hours_deduction_enabled", False)), "note": str(item.get("note", "")).strip()})
+        version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "profiles": cleaned, "created_at": datetime.now(timezone.utc).isoformat()}
+        self.store.save_policy_version(version)
+        return self.policy_versions()
 
     def import_file(self, run_id: str, role: str, path: str, expected_hash: str | None = None) -> dict:
         if role not in LABELS:
@@ -173,11 +190,14 @@ class PayrollService:
         rating_version = self._rating_version_for_run(run)
         ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"]) for item in rating_version.get("ratings", [])] if rating_version else []
         checks += rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
+        policy_version = self._policy_version_for_run(run)
+        profiles = [TeacherCompensationProfile(item["teacher"], item["role"], item.get("rating"), item.get("rating_override"), item.get("special_approval", ""), item.get("obligation_hours", 0), item.get("obligation_hours_deduction_enabled", False), policy_version["effective_from"], policy_version["effective_to"], policy_version["source"], item.get("note", "")) for item in policy_version.get("profiles", [])] if policy_version else []
+        checks += policy_fee_checks(payroll, profiles, default_compensation_bands(), run["period"])
         for role in ("math", "science"):
             for item in audit_payroll_formulas(run["files"][role]["path"]):
                 checks.append(FieldCheck("工作簿", "formula", None, None, item.status, f"{Path(item.workbook).name} / {item.sheet} / {item.cell}：{item.evidence} 正常模式：{item.expected_pattern or '待确认'}；当前公式：{item.formula or '空白/固定值'}。"))
         checks = self._apply_decisions(checks, run["decisions"])
-        visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "READ_ONLY"}]
+        visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY"}]
         run["issues"] = self._annotate_decisions([self._issue(check) for check in visible_checks], run["decisions"])
         run["issues"].sort(key=lambda item: (item["severity_rank"], item["title"], item["teacher"]))
         run["field_status"] = self._field_status(checks)
@@ -194,6 +214,16 @@ class PayrollService:
         matches = [item for item in self.store.list_rating_versions() if item["effective_from"] <= run["period"] <= item["effective_to"]]
         if len(matches) == 1:
             run["rating_version_id"] = matches[0]["id"]
+            return matches[0]
+        return None
+
+    def _policy_version_for_run(self, run: dict) -> dict | None:
+        version_id = run.get("policy_version_id")
+        if version_id:
+            return self.store.get_policy_version(version_id)
+        matches = [item for item in self.store.list_policy_versions() if item["effective_from"] <= run["period"] <= item["effective_to"]]
+        if len(matches) == 1:
+            run["policy_version_id"] = matches[0]["id"]
             return matches[0]
         return None
 
@@ -312,6 +342,7 @@ class PayrollService:
             "MISSING_PAYROLL_VALUE": (1, "重要"),
             "RULE_NOT_FOUND": (1, "重要"),
             "MULTIPLE_RULES_MATCHED": (0, "严重"),
+            "AF_POLICY_MISMATCH": (1, "重要"),
             "NEEDS_MANUAL_REVIEW": (2, "需确认"),
             "EXPLAINED_DIFFERENCE": (3, "已确认"),
         }.get(item.status, (2, "需确认"))
@@ -319,8 +350,8 @@ class PayrollService:
             "id": hashlib.sha256(f"{item.teacher}|{item.field}|{item.reason}".encode()).hexdigest()[:16],
             "teacher": item.teacher,
             "field": item.field,
-            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "ae": "AE 课时单价", "af": "AF 总课时费", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
-            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
+            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "ae": "AE 课时单价", "af": "AF 总课时费", "af_policy": "AF 课时费政策", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
+            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "af_policy": "AF 课时费政策不一致", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
             "difference": difference,
             "status_label": ISSUE_LABELS.get(item.status, "需要处理"),
             "severity_rank": severity[0],
@@ -366,16 +397,16 @@ class PayrollService:
             "automatic_coverage": round(100 * len(completed) / len(automatic)) if automatic else 0,
             "automatic_pass": bool(automatic) and len(completed) == len(automatic),
             "unexplained": sum(row.status == "UNEXPLAINED_DIFFERENCE" for row in checks),
-            "manual_review": sum(row.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "READ_ONLY", "EXPLAINED_DIFFERENCE"} for row in checks),
+            "manual_review": sum(row.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY", "EXPLAINED_DIFFERENCE"} for row in checks),
             "full_scope_complete": bool(field_states) and all(row["state"].startswith("已核对") for row in field_states),
             "scope_note": "AA、AC 已接入独立排课源；AE、AF、AV 尚无完整独立权威源，不能判定整份工资核对通过。",
         }
 
     @staticmethod
     def _field_status(checks: list[FieldCheck]) -> list[dict]:
-        labels = {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "ae": "AE 该档每小时金额", "af": "AF 总课时费", "av": "AV 总工资", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}
+        labels = {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "ae": "AE 该档每小时金额", "af": "AF 总课时费", "af_policy": "AF 课时费政策", "av": "AV 总工资", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}
         output = []
-        for field in ("one_to_one", "class_value", "rating", "rate", "formula", "ae", "af", "av"):
+        for field in ("one_to_one", "class_value", "rating", "rate", "formula", "af_policy", "ae", "af", "av"):
             rows = [row for row in checks if row.field == field]
             if field in {"one_to_one", "class_value"}:
                 state = "已核对" if rows and all(row.status in {"MATCH", "EXPLAINED_DIFFERENCE"} for row in rows) else "待处理"
@@ -391,10 +422,13 @@ class PayrollService:
             elif field == "formula":
                 state = "已核对" if rows and all(row.status == "FORMULA_MATCH" for row in rows) else "待处理"
                 note = "关键公式区域按同列结构模式扫描。" if state == "已核对" else "尚无足够公式样本，或已发现公式结构异常。"
+            elif field == "af_policy":
+                state = "已核对" if rows and all(row.status == "AF_POLICY_MATCH" for row in rows) else "待处理"
+                note = "按独立教师工资政策档案计算 AF，不以工资表 TRMT 文字作为唯一依据。" if state == "已核对" else "缺少有效政策、特殊审批或 AF 金额不一致。"
             else:
                 state, note = "仅读取 / 待人工确认", "总工资包含续费、退费、激励、管理奖等未接入来源。"
             # An empty check cannot be advertised as independently verified.
-            automatic_available = field in {"one_to_one", "class_value", "rating", "rate", "formula"} and bool(rows)
+            automatic_available = field in {"one_to_one", "class_value", "rating", "rate", "formula", "af_policy"} and bool(rows)
             formula_recomputed = field in {"ae", "af"} and any(row.expected is not None for row in rows)
             formula_compared = field in {"ae", "af"} and any(row.expected is not None and row.actual is not None for row in rows)
             output.append({"field": field, "label": labels[field], "state": state, "note": note, "read": bool(rows), "authority": automatic_available, "computed": automatic_available or formula_recomputed, "compared": automatic_available or formula_compared})

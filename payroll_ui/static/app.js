@@ -51,7 +51,7 @@ async function home() {
     current = null;
     const today = new Date();
     const defaultPeriod = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，按提示依次导入三份必需材料。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="ratingDashboard()">教师星级与档位</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，按提示依次导入三份必需材料。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="ratingDashboard()">教师星级与档位</button><button class="secondary full" onclick="policyDashboard()">教师工资政策档案</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -70,6 +70,22 @@ async function saveRatings() {
     const ratings = $("#rating-list").value.split(/\n+/).filter(Boolean).map((line) => { const [teacher, rating, role] = line.split(/[，,]/).map((item) => item.trim()); return { teacher, rating: Number(rating), role: role || "教师" }; });
     await api("/api/ratings", { method: "POST", body: JSON.stringify({ effective_from: $("#rating-from").value, effective_to: $("#rating-to").value, source: $("#rating-source").value, source_version: $("#rating-version").value, ratings }) });
     showMessage("星级版本已保存。", "success"); await ratingDashboard();
+  } catch (error) { showMessage(error.message); }
+}
+
+async function policyDashboard() {
+  try {
+    const versions = await api("/api/policies");
+    const rows = versions.flatMap((version) => version.profiles.map((profile) => `<tr><td>${escapeHtml(profile.teacher)}</td><td>${escapeHtml(profile.role)}</td><td>${profile.rating_override || profile.rating || "待确认"} 星</td><td>${profile.obligation_hours_deduction_enabled ? `${profile.obligation_hours} 小时，扣除` : "不扣除"}</td><td>${escapeHtml(profile.special_approval || "无")}</td><td>${escapeHtml(version.effective_from)} ～ ${escapeHtml(version.effective_to)}</td></tr>`));
+    shell(`<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h1>教师工资政策档案</h1><p class="muted">身份、星级和义务课时待遇分别保存。相同身份可以有不同的有效政策。</p></div><button class="secondary" onclick="home()">返回核算历史</button></div><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>身份</th><th>星级</th><th>义务课时</th><th>特殊审批</th><th>生效期</th></tr></thead><tbody>${rows.join("") || '<tr><td colspan="6" class="muted">尚未保存工资政策档案。</td></tr>'}</tbody></table></div></section><section class="card"><h2>保存政策版本</h2><p class="muted">每行填写：教师，身份，星级，义务小时，是否扣除，特殊审批。示例：教师甲，TRMT，4，30，是，保留四星待遇。</p><div class="decision-form"><label>生效开始<input id="policy-from" type="month"></label><label>生效结束<input id="policy-to" type="month"></label><label class="wide">数据来源<input id="policy-source" placeholder="例如：年度工资政策确认"></label><label class="wide">政策档案<textarea id="policy-list" placeholder="教师甲，TRMT，4，30，是，保留四星待遇"></textarea></label></div><div class="action-bar"><span class="muted small">特殊审批须写明原因和生效期。保存不会修改工资表。</span><button onclick="savePolicies()">保存政策版本</button></div></section>`, false);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function savePolicies() {
+  try {
+    const profiles = $("#policy-list").value.split(/\n+/).filter(Boolean).map((line) => { const [teacher, role, rating, obligation_hours, enabled, special_approval] = line.split(/[，,]/).map((item) => item.trim()); return { teacher, role, rating: Number(rating) || null, obligation_hours: Number(obligation_hours) || 0, obligation_hours_deduction_enabled: ["是", "true", "1"].includes(String(enabled).toLowerCase()), special_approval: special_approval || "" }; });
+    await api("/api/policies", { method: "POST", body: JSON.stringify({ effective_from: $("#policy-from").value, effective_to: $("#policy-to").value, source: $("#policy-source").value, profiles }) });
+    showMessage("工资政策版本已保存。", "success"); await policyDashboard();
   } catch (error) { showMessage(error.message); }
 }
 
