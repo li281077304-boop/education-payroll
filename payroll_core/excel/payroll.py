@@ -12,6 +12,7 @@ PAYROLL_LABELS = {
     "teacher": "姓名",
     "one_to_one": "折算小时数",
     "class_value": "班课折算小时数",
+    "teaching_hours": "最终授课小时数据",
     "ae": "该档每小时金额",
     "af": "总课时费",
     "av": "总工资数",
@@ -56,20 +57,26 @@ def read_payroll_excel(path: str | Path, period: str) -> AdapterResult[PayrollRe
             field: cell_evidence(sheet, cached_sheet, row, columns[label], source_file, label)
             for field, label in PAYROLL_LABELS.items()
         }
+        # Current salary sheets use F for teacher tier. Older sheets do not
+        # consistently give it a semantic header, so retain its exact source.
+        evidence["teacher_level"] = cell_evidence(sheet, cached_sheet, row, 6, source_file, "教师级别（F列）")
         for field, item in evidence.items():
             if item.state in {CellValueState.MISSING_CACHE, CellValueState.EXTERNAL_REFERENCE}:
                 cache_missing += 1
                 code = "EXTERNAL_REFERENCE_UNRESOLVED" if item.state is CellValueState.EXTERNAL_REFERENCE else "MISSING_CACHE"
                 result.warnings.append(AdapterIssue(code, "Formula value is not reliable without a cached value", sheet_name, field))
-            comment = sheet.cell(row, columns[PAYROLL_LABELS[field]]).comment
+            column = 6 if field == "teacher_level" else columns[PAYROLL_LABELS[field]]
+            comment = sheet.cell(row, column).comment
             if comment is not None:
-                result.comments.append(CommentRecord(source_file, sheet_name, sheet.cell(row, columns[PAYROLL_LABELS[field]]).coordinate, teacher, field, comment.text, comment.author))
+                result.comments.append(CommentRecord(source_file, sheet_name, sheet.cell(row, column).coordinate, teacher, field, comment.text, comment.author))
         result.records.append(
             PayrollRecord(
                 period=period,
                 teacher=teacher,
                 one_to_one=as_float(evidence["one_to_one"].normalized_value),
                 class_value=as_float(evidence["class_value"].normalized_value),
+                teaching_hours=as_float(evidence["teaching_hours"].normalized_value),
+                teacher_level=str(evidence["teacher_level"].normalized_value or "").strip(),
                 ae=as_float(evidence["ae"].normalized_value),
                 af=as_float(evidence["af"].normalized_value),
                 av=as_float(evidence["av"].normalized_value),

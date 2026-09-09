@@ -32,6 +32,8 @@ class PayrollRecord:
     one_to_one: Optional[float] = None
     class_value: Optional[float] = None
     production: Optional[float] = None
+    teaching_hours: Optional[float] = None
+    teacher_level: str = ""
     ae: Optional[float] = None
     af: Optional[float] = None
     av: Optional[float] = None

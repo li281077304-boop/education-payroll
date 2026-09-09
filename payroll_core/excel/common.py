@@ -8,6 +8,7 @@ from ..models.evidence import CellValueState, SourceEvidence
 
 CLASS_TYPE_MAP = {"一对一": "1对1", "1对1": "1对1", "集体班": "小班", "一对多": "1对2", "10人班": "小班", "6人班": "小班", "8人班": "小班"}
 GRADE_MAP = {"初一": "七年级", "初二": "八年级", "初三": "九年级"}
+BRIDGE_GRADE_MAP = {"小升初": "六年级", "小初衔接": "六年级", "初升高": "九年级", "七升八": "七年级", "八升九": "八年级", "幼小衔接": "一年级"}
 GRADE_TOKENS = ("高三", "高二", "高一", "初三", "初二", "初一", "九年级", "八年级", "七年级", "六年级", "五年级", "四年级", "三年级", "二年级", "一年级", "雅思", "托福")
 
 
@@ -83,6 +84,9 @@ def grade_from_class_name(value: Any) -> str:
     text = "" if value is None else str(value)
     if "领航" in text:
         return "领航伴学"
+    for keyword, grade in BRIDGE_GRADE_MAP.items():
+        if keyword in text:
+            return grade
     for token in GRADE_TOKENS:
         if token in text:
             return GRADE_MAP.get(token, token)
