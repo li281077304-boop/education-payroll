@@ -64,6 +64,7 @@ def audit_payroll_formulas(path: str | Path, fields: dict[str, str] | None = Non
                     if "#REF!" in value.upper() or "#VALUE!" in value.upper():
                         status, evidence, severity = "FORMULA_REGION_BREAK", "公式含有明确错误引用或错误值。", "CRITICAL"
                     elif actual == expected:
+                        output.append(FormulaAuditResult(str(path), sheet.title, cell.coordinate, field, value, actual, expected, "FORMULA_MATCH", "公式结构与同列多数教师一致。", "INFO"))
                         continue
                     else:
                         references = CELL.findall(value.upper())

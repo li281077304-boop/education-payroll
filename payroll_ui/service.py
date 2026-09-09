@@ -389,7 +389,7 @@ class PayrollService:
                 state = "已核对" if rows and all(row.status == "RATE_MATCH" for row in rows) else "待处理"
                 note = "使用独立星级与生效期档位金额规则计算 AE。" if state == "已核对" else "缺少规则、规则冲突或金额不一致会阻止通过。"
             elif field == "formula":
-                state = "已核对" if rows and all(row.status == "MATCH" for row in rows) else "待处理"
+                state = "已核对" if rows and all(row.status == "FORMULA_MATCH" for row in rows) else "待处理"
                 note = "关键公式区域按同列结构模式扫描。" if state == "已核对" else "尚无足够公式样本，或已发现公式结构异常。"
             else:
                 state, note = "仅读取 / 待人工确认", "总工资包含续费、退费、激励、管理奖等未接入来源。"
