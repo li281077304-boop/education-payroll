@@ -4,11 +4,11 @@ from openpyxl import Workbook
 
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.models.records import PayrollRecord
-from payroll_core.rules.authority import TeacherRating, default_compensation_bands, rating_and_rate_checks
+from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
 
 
-def row(name: str, level: str, hours: float, ae: float) -> PayrollRecord:
-    return PayrollRecord(period="2026-08", teacher=name, teacher_level=level, teaching_hours=hours, ae=ae)
+def row(name: str, level: str, hours: float, ae: float, af: float | None = None) -> PayrollRecord:
+    return PayrollRecord(period="2026-08", teacher=name, teacher_level=level, teaching_hours=hours, ae=ae, af=af)
 
 
 def test_wrong_teacher_rating_is_detected():
@@ -65,3 +65,23 @@ def test_october_requires_new_rating_confirmation():
     old = TeacherRating("张三", 4, effective_from="2025-10", effective_to="2026-09")
     checks = rating_and_rate_checks([row("张三", "四星", 70, 42)], [old], default_compensation_bands(), "2026-10")
     assert next(item for item in checks if item.field == "rating").status == "MISSING_AUTHORITY"
+
+
+def test_same_trmt_identity_can_have_different_obligation_hour_policy():
+    bands = default_compensation_bands()
+    profiles = [
+        TeacherCompensationProfile("教师甲", "TRMT", 4, special_approval="保留四星待遇", obligation_hours=30, obligation_hours_deduction_enabled=True, effective_from="2025-10", effective_to="2026-09"),
+        TeacherCompensationProfile("教师乙", "TRMT", 2, obligation_hours=30, obligation_hours_deduction_enabled=False, effective_from="2025-10", effective_to="2026-09"),
+    ]
+    # 70 小时、四星对应 42；扣 30 小时后为 40*42。二星对应 32 且不扣。
+    payroll = [row("教师甲", "TRMT 四星", 70, 42, 1680), row("教师乙", "TRMT 二星", 70, 32, 2240)]
+    checks = policy_fee_checks(payroll, profiles, bands, "2026-08")
+    assert {item.teacher: item.status for item in checks} == {"教师甲": "AF_POLICY_MATCH", "教师乙": "AF_POLICY_MATCH"}
+
+
+def test_profile_special_approval_is_not_inferred_from_trmt_text():
+    profile = TeacherCompensationProfile("教师甲", "TRMT", 4, rating_override=4, special_approval="书面特批", obligation_hours=30, obligation_hours_deduction_enabled=True, effective_from="2025-10", effective_to="2026-09")
+    payroll = [row("教师甲", "TRMT 四星", 70, 42, 2940)]
+    check = policy_fee_checks(payroll, [profile], default_compensation_bands(), "2026-08")[0]
+    assert check.status == "AF_POLICY_MISMATCH"
+    assert "义务课时：30" in check.reason
