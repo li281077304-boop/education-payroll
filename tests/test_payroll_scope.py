@@ -34,3 +34,19 @@ def test_ae_af_are_formula_rechecks_and_av_is_read_only():
 def test_missing_independent_star_source_is_manual_not_verified():
     payroll = PayrollRecord("2026-08", "张三", teaching_hours=80, teacher_level="TR", ae=32, af=1600)
     assert {item.status for item in rate_and_fee_checks([payroll])} == {"NEEDS_MANUAL_REVIEW"}
+
+
+def test_ae_is_zero_when_ad_below_obligation_threshold():
+    payroll = PayrollRecord("2026-08", "张三", teaching_hours=29.9, teacher_level="TR 三星", ae=0, af=0)
+    checks = {item.field: item for item in rate_and_fee_checks([payroll])}
+    assert checks["ae"].expected == 0
+    assert checks["af"].expected == 0
+
+
+def test_ae_obligation_threshold_boundaries():
+    at = PayrollRecord("2026-08", "张三", teaching_hours=30, teacher_level="TR 三星", ae=0, af=0)
+    above = PayrollRecord("2026-08", "张三", teaching_hours=30.1, teacher_level="TR 三星", ae=35, af=3.5)
+    at_checks = {item.field: item for item in rate_and_fee_checks([at])}
+    above_checks = {item.field: item for item in rate_and_fee_checks([above])}
+    assert at_checks["ae"].expected == 0
+    assert above_checks["ae"].expected == 35

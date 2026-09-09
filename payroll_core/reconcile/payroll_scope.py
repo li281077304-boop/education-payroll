@@ -113,10 +113,10 @@ def rate_and_fee_checks(payroll: Iterable[PayrollRecord], tolerance: float = 1e-
         if star is None:
             checks.extend((FieldCheck(row.teacher, "ae", None, row.ae, "NEEDS_MANUAL_REVIEW", "教师星级未有独立权威来源，不能确认 AE。"), FieldCheck(row.teacher, "af", None, row.af, "NEEDS_MANUAL_REVIEW", "教师星级未有独立权威来源，不能确认 AF。")))
             continue
-        expected_ae = _tier(row.teaching_hours) + STAR_BONUS[star]
+        expected_ae = 0.0 if row.teaching_hours <= 30 else _tier(row.teaching_hours) + STAR_BONUS[star]
         ae_status = "FORMULA_MATCH" if row.ae is not None and isclose(expected_ae, row.ae, abs_tol=tolerance) else "FORMULA_DIFFERENCE"
         checks.append(FieldCheck(row.teacher, "ae", expected_ae, row.ae, ae_status, "按 AD 与本表 F 列星级复算；星级尚未由独立权威表确认。"))
-        expected_af = row.teaching_hours * expected_ae if "TRMT" in row.teacher_level.upper() else (row.teaching_hours - 30) * expected_ae
+        expected_af = max(0.0, row.teaching_hours - 30) * expected_ae
         af_status = "FORMULA_MATCH" if row.af is not None and isclose(expected_af, row.af, abs_tol=tolerance) else "FORMULA_DIFFERENCE"
         checks.append(FieldCheck(row.teacher, "af", expected_af, row.af, af_status, "按 AD、AE 与身份规则复算；输入来源尚未独立确认。"))
     return checks

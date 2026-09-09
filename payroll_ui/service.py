@@ -15,7 +15,7 @@ from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
-from payroll_core.reconcile.payroll_scope import FieldCheck, rate_and_fee_checks, schedule_field_checks, total_salary_read_checks
+from payroll_core.reconcile.payroll_scope import FieldCheck, schedule_field_checks, total_salary_read_checks
 
 from .storage import RunStore
 
@@ -208,7 +208,7 @@ class PayrollService:
                 FieldCheck(teacher, "one_to_one", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
                 FieldCheck(teacher, "class_value", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
             ))
-        checks += rate_and_fee_checks(payroll) + total_salary_read_checks(payroll)
+        checks += total_salary_read_checks(payroll)
         rating_version = self._rating_version_for_run(run)
         ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"], allow_blank_payroll_rating=item.get("allow_blank_payroll_rating", False)) for item in rating_version.get("ratings", [])] if rating_version else []
         checks += rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
@@ -224,6 +224,7 @@ class PayrollService:
         visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY"}]
         run["issues"] = self._annotate_decisions([self._issue(check) for check in visible_checks], run["decisions"])
         run["issues"].sort(key=lambda item: (item["severity_rank"], item["title"], item["teacher"]))
+        run["issue_groups"] = self._group_issues(run["issues"])
         run["field_status"] = self._field_status(checks)
         run["summary"] = self._summary(checks)
         run["status"] = "PASS" if run["summary"]["full_scope_complete"] else "REVIEW_REQUIRED"
@@ -471,6 +472,19 @@ class PayrollService:
             "severity_label": severity[1],
             **asdict(item),
         }
+
+    @staticmethod
+    def _group_issues(issues: list[dict]) -> list[dict]:
+        """Keep field-level audits, while exposing one business cause card."""
+        grouped: dict[tuple[str, str], list[dict]] = {}
+        for issue in issues:
+            cause = "compensation" if issue["field"] in {"rate", "af_policy"} else issue["field"]
+            grouped.setdefault((issue["teacher"], cause), []).append(issue)
+        output = []
+        for (teacher, cause), rows in grouped.items():
+            main = next((row for row in rows if row["field"] == "rate"), rows[0])
+            output.append({"id": main["id"], "teacher": teacher, "title": "档位与课时费依据需要处理" if cause == "compensation" else main["title"], "fields": [row["field_label"] for row in rows], "count": len(rows), "severity_rank": min(row["severity_rank"] for row in rows), "severity_label": main["severity_label"], "expected": main["expected"], "actual": main["actual"], "difference": main["difference"]})
+        return sorted(output, key=lambda item: (item["severity_rank"], item["title"], item["teacher"]))
 
     @staticmethod
     def _annotate_decisions(issues: list[dict], decisions: list[dict]) -> list[dict]:
