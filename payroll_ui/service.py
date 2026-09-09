@@ -4,7 +4,7 @@ import csv
 import hashlib
 import io
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -185,7 +185,13 @@ class PayrollService:
         payroll = [*reads["math"].records, *reads["science"].records]
         if {row.teacher for row in reads["math"].records} & {row.teacher for row in reads["science"].records}:
             raise ValueError("两张工资表含有重复教师，请确认分组后再核对。")
-        checks = schedule_field_checks(reads["schedule"].records, payroll)
+        # A source export can cover the whole campus.  The active payroll
+        # targets define this run's population; teachers outside that target
+        # set are out of scope, not missing payroll recipients.
+        target_teachers = {row.teacher for row in payroll}
+        resolved_schedule = self._apply_schedule_grade_resolutions(reads["schedule"].records, run)
+        scoped_schedule = [row for row in resolved_schedule if row.teacher in target_teachers]
+        checks = schedule_field_checks(scoped_schedule, payroll)
         checks += rate_and_fee_checks(payroll) + total_salary_read_checks(payroll)
         rating_version = self._rating_version_for_run(run)
         ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"]) for item in rating_version.get("ratings", [])] if rating_version else []
@@ -216,6 +222,28 @@ class PayrollService:
             run["rating_version_id"] = matches[0]["id"]
             return matches[0]
         return None
+
+    @staticmethod
+    def _apply_schedule_grade_resolutions(records: list, run: dict) -> list:
+        """Apply run-bound, source-cited grade facts without changing the source workbook.
+
+        A resolution is keyed to the original worksheet cell that supplied the
+        class name.  It remains tied to the imported schedule hash through the
+        run's ordinary stale-file gate.
+        """
+        resolutions = {
+            str(item.get("class_name_cell", "")): str(item.get("grade", "")).strip()
+            for item in run.get("schedule_grade_resolutions", [])
+            if str(item.get("class_name_cell", "")).strip() and str(item.get("grade", "")).strip()
+        }
+        if not resolutions:
+            return records
+        return [
+            replace(record, grade=resolutions.get(record.provenance["class_name"].coordinate, record.grade))
+            if "class_name" in record.provenance and record.provenance["class_name"].coordinate in resolutions
+            else record
+            for record in records
+        ]
 
     def _policy_version_for_run(self, run: dict) -> dict | None:
         version_id = run.get("policy_version_id")

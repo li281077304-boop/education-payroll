@@ -7,6 +7,7 @@ cannot rewrite the basis of an earlier month.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isclose
 
 from ..models.records import PayrollRecord
 from ..reconcile.payroll_scope import FieldCheck, _star
@@ -137,6 +138,9 @@ def policy_fee_checks(payroll: list[PayrollRecord], profiles: list[TeacherCompen
         rate = matched[0].base_amount + matched[0].rating_bonus
         deductible = profile.obligation_hours if profile.obligation_hours_deduction_enabled else 0.0
         expected = (row.teaching_hours - deductible) * rate
-        status = "AF_POLICY_MATCH" if row.af == expected else "AF_POLICY_MISMATCH"
+        # Workbook cached values commonly round binary floating-point results
+        # to two decimals. A representation-only difference is not a payroll
+        # discrepancy.
+        status = "AF_POLICY_MATCH" if row.af is not None and isclose(row.af, expected, abs_tol=1e-6) else "AF_POLICY_MISMATCH"
         checks.append(FieldCheck(row.teacher, "af_policy", expected, row.af, status, f"身份：{profile.role}；义务课时：{deductible:g}；特殊审批：{profile.special_approval or '无'}。"))
     return checks

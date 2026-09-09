@@ -77,6 +77,20 @@ def test_ui_run_never_passes_when_ae_af_av_have_no_independent_authority(tmp_pat
     assert states["av"] == "仅读取 / 待人工确认"
 
 
+def test_ui_does_not_treat_other_subject_teachers_in_a_campus_schedule_export_as_missing_targets(tmp_path):
+    service, run, schedule = _prepared_run(tmp_path)
+    book = load_workbook(schedule)
+    sheet = book.active
+    sheet.append(["高一小班", "集体课程", "集体班", "测试校区", "2026-08-08 10:00~12:00", "2小时", "已上课", "无关教师", 2, 2, "学生丙", "01-数学", "线下课", "测试教室", "无关教师"])
+    book.save(schedule)
+    # Re-import records the revised source hash before checking it.
+    run = service.import_file(run["id"], "schedule", str(schedule))
+
+    result = service.check(run["id"])
+
+    assert not any(item["teacher"] == "无关教师" and item["status"] == "MISSING_TARGET" for item in result["issues"])
+
+
 def test_ui_marks_run_stale_when_original_file_changes(tmp_path):
     service, run, schedule = _prepared_run(tmp_path)
     with schedule.open("ab") as handle:

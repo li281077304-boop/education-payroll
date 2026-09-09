@@ -85,3 +85,10 @@ def test_profile_special_approval_is_not_inferred_from_trmt_text():
     check = policy_fee_checks(payroll, [profile], default_compensation_bands(), "2026-08")[0]
     assert check.status == "AF_POLICY_MISMATCH"
     assert "义务课时：30" in check.reason
+
+
+def test_policy_fee_ignores_binary_float_representation_noise():
+    profile = TeacherCompensationProfile("教师甲", "教师", 6, obligation_hours=30, obligation_hours_deduction_enabled=True, effective_from="2025-10", effective_to="2026-09")
+    payroll = [row("教师甲", "六星", 178.55, 58, 8615.9)]
+
+    assert policy_fee_checks(payroll, [profile], default_compensation_bands(), "2026-08")[0].status == "AF_POLICY_MATCH"
