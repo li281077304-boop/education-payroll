@@ -243,3 +243,14 @@ def test_browser_shell_uses_plain_language_for_core_workflow():
         assert technical_word not in source
     for plain_label in ("材料准备", "核对结果", "待处理问题", "管理岗位确认", "排课项目完成度"):
         assert plain_label in source
+
+
+def test_run_binds_effective_rating_version_and_reports_a_rating_mismatch(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    versions = service.save_rating_version("2025-10", "2026-09", "脱敏年度星级评定", "2025-10", [{"teacher": "张三", "rating": 4}])
+    assert len(versions) == 1
+    run = service.create("2026-08")
+    assert run["rating_version_id"] == versions[0]["id"]
+    # A later annual version must not replace the historical binding.
+    service.save_rating_version("2026-10", "2027-09", "脱敏年度星级评定", "2026-10", [{"teacher": "张三", "rating": 3}])
+    assert service.get(run["id"])["rating_version_id"] == versions[0]["id"]
