@@ -268,3 +268,27 @@ def test_run_binds_effective_rating_version_and_reports_a_rating_mismatch(tmp_pa
     # A later annual version must not replace the historical binding.
     service.save_rating_version("2026-10", "2027-09", "脱敏年度星级评定", "2026-10", [{"teacher": "张三", "rating": 3}])
     assert service.get(run["id"])["rating_version_id"] == versions[0]["id"]
+
+
+def test_blank_rating_policy_is_saved_with_the_rating_version(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    version = service.save_rating_version(
+        "2025-10",
+        "2026-09",
+        "脱敏兼职政策",
+        "2025-10",
+        [{"teacher": "教师甲", "rating": 1, "role": "兼职MT", "allow_blank_payroll_rating": True}],
+    )[0]
+
+    assert version["ratings"][0]["allow_blank_payroll_rating"] is True
+
+
+def test_replacing_schedule_clears_coordinate_bound_grade_resolutions(tmp_path):
+    service, run, schedule = _prepared_run(tmp_path)
+    stored = service.store.get(run["id"])
+    stored["schedule_grade_resolutions"] = [{"class_name_cell": "A2", "grade": "高三"}]
+    service.store.save(stored)
+
+    service.import_file(run["id"], "schedule", str(schedule))
+
+    assert "schedule_grade_resolutions" not in service.store.get(run["id"])

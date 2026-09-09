@@ -93,7 +93,12 @@ class PayrollService:
             name, rating = str(item.get("teacher", "")).strip(), item.get("rating")
             if not name or not isinstance(rating, int) or rating not in range(1, 7):
                 raise ValueError("星级资料必须包含教师姓名和一至六星。")
-            cleaned.append({"teacher": name, "rating": rating, "role": str(item.get("role", "教师")).strip() or "教师"})
+            cleaned.append({
+                "teacher": name,
+                "rating": rating,
+                "role": str(item.get("role", "教师")).strip() or "教师",
+                "allow_blank_payroll_rating": bool(item.get("allow_blank_payroll_rating", False)),
+            })
         version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "source_version": source_version.strip() or effective_from, "ratings": cleaned, "created_at": datetime.now(timezone.utc).isoformat()}
         self.store.save_rating_version(version)
         return self.rating_versions()
@@ -148,6 +153,10 @@ class PayrollService:
         if not unchanged:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
         run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets), "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets), "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets)}
+        if role == "schedule":
+            # Grade resolutions are bound to coordinates in the imported
+            # schedule workbook. Replacing that source invalidates them.
+            run.pop("schedule_grade_resolutions", None)
         run["issues"], run["decisions"] = [], []
         run.pop("last_error", None)
         run.pop("stale_files", None)
@@ -194,7 +203,7 @@ class PayrollService:
         checks = schedule_field_checks(scoped_schedule, payroll)
         checks += rate_and_fee_checks(payroll) + total_salary_read_checks(payroll)
         rating_version = self._rating_version_for_run(run)
-        ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"]) for item in rating_version.get("ratings", [])] if rating_version else []
+        ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"], allow_blank_payroll_rating=item.get("allow_blank_payroll_rating", False)) for item in rating_version.get("ratings", [])] if rating_version else []
         checks += rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
         policy_version = self._policy_version_for_run(run)
         profiles = [TeacherCompensationProfile(item["teacher"], item["role"], item.get("rating"), item.get("rating_override"), item.get("special_approval", ""), item.get("obligation_hours", 0), item.get("obligation_hours_deduction_enabled", False), policy_version["effective_from"], policy_version["effective_to"], policy_version["source"], item.get("note", "")) for item in policy_version.get("profiles", [])] if policy_version else []
@@ -284,7 +293,10 @@ class PayrollService:
             raise ValueError("未找到问题。")
         if issue["field"] not in {"one_to_one", "class_value"}:
             return {"issue": issue, "evidence": [], "note": "该项当前没有独立课程级来源。"}
-        schedule = self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"]).records
+        schedule = self._apply_schedule_grade_resolutions(
+            self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"]).records,
+            run,
+        )
         payroll = [*self._read("math", Path(run["files"]["math"]["path"]), run["period"]).records, *self._read("science", Path(run["files"]["science"]["path"]), run["period"]).records]
         lines = [{"来源": "原始排课", "来源文件": Path(next(iter(item.provenance.values())).source_file).name, "来源工作表": next(iter(item.provenance.values())).sheet, "课程时间": item.lesson_time, "班级": item.class_name, "班型": item.class_type, "年级": item.grade or "待确认", "实到": item.attended, "来源位置": ", ".join(value.coordinate for name, value in item.provenance.items() if name != "student")} for item in schedule if item.teacher == issue["teacher"]]
         target = next((item for item in payroll if item.teacher == issue["teacher"]), None)
