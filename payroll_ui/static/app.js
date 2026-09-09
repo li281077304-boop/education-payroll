@@ -176,8 +176,8 @@ function fieldRow(field) {
 }
 
 function issuesPage() {
-  const rows = filteredIssues();
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">严重问题排在前面。已记录的意见仍会保留，便于复查。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label>项目<select id="filter-field" onchange="updateFilters()"><option value="all">全部项目</option><option value="one_to_one">AA 一对一</option><option value="class_value">AC 班课</option><option value="ae">AE 课时单价</option><option value="af">AF 总课时费</option></select></label><label>问题状态<select id="filter-state" onchange="updateFilters()"><option value="all">全部状态</option><option value="blocking">需要处理</option><option value="confirmed">已确认</option></select></label><label>处理意见<select id="filter-decision" onchange="updateFilters()"><option value="all">全部</option><option value="none">尚未记录</option><option value="recorded">已记录意见</option></select></label><label>教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div><div class="result-count">显示 ${rows.length} / ${current.issues.length} 项</div>${rows.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>项目</th><th>教师</th><th>排课计算值</th><th>工资表值</th><th>差异</th><th>状态</th><th>处理意见</th><th></th></tr></thead><tbody>${rows.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>'}<div id="issue-detail"></div></section>`;
+  const rows = (current.issue_groups || current.issues).filter(issue => !filters.teacher || issue.teacher.includes(filters.teacher.trim()));
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">同一工资依据造成的连带字段会合并为一个业务问题。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label>教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div><div class="result-count">显示 ${rows.length} 个业务问题（字段核查记录 ${current.issues.length} 项）</div>${rows.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>问题</th><th>教师</th><th>影响字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th></th></tr></thead><tbody>${rows.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>'}<div id="issue-detail"></div></section>`;
 }
 
 function filteredIssues() {
@@ -193,7 +193,7 @@ function filteredIssues() {
 
 function issueRow(issue) {
   const severity = issue.severity_rank <= 1 ? "bad" : issue.severity_rank === 2 ? "warn" : "ok";
-  return `<tr><td><span class="${severity}">${escapeHtml(issue.severity_label)}</span></td><td>${escapeHtml(issue.field_label)}</td><td>${escapeHtml(issue.teacher)}</td><td>${issue.expected ?? "—"}</td><td>${issue.actual ?? "—"}</td><td>${issue.difference ?? "—"}</td><td>${escapeHtml(issue.status_label)}</td><td>${escapeHtml(issue.decision_label)}</td><td><button class="quiet" onclick="evidence('${issue.id}')">查看明细</button></td></tr>`;
+  return `<tr><td><span class="${severity}">${escapeHtml(issue.severity_label)}</span></td><td>${escapeHtml(issue.title)}</td><td>${escapeHtml(issue.teacher)}</td><td>${escapeHtml((issue.fields || [issue.field_label]).join("、"))}</td><td>${issue.expected ?? "—"}</td><td>${issue.actual ?? "—"}</td><td>${issue.difference ?? "—"}</td><td><button class="quiet" onclick="evidence('${issue.id}')">查看明细</button></td></tr>`;
 }
 
 function updateFilters() {
