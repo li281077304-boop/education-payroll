@@ -19,9 +19,10 @@ from payroll_core.reconcile.payroll_scope import FieldCheck, rate_and_fee_checks
 
 from .storage import RunStore
 
-REQUIRED = ("schedule", "math", "science")
-LABELS = {"schedule": "原始排课数据", "math": "数学组工资表", "science": "理化组工资表", "check": "最终工资核对表"}
-LAYOUTS = {"schedule": "SCHEDULE_EXPORT_V1", "math": "PAYROLL_SHEET_V1", "science": "PAYROLL_SHEET_V1", "check": "PAYROLL_CHECK_V1"}
+REQUIRED = ("schedule",)
+SCOPE_ROLES = ("math", "science")
+LABELS = {"schedule": "原始排课数据", "math": "数学组提交表", "science": "理化组提交表", "baseline": "基准最终工资表", "check": "最终工资核对表"}
+LAYOUTS = {"schedule": "SCHEDULE_EXPORT_V1", "math": "PAYROLL_SHEET_V1", "science": "PAYROLL_SHEET_V1", "baseline": "PAYROLL_SHEET_V1", "check": "PAYROLL_CHECK_V1"}
 STATUS = {"DRAFT": "待导入", "FILES_READY": "材料已准备", "CHECKING": "正在核对", "REVIEW_REQUIRED": "需要复核", "STALE": "文件已变化", "PASS": "字段核对完成"}
 ISSUE_LABELS = {
     "MATCH": "一致",
@@ -160,7 +161,7 @@ class PayrollService:
         run["issues"], run["decisions"] = [], []
         run.pop("last_error", None)
         run.pop("stale_files", None)
-        run["status"] = "FILES_READY" if all(key in run["files"] for key in REQUIRED) else "DRAFT"
+        run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
         # Replacing one changed file must not silently clear changes in another.
         self._fresh(run)
         self.store.save(run)
@@ -168,7 +169,7 @@ class PayrollService:
 
     def check(self, run_id: str) -> dict:
         run = self._load(run_id)
-        missing = [LABELS[key] for key in REQUIRED if key not in run["files"]]
+        missing = self._missing_materials(run)
         if missing:
             raise ValueError("请先导入：" + "、".join(missing))
         self._require_fresh(run)
@@ -191,16 +192,22 @@ class PayrollService:
             raise ValueError("原文件在核对时发生变化，请重新导入。")
         if any(result.errors for result in reads.values()):
             raise ValueError("材料重新读取失败，请返回材料页重新选择。")
-        payroll = [*reads["math"].records, *reads["science"].records]
-        if {row.teacher for row in reads["math"].records} & {row.teacher for row in reads["science"].records}:
+        payroll, scope_teachers = self._payroll_records(reads)
+        math_teachers = {row.teacher for row in reads["math"].records} if "math" in reads else set()
+        science_teachers = {row.teacher for row in reads["science"].records} if "science" in reads else set()
+        if math_teachers & science_teachers:
             raise ValueError("两张工资表含有重复教师，请确认分组后再核对。")
         # A source export can cover the whole campus.  The active payroll
         # targets define this run's population; teachers outside that target
         # set are out of scope, not missing payroll recipients.
-        target_teachers = {row.teacher for row in payroll}
         resolved_schedule = self._apply_schedule_grade_resolutions(reads["schedule"].records, run)
-        scoped_schedule = [row for row in resolved_schedule if row.teacher in target_teachers]
+        scoped_schedule = [row for row in resolved_schedule if row.teacher in scope_teachers]
         checks = schedule_field_checks(scoped_schedule, payroll)
+        for teacher in sorted(scope_teachers - {row.teacher for row in payroll}):
+            checks.extend((
+                FieldCheck(teacher, "one_to_one", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
+                FieldCheck(teacher, "class_value", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
+            ))
         checks += rate_and_fee_checks(payroll) + total_salary_read_checks(payroll)
         rating_version = self._rating_version_for_run(run)
         ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"], allow_blank_payroll_rating=item.get("allow_blank_payroll_rating", False)) for item in rating_version.get("ratings", [])] if rating_version else []
@@ -208,9 +215,11 @@ class PayrollService:
         policy_version = self._policy_version_for_run(run)
         profiles = [TeacherCompensationProfile(item["teacher"], item["role"], item.get("rating"), item.get("rating_override"), item.get("special_approval", ""), item.get("obligation_hours", 0), item.get("obligation_hours_deduction_enabled", False), policy_version["effective_from"], policy_version["effective_to"], policy_version["source"], item.get("note", "")) for item in policy_version.get("profiles", [])] if policy_version else []
         checks += policy_fee_checks(payroll, profiles, default_compensation_bands(), run["period"])
-        for role in ("math", "science"):
-            for item in audit_payroll_formulas(run["files"][role]["path"]):
-                checks.append(FieldCheck("工作簿", "formula", None, None, item.status, f"{Path(item.workbook).name} / {item.sheet} / {item.cell}：{item.evidence} 正常模式：{item.expected_pattern or '待确认'}；当前公式：{item.formula or '空白/固定值'}。"))
+        for role in (("baseline",) if "baseline" in reads else tuple(role for role in SCOPE_ROLES if role in reads)):
+            audit_rows = payroll if role == "baseline" else reads[role].records
+            for item in self._formula_audit_for_scope(run["files"][role]["path"], audit_rows):
+                status, evidence = self._formula_status_with_policy(item, audit_rows, profiles)
+                checks.append(FieldCheck("工作簿", "formula", None, None, status, f"{Path(item.workbook).name} / {item.sheet} / {item.cell}：{evidence} 正常模式：{item.expected_pattern or '待确认'}；当前公式：{item.formula or '空白/固定值'}。"))
         checks = self._apply_decisions(checks, run["decisions"])
         visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY"}]
         run["issues"] = self._annotate_decisions([self._issue(check) for check in visible_checks], run["decisions"])
@@ -231,6 +240,65 @@ class PayrollService:
             run["rating_version_id"] = matches[0]["id"]
             return matches[0]
         return None
+
+    @staticmethod
+    def _payroll_records(reads: dict) -> tuple[list, set[str]]:
+        submissions = [
+            row
+            for role in SCOPE_ROLES
+            for row in (reads[role].records if role in reads else [])
+        ]
+        scope_teachers = {row.teacher for row in submissions}
+        if "baseline" not in reads:
+            return submissions, scope_teachers
+        return [row for row in reads["baseline"].records if row.teacher in scope_teachers], scope_teachers
+
+    @staticmethod
+    def _formula_audit_for_scope(path: str, payroll: list) -> list:
+        """Keep final-workbook structural checks within this group leader's scope.
+
+        A base payroll workbook can contain teachers a group leader did not
+        submit.  Those rows are useful as formula context, but must not become
+        issues in the group's own run.
+        """
+        cells = {
+            (item.provenance[field].sheet, item.provenance[field].coordinate)
+            for item in payroll
+            for field in ("ae", "af")
+            if field in item.provenance
+        }
+        return [item for item in audit_payroll_formulas(path) if (item.sheet, item.cell) in cells]
+
+    @staticmethod
+    def _formula_status_with_policy(item: Any, payroll: list, profiles: list[TeacherCompensationProfile]) -> tuple[str, str]:
+        """Recognize an intentional AF formula only when a dated policy proves it.
+
+        A no-deduction teacher legitimately uses ``AD * AE`` rather than the
+        usual ``(AD - obligation) * AE``.  This is not a blanket exception for
+        a role: it requires that teacher's bound compensation profile.
+        """
+        if item.status != "FORMULA_PATTERN_MISMATCH" or item.field != "AF 总课时费":
+            return item.status, item.evidence
+        record_by_cell = {
+            (record.provenance["af"].sheet, record.provenance["af"].coordinate): record
+            for record in payroll if "af" in record.provenance
+        }
+        record = record_by_cell.get((item.sheet, item.cell))
+        profile = next((profile for profile in profiles if record and profile.teacher == record.teacher), None)
+        if profile and not profile.obligation_hours_deduction_enabled and item.normalized_formula == "=AD{row}*AE{row}":
+            return "FORMULA_MATCH", "该教师的有效工资政策明确不扣义务课时，公式结构与个人政策一致。"
+        return item.status, item.evidence
+
+    @staticmethod
+    def _missing_materials(run: dict) -> list[str]:
+        missing = [LABELS[key] for key in REQUIRED if key not in run["files"]]
+        if not any(key in run["files"] for key in SCOPE_ROLES):
+            missing.append("至少一张教师提交表")
+        return missing
+
+    @classmethod
+    def _materials_ready(cls, run: dict) -> bool:
+        return not cls._missing_materials(run)
 
     @staticmethod
     def _apply_schedule_grade_resolutions(records: list, run: dict) -> list:
@@ -297,7 +365,12 @@ class PayrollService:
             self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"]).records,
             run,
         )
-        payroll = [*self._read("math", Path(run["files"]["math"]["path"]), run["period"]).records, *self._read("science", Path(run["files"]["science"]["path"]), run["period"]).records]
+        reads = {
+            role: self._read(role, Path(item["path"]), run["period"])
+            for role, item in run["files"].items()
+            if role in {"math", "science", "baseline"}
+        }
+        payroll, _ = self._payroll_records(reads)
         lines = [{"来源": "原始排课", "来源文件": Path(next(iter(item.provenance.values())).source_file).name, "来源工作表": next(iter(item.provenance.values())).sheet, "课程时间": item.lesson_time, "班级": item.class_name, "班型": item.class_type, "年级": item.grade or "待确认", "实到": item.attended, "来源位置": ", ".join(value.coordinate for name, value in item.provenance.items() if name != "student")} for item in schedule if item.teacher == issue["teacher"]]
         target = next((item for item in payroll if item.teacher == issue["teacher"]), None)
         if target:
@@ -360,7 +433,7 @@ class PayrollService:
 
     @staticmethod
     def _read(role: str, path: Path, period: str):
-        return {"schedule": read_schedule_excel, "math": read_payroll_excel, "science": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
+        return {"schedule": read_schedule_excel, "math": read_payroll_excel, "science": read_payroll_excel, "baseline": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
 
     @staticmethod
     def _issue(item: FieldCheck) -> dict:
@@ -511,7 +584,7 @@ class PayrollService:
 
     @staticmethod
     def render(run: dict) -> dict:
-        required = [LABELS[key] for key in REQUIRED if key not in run["files"]]
+        required = PayrollService._missing_materials(run)
         summary = run.get("summary", PayrollService._summary([]))
         status_label = STATUS[run["status"]]
         if run["status"] == "REVIEW_REQUIRED":
@@ -520,7 +593,7 @@ class PayrollService:
         for role, label in LABELS.items():
             item = run.get("files", {}).get(role)
             state = "失效" if role in run.get("stale_files", []) else "已准备" if item else "未导入"
-            materials.append({"role": role, "label": label, "required": role in REQUIRED, "state": state, "file": item})
+            materials.append({"role": role, "label": label, "required": role in REQUIRED or (role in SCOPE_ROLES and not any(key in run.get("files", {}) for key in SCOPE_ROLES)), "state": state, "file": item})
         return {
             **run,
             "status_label": status_label,
@@ -528,7 +601,7 @@ class PayrollService:
             "health": {
                 "ready": not required and run["status"] != "STALE",
                 "missing": required,
-                "readiness": round((len([key for key in REQUIRED if key in run["files"]]) / len(REQUIRED)) * 100),
+                "readiness": round(100 * (int("schedule" in run["files"]) + int(any(key in run["files"] for key in SCOPE_ROLES))) / 2),
                 "warnings": [message for item in run.get("files", {}).values() for message in item.get("warning_messages", [])],
             },
         }

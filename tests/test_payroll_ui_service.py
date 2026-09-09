@@ -283,6 +283,76 @@ def test_blank_rating_policy_is_saved_with_the_rating_version(tmp_path):
     assert version["ratings"][0]["allow_blank_payroll_rating"] is True
 
 
+def test_baseline_final_payroll_values_are_checked_only_for_submitted_teachers(tmp_path):
+    service, run, schedule, math, science = _prepared_run_with_values(tmp_path, one_to_one=1.2, class_value=2.16)
+    baseline = tmp_path / "baseline.xlsx"
+    copyfile(FIXTURES / "fake_payroll.xlsx", baseline)
+    book = load_workbook(baseline)
+    book.active["AA5"] = 1.8
+    book.active["AC6"] = 2.16
+    book.save(baseline)
+    service.import_file(run["id"], "baseline", str(baseline))
+
+    checked = service.check(run["id"])
+
+    assert not any(item["field"] == "one_to_one" and item["teacher"] == "张三" for item in checked["issues"])
+    assert {item["teacher"] for item in checked["issues"] if item["field"] in {"one_to_one", "class_value"}} <= {"张三", "李四"}
+
+
+def test_one_submission_sheet_is_enough_to_start_a_group_run(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    schedule = tmp_path / "schedule.xlsx"; copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    math = tmp_path / "math.xlsx"; _payroll_with_only(math, 5)
+    run = service.create("2026-08")
+    service.import_file(run["id"], "schedule", str(schedule))
+    ready = service.import_file(run["id"], "math", str(math))
+
+    assert ready["status"] == "FILES_READY"
+    assert ready["health"]["ready"] is True
+
+
+def test_baseline_formula_issues_outside_submitted_scope_are_not_group_issues(tmp_path):
+    service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=1.8, class_value=2.16)
+    baseline = tmp_path / "baseline.xlsx"
+    copyfile(FIXTURES / "fake_payroll.xlsx", baseline)
+    book = load_workbook(baseline)
+    sheet = book.active
+    sheet["A7"] = "范围外教师"
+    for col in ("AA", "AC", "AD", "AE", "AV"):
+        sheet[f"{col}7"] = 1
+    sheet["AF7"] = 100  # an intentional formula anomaly outside this group run
+    book.save(baseline)
+    service.import_file(run["id"], "baseline", str(baseline))
+
+    checked = service.check(run["id"])
+
+    assert not any(item["field"] == "formula" for item in checked["issues"])
+
+
+def test_no_deduction_profile_allows_the_matching_af_formula_exception(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    schedule = tmp_path / "schedule.xlsx"; copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    math = tmp_path / "math.xlsx"; _payroll_with_only(math, 5)
+    run = service.create("2026-08")
+    service.import_file(run["id"], "schedule", str(schedule))
+    service.import_file(run["id"], "math", str(math))
+    baseline = tmp_path / "baseline.xlsx"; copyfile(FIXTURES / "fake_payroll.xlsx", baseline)
+    book = load_workbook(baseline); book.active["AF6"] = "=(AD6-30)*AE6"; book.save(baseline)
+    service.import_file(run["id"], "baseline", str(baseline))
+    policy = service.save_policy_version(
+        "2025-10", "2026-09", "脱敏例外政策", [{
+            "teacher": "张三", "role": "兼职MT", "rating": 1,
+            "obligation_hours": 30, "obligation_hours_deduction_enabled": False,
+            "special_approval": "不扣义务课时",
+        }],
+    )[0]
+    stored = service.store.get(run["id"]); stored["policy_version_id"] = policy["id"]; service.store.save(stored)
+
+    checked = service.check(run["id"])
+
+    assert not any(item["field"] == "formula" and item["status"] == "FORMULA_PATTERN_MISMATCH" for item in checked["issues"])
+
+
 def test_replacing_schedule_clears_coordinate_bound_grade_resolutions(tmp_path):
     service, run, schedule = _prepared_run(tmp_path)
     stored = service.store.get(run["id"])

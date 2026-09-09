@@ -6,8 +6,9 @@ let filters = { field: "all", state: "all", decision: "all", teacher: "" };
 
 const roleCopy = {
   schedule: ["原始排课数据", "选择原始排课表", "用于重新计算一对一和班课"],
-  math: ["数学组工资表", "选择数学组工资表", "读取数学组填报结果"],
-  science: ["理化组工资表", "选择理化组工资表", "读取理化组填报结果"],
+  math: ["数学组提交表（任选）", "选择数学组提交表", "确定本次需要核验的教师"],
+  science: ["理化组提交表（任选）", "选择理化组提交表", "确定本次需要核验的教师"],
+  baseline: ["基准最终工资表（可选）", "选择基准最终工资表", "作为实际工资值和公式核验的依据"],
   check: ["最终工资核对表（可选）", "选择最终核对表", "仅作辅助查看，不作为排课依据"],
 };
 const $ = (selector) => document.querySelector(selector);
@@ -51,7 +52,7 @@ async function home() {
     current = null;
     const today = new Date();
     const defaultPeriod = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，按提示依次导入三份必需材料。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="ratingDashboard()">教师星级与档位</button><button class="secondary full" onclick="policyDashboard()">教师工资政策档案</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，导入排课数据和本次提交表；如有基准最终工资表，系统以它作为工资结果依据。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="ratingDashboard()">教师星级与档位</button><button class="secondary full" onclick="policyDashboard()">教师工资政策档案</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -151,7 +152,7 @@ function renderTab() {
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">三份必需材料准备好后即可开始核对。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : "必需材料已准备，可以开始核对。"}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button><button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button></div></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">排课数据和提交表齐全即可开始。导入基准最终工资表后，系统会用它核验本次提交教师。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : "必需材料已准备，可以开始核对。"}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button><button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button></div></div></section>`;
 }
 
 function materialCard(material) {
