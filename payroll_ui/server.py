@@ -9,7 +9,6 @@ import json
 import mimetypes
 import secrets
 import subprocess
-import tempfile
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -96,6 +95,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return self._error("找不到该页面。", HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             return self._error(str(exc))
+        except OSError:
+            return self._error("文件无法读取。请关闭 Excel/WPS，确认文件仍在原位置后重试。")
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._authorized():
@@ -122,6 +123,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             return self._error(str(exc))
+        except OSError:
+            return self._error("文件无法读取。请关闭 Excel/WPS，确认文件仍在原位置后重试。")
 
     @staticmethod
     def _pick_excel() -> str | None:
@@ -136,8 +139,11 @@ class PayrollHandler(SimpleHTTPRequestHandler):
         path = Path(raw).expanduser().resolve()
         if not path.is_file():
             raise ValueError("找不到刚才选择的文件。")
-        result = inspect_workbook(path)
+        try:
+            result = inspect_workbook(path)
+        except OSError as exc:
+            raise ValueError("文件打不开。请关闭 Excel/WPS 后重试。") from exc
         if not result.records:
-            return {"recognized": False, "sheets": [], "missing": [issue.message for issue in result.errors]}
+            return {"recognized": False, "sheets": [], "missing": ["无法识别这张表，请确认选择了当前流程所需的 Excel 文件。"]}
         workbook = result.records[0]
         return {"recognized": not result.errors, "layout": workbook.fingerprint.layout, "sheets": [sheet.name for sheet in workbook.sheets], "missing": [issue.message for issue in result.errors], "warnings": [issue.message for issue in result.warnings]}
