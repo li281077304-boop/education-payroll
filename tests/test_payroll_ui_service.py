@@ -79,3 +79,20 @@ def test_loopback_ui_bootstrap_and_create_run(tmp_path):
         assert payload["period"] == "2026-08"
     finally:
         server.shutdown(); server.server_close(); worker.join()
+
+
+def test_ui_turns_interrupted_file_read_into_a_clear_message(tmp_path, monkeypatch):
+    schedule = tmp_path / "schedule.xlsx"; copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08")
+
+    def interrupted(_path):
+        raise InterruptedError(4, "Interrupted system call")
+
+    monkeypatch.setattr("payroll_ui.service.version", interrupted)
+    try:
+        service.import_file(run["id"], "schedule", str(schedule))
+    except ValueError as exc:
+        assert "磁盘工具" in str(exc)
+    else:
+        raise AssertionError("expected a user-visible file-read error")

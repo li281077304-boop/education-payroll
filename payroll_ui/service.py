@@ -16,6 +16,7 @@ from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.reconcile.payroll_scope import FieldCheck, rate_and_fee_checks, schedule_field_checks, total_salary_read_checks
 
 from .storage import RunStore
+from .audit_log import make_logger
 
 REQUIRED = ("schedule", "math", "science")
 LABELS = {"schedule": "原始排课数据", "math": "数学组工资表", "science": "理化组工资表", "check": "最终工资核对表"}
@@ -41,12 +42,14 @@ def safe_csv(value: Any) -> Any:
 class PayrollService:
     def __init__(self, root: Path):
         self.store = RunStore(root)
+        self.log = make_logger(root)
 
     def create(self, period: str) -> dict:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
             raise ValueError("请选择有效月份。")
         run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "decisions": [], "management": [], "field_status": self._field_status([]), "summary": self._summary([])}
         self.store.save(run)
+        self.log.info("run_created run=%s period=%s", run["id"], period)
         return self.render(run)
 
     def list(self) -> list[dict]:
@@ -61,27 +64,41 @@ class PayrollService:
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise ValueError("找不到原始文件。请关闭 Excel/WPS 后重新选择。")
-        before = version(source)
+        try:
+            before = version(source)
+        except OSError as exc:
+            self._raise_file_read_error(role, exc)
         if expected_hash and expected_hash != before["sha256"]:
             raise ValueError("所选原文件与刚才拖放识别的文件不一致。")
         run = self._load(run_id)
         if any(key != role and item["sha256"] == before["sha256"] for key, item in run["files"].items()):
             raise ValueError("同一份文件不能同时充当两个材料类别。")
-        inspection = inspect_workbook(source)
+        try:
+            inspection = inspect_workbook(source)
+        except OSError as exc:
+            self._raise_file_read_error(role, exc)
         if inspection.errors or not inspection.records:
             raise ValueError("无法识别这张表，请确认是完整的当前工资相关 Excel。")
         workbook = inspection.records[0]
         if workbook.fingerprint.layout != LAYOUTS[role]:
             raise ValueError(f"文件不属于“{LABELS[role]}”，请检查后重新选择。")
-        result = self._read(role, source, run["period"])
+        try:
+            result = self._read(role, source, run["period"])
+        except OSError as exc:
+            self._raise_file_read_error(role, exc)
         if result.errors:
             raise ValueError("文件缺少当前核对所需字段：" + "；".join(issue.message for issue in result.errors))
-        if version(source) != before:
+        try:
+            unchanged = version(source) == before
+        except OSError as exc:
+            self._raise_file_read_error(role, exc)
+        if not unchanged:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
         run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets), "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets), "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets)}
         run["issues"], run["decisions"] = [], []
         run["status"] = "FILES_READY" if all(key in run["files"] for key in REQUIRED) else "DRAFT"
         self.store.save(run)
+        self.log.info("file_imported run=%s role=%s records=%s", run_id, role, len(result.records))
         return self.render(run)
 
     def check(self, run_id: str) -> dict:
@@ -90,7 +107,10 @@ class PayrollService:
         if missing:
             raise ValueError("请先导入：" + "、".join(missing))
         run["status"] = "CHECKING"; self.store.save(run)
-        reads = {key: self._read(key, Path(item["path"]), run["period"]) for key, item in run["files"].items()}
+        try:
+            reads = {key: self._read(key, Path(item["path"]), run["period"]) for key, item in run["files"].items()}
+        except OSError as exc:
+            self._raise_file_read_error("核对材料", exc)
         if not self._fresh(run):
             raise ValueError("原文件在核对时发生变化，请重新导入。")
         if any(result.errors for result in reads.values()):
@@ -108,6 +128,7 @@ class PayrollService:
         # every displayed payroll field has an independent authority chain.
         run["status"] = "PASS" if run["summary"]["full_scope_complete"] else "REVIEW_REQUIRED"
         self.store.save(run)
+        self.log.info("reconciliation_completed run=%s aa_ac_checks=%s status=%s", run_id, run["summary"]["automatic_required"], run["status"])
         return self.render(run)
 
     def decide(self, run_id: str, issue_id: str, action: str, person: str, reason: str) -> dict:
@@ -122,6 +143,7 @@ class PayrollService:
             raise ValueError("只有已有明确系统值与工资表值的差异，才能记录为特殊情况。")
         run["decisions"] = [item for item in run["decisions"] if item["issue_id"] != issue_id] + [{"issue_id": issue_id, "action": action, "person": person.strip(), "reason": reason.strip(), "teacher": issue["teacher"], "field": issue["field"], "expected": issue["expected"], "actual": issue["actual"], "versions": {key: value["sha256"] for key, value in run["files"].items()}}]
         run["status"] = "REVIEW_REQUIRED"; self.store.save(run)
+        self.log.info("manual_decision_saved run=%s field=%s action=%s", run_id, issue["field"], action)
         return self.render(run)
 
     def evidence(self, run_id: str, issue_id: str) -> dict:
@@ -163,6 +185,7 @@ class PayrollService:
             for key, value in values.items() if key in allowed and str(value).strip()
         ]
         self.store.save(run)
+        self.log.info("management_confirmation_saved run=%s fields=%s", run_id, len(run["management"]))
         return self.render(run)
 
     def _load(self, run_id: str) -> dict:
@@ -174,12 +197,24 @@ class PayrollService:
         changed = False
         for item in run.get("files", {}).values():
             path = Path(item["path"])
-            if not path.is_file() or version(path) != {key: item[key] for key in ("sha256", "size", "mtime_ns")}:
+            try:
+                unchanged = path.is_file() and version(path) == {key: item[key] for key in ("sha256", "size", "mtime_ns")}
+            except OSError as exc:
+                self.log.warning("freshness_read_failed run=%s errno=%s", run["id"], exc.errno)
+                unchanged = False
+            if not unchanged:
                 changed = True
         if changed:
             run["status"] = "STALE"; run["decisions"] = []
             self.store.save(run)
+            self.log.warning("run_stale run=%s", run["id"])
         return not changed
+
+    def _raise_file_read_error(self, role: str, exc: OSError) -> None:
+        self.log.error("file_read_failed role=%s errno=%s type=%s", role, exc.errno, type(exc).__name__)
+        if exc.errno == 4:
+            raise ValueError("文件读取失败：系统在访问该文件时中断。请先关闭 Excel/WPS；若问题持续，请在‘磁盘工具’中对 Data 卷运行急救后再试。") from exc
+        raise ValueError("文件读取失败。请关闭 Excel/WPS 后重试；高级信息：" + type(exc).__name__) from exc
 
     def _require_fresh(self, run: dict) -> None:
         if run["status"] == "STALE":
