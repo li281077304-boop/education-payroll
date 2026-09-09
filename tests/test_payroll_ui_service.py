@@ -1,8 +1,12 @@
 from pathlib import Path
 from shutil import copyfile
+from threading import Thread
+from urllib.request import Request, urlopen
+import json
 
 from openpyxl import load_workbook
 
+from payroll_ui.server import PayrollHttpServer
 from payroll_ui.service import PayrollService
 
 
@@ -49,3 +53,29 @@ def test_ui_marks_run_stale_when_original_file_changes(tmp_path):
     result = service.get(run["id"])
 
     assert result["status"] == "STALE"
+
+
+def test_special_decision_is_rechecked_not_used_to_force_full_pass(tmp_path):
+    service, run, _ = _prepared_run(tmp_path)
+    checked = service.check(run["id"])
+    issue = next(item for item in checked["issues"] if item["field"] == "class_value")
+
+    service.decide(run["id"], issue["id"], "special", "审核人", "脱敏的特殊班型说明")
+    rechecked = service.check(run["id"])
+
+    assert rechecked["status"] == "REVIEW_REQUIRED"
+    assert next(item for item in rechecked["field_status"] if item["field"] == "class_value")["state"] == "已核对"
+
+
+def test_loopback_ui_bootstrap_and_create_run(tmp_path):
+    static = Path(__file__).parents[1] / "payroll_ui" / "static"
+    server = PayrollHttpServer(("127.0.0.1", 0), PayrollService(tmp_path / "app-data"), static)
+    worker = Thread(target=server.serve_forever, daemon=True); worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+        request = Request(base + "/api/runs", data=b'{"period":"2026-08"}', method="POST", headers={"Content-Type": "application/json", "X-Payroll-Token": token})
+        payload = json.loads(urlopen(request).read())
+        assert payload["period"] == "2026-08"
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
