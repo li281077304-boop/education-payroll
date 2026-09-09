@@ -13,6 +13,8 @@ from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
+from payroll_core.formula_audit import audit_payroll_formulas
+from payroll_core.rules.authority import TeacherRating, default_compensation_bands, rating_and_rate_checks
 from payroll_core.reconcile.payroll_scope import FieldCheck, rate_and_fee_checks, schedule_field_checks, total_salary_read_checks
 
 from .storage import RunStore
@@ -29,6 +31,19 @@ ISSUE_LABELS = {
     "MISSING_TARGET": "工资表缺少人员",
     "NEEDS_MANUAL_REVIEW": "需要人工确认",
     "FORMULA_DIFFERENCE": "公式复算不一致",
+    "RATING_MISMATCH": "星级不一致",
+    "RATE_MATCH": "档位金额一致",
+    "RATE_MISMATCH": "档位金额不一致",
+    "MISSING_AUTHORITY": "缺少权威资料",
+    "MISSING_PAYROLL_VALUE": "工资表缺少值",
+    "RULE_NOT_FOUND": "未找到适用规则",
+    "MULTIPLE_RULES_MATCHED": "规则冲突",
+    "FORMULA_REPLACED_BY_VALUE": "公式被固定值替代",
+    "FORMULA_MISSING": "公式缺失",
+    "FORMULA_PATTERN_MISMATCH": "公式结构不同",
+    "ROW_REFERENCE_SHIFT": "公式引用错行",
+    "COLUMN_REFERENCE_SHIFT": "公式引用错列",
+    "FORMULA_REGION_BREAK": "公式区域异常",
 }
 ACTION_LABELS = {"special": "已确认特殊情况", "payroll_error": "工资表待修改", "defer": "暂时保留", "confirm_source": "来源待核实"}
 
@@ -55,7 +70,8 @@ class PayrollService:
     def create(self, period: str) -> dict:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
             raise ValueError("请选择有效月份。")
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "decisions": [], "management": [], "field_status": self._field_status([]), "summary": self._summary([])}
+        versions = [item for item in self.store.list_rating_versions() if item["effective_from"] <= period <= item["effective_to"]]
+        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "decisions": [], "management": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
         self.store.save(run)
         return self.render(run)
 
@@ -64,6 +80,22 @@ class PayrollService:
 
     def get(self, run_id: str) -> dict:
         return self.render(self._load(run_id))
+
+    def rating_versions(self) -> list[dict]:
+        return self.store.list_rating_versions()
+
+    def save_rating_version(self, effective_from: str, effective_to: str, source: str, source_version: str, ratings: list[dict]) -> list[dict]:
+        if len(effective_from) != 7 or len(effective_to) != 7 or effective_from > effective_to or not source.strip() or not ratings:
+            raise ValueError("请填写生效期、来源和至少一位教师的星级。")
+        cleaned = []
+        for item in ratings:
+            name, rating = str(item.get("teacher", "")).strip(), item.get("rating")
+            if not name or not isinstance(rating, int) or rating not in range(1, 7):
+                raise ValueError("星级资料必须包含教师姓名和一至六星。")
+            cleaned.append({"teacher": name, "rating": rating, "role": str(item.get("role", "教师")).strip() or "教师"})
+        version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "source_version": source_version.strip() or effective_from, "ratings": cleaned, "created_at": datetime.now(timezone.utc).isoformat()}
+        self.store.save_rating_version(version)
+        return self.rating_versions()
 
     def import_file(self, run_id: str, role: str, path: str, expected_hash: str | None = None) -> dict:
         if role not in LABELS:
@@ -138,6 +170,12 @@ class PayrollService:
             raise ValueError("两张工资表含有重复教师，请确认分组后再核对。")
         checks = schedule_field_checks(reads["schedule"].records, payroll)
         checks += rate_and_fee_checks(payroll) + total_salary_read_checks(payroll)
+        rating_version = self._rating_version_for_run(run)
+        ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"]) for item in rating_version.get("ratings", [])] if rating_version else []
+        checks += rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
+        for role in ("math", "science"):
+            for item in audit_payroll_formulas(run["files"][role]["path"]):
+                checks.append(FieldCheck("工作簿", "formula", None, None, item.status, f"{Path(item.workbook).name} / {item.sheet} / {item.cell}：{item.evidence} 正常模式：{item.expected_pattern or '待确认'}；当前公式：{item.formula or '空白/固定值'}。"))
         checks = self._apply_decisions(checks, run["decisions"])
         visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "READ_ONLY"}]
         run["issues"] = self._annotate_decisions([self._issue(check) for check in visible_checks], run["decisions"])
@@ -148,6 +186,16 @@ class PayrollService:
         run.pop("last_error", None)
         self.store.save(run)
         return self.render(run)
+
+    def _rating_version_for_run(self, run: dict) -> dict | None:
+        version_id = run.get("rating_version_id")
+        if version_id:
+            return self.store.get_rating_version(version_id)
+        matches = [item for item in self.store.list_rating_versions() if item["effective_from"] <= run["period"] <= item["effective_to"]]
+        if len(matches) == 1:
+            run["rating_version_id"] = matches[0]["id"]
+            return matches[0]
+        return None
 
     def _finish_failed_check(self, run: dict, message: str) -> None:
         if self._fresh(run):
@@ -252,6 +300,18 @@ class PayrollService:
             "MISSING_TARGET": (0, "严重"),
             "UNEXPLAINED_DIFFERENCE": (1, "重要"),
             "FORMULA_DIFFERENCE": (1, "重要"),
+            "RATING_MISMATCH": (1, "重要"),
+            "RATE_MISMATCH": (1, "重要"),
+            "FORMULA_REPLACED_BY_VALUE": (0, "严重"),
+            "FORMULA_MISSING": (0, "严重"),
+            "FORMULA_REGION_BREAK": (0, "严重"),
+            "ROW_REFERENCE_SHIFT": (0, "严重"),
+            "COLUMN_REFERENCE_SHIFT": (0, "严重"),
+            "FORMULA_PATTERN_MISMATCH": (1, "重要"),
+            "MISSING_AUTHORITY": (1, "重要"),
+            "MISSING_PAYROLL_VALUE": (1, "重要"),
+            "RULE_NOT_FOUND": (1, "重要"),
+            "MULTIPLE_RULES_MATCHED": (0, "严重"),
             "NEEDS_MANUAL_REVIEW": (2, "需确认"),
             "EXPLAINED_DIFFERENCE": (3, "已确认"),
         }.get(item.status, (2, "需确认"))
@@ -259,8 +319,8 @@ class PayrollService:
             "id": hashlib.sha256(f"{item.teacher}|{item.field}|{item.reason}".encode()).hexdigest()[:16],
             "teacher": item.teacher,
             "field": item.field,
-            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "ae": "AE 课时单价", "af": "AF 总课时费"}.get(item.field, "其他项目"),
-            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认"}.get(item.field, "需要人工处理"),
+            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "ae": "AE 课时单价", "af": "AF 总课时费", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
+            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
             "difference": difference,
             "status_label": ISSUE_LABELS.get(item.status, "需要处理"),
             "severity_rank": severity[0],
@@ -306,26 +366,35 @@ class PayrollService:
             "automatic_coverage": round(100 * len(completed) / len(automatic)) if automatic else 0,
             "automatic_pass": bool(automatic) and len(completed) == len(automatic),
             "unexplained": sum(row.status == "UNEXPLAINED_DIFFERENCE" for row in checks),
-            "manual_review": sum(row.status in {"NEEDS_MANUAL_REVIEW", "MISSING_SOURCE", "MISSING_TARGET", "FORMULA_DIFFERENCE"} for row in checks),
+            "manual_review": sum(row.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "READ_ONLY", "EXPLAINED_DIFFERENCE"} for row in checks),
             "full_scope_complete": bool(field_states) and all(row["state"].startswith("已核对") for row in field_states),
             "scope_note": "AA、AC 已接入独立排课源；AE、AF、AV 尚无完整独立权威源，不能判定整份工资核对通过。",
         }
 
     @staticmethod
     def _field_status(checks: list[FieldCheck]) -> list[dict]:
-        labels = {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "ae": "AE 该档每小时金额", "af": "AF 总课时费", "av": "AV 总工资"}
+        labels = {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "ae": "AE 该档每小时金额", "af": "AF 总课时费", "av": "AV 总工资", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}
         output = []
-        for field in ("one_to_one", "class_value", "ae", "af", "av"):
+        for field in ("one_to_one", "class_value", "rating", "rate", "formula", "ae", "af", "av"):
             rows = [row for row in checks if row.field == field]
             if field in {"one_to_one", "class_value"}:
                 state = "已核对" if rows and all(row.status in {"MATCH", "EXPLAINED_DIFFERENCE"} for row in rows) else "待处理"
                 note = "原始排课已独立计算并与工资表比较。" if state == "已核对" else "存在差异、缺失或无法确定的排课规则。"
             elif field in {"ae", "af"}:
                 state, note = "公式复算 / 待权威确认", "已按现有公式复算；星级或输入仍来自工资表，尚非独立权威源。"
+            elif field == "rating":
+                state = "已核对" if rows and all(row.status == "MATCH" for row in rows) else "待处理"
+                note = "使用按生效期保存的教师星级权威资料比较工资表。" if state == "已核对" else "缺少、过期或不一致的星级权威资料会阻止通过。"
+            elif field == "rate":
+                state = "已核对" if rows and all(row.status == "RATE_MATCH" for row in rows) else "待处理"
+                note = "使用独立星级与生效期档位金额规则计算 AE。" if state == "已核对" else "缺少规则、规则冲突或金额不一致会阻止通过。"
+            elif field == "formula":
+                state = "已核对" if rows and all(row.status == "MATCH" for row in rows) else "待处理"
+                note = "关键公式区域按同列结构模式扫描。" if state == "已核对" else "尚无足够公式样本，或已发现公式结构异常。"
             else:
                 state, note = "仅读取 / 待人工确认", "总工资包含续费、退费、激励、管理奖等未接入来源。"
             # An empty check cannot be advertised as independently verified.
-            automatic_available = field in {"one_to_one", "class_value"} and bool(rows)
+            automatic_available = field in {"one_to_one", "class_value", "rating", "rate", "formula"} and bool(rows)
             formula_recomputed = field in {"ae", "af"} and any(row.expected is not None for row in rows)
             formula_compared = field in {"ae", "af"} and any(row.expected is not None and row.actual is not None for row in rows)
             output.append({"field": field, "label": labels[field], "state": state, "note": note, "read": bool(rows), "authority": automatic_available, "computed": automatic_available or formula_recomputed, "compared": automatic_available or formula_compared})

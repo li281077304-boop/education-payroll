@@ -12,6 +12,7 @@ class RunStore:
         self.path = root / "payroll-ui.sqlite3"
         with sqlite3.connect(self.path) as db:
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS rating_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -31,3 +32,20 @@ class RunStore:
             rows = db.execute("SELECT payload FROM runs ORDER BY created_at DESC").fetchall()
         runs = [json.loads(row[0]) for row in rows]
         return sorted(runs, key=lambda item: item.get("updated_at", item["created_at"]), reverse=True)
+
+    def save_rating_version(self, version: dict) -> None:
+        payload = json.dumps(version, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO rating_versions(id,effective_from,effective_to,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (version["id"], version["effective_from"], version["effective_to"], payload))
+
+    def list_rating_versions(self) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT payload FROM rating_versions ORDER BY effective_from DESC").fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_rating_version(self, version_id: str) -> dict:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT payload FROM rating_versions WHERE id=?", (version_id,)).fetchone()
+        if row is None:
+            raise ValueError("未找到教师星级版本。")
+        return json.loads(row[0])
