@@ -24,6 +24,7 @@ class TeacherRating:
     source_version: str = ""
     confirmed_at: str = ""
     notes: str = ""
+    allow_blank_payroll_rating: bool = False
 
     def applies_to(self, period: str) -> bool:
         return (not self.effective_from or self.effective_from <= period) and (not self.effective_to or period <= self.effective_to)
@@ -83,7 +84,7 @@ def default_compensation_bands(effective_from: str = "2025-10", effective_to: st
     # represented by one rule per rating so ambiguity can never be hidden.
     ranges = (("0-30", 0, 30, 0), ("31-60", 30.000001, 60, 30), ("61-80", 60.000001, 80, 32), ("81-100", 80.000001, 100, 34), ("101-130", 100.000001, 130, 36), ("131-160", 130.000001, 160, 37), ("160+", 160.000001, None, 38))
     bonus = {1: 0, 2: 0, 3: 5, 4: 10, 5: 15, 6: 20}
-    return [CompensationBand(f"{band}-{'一二三四五六'[rating - 1]}星", low, high, amount, extra, rating=rating, effective_from=effective_from, effective_to=effective_to, source="AE档位+星级加成规则", source_version=source_version) for band, low, high, amount in ranges for rating, extra in bonus.items()]
+    return [CompensationBand(f"{band}-{'一二三四五六'[rating - 1]}星", low, high, amount, 0 if band == "0-30" else extra, rating=rating, effective_from=effective_from, effective_to=effective_to, source="AE档位+星级加成规则", source_version=source_version) for band, low, high, amount in ranges for rating, extra in bonus.items()]
 
 
 def rating_and_rate_checks(payroll: list[PayrollRecord], ratings: list[TeacherRating], bands: list[CompensationBand], period: str) -> list[FieldCheck]:
@@ -96,7 +97,9 @@ def rating_and_rate_checks(payroll: list[PayrollRecord], ratings: list[TeacherRa
             checks.append(FieldCheck(row.teacher, "rating", None, payroll_rating, "MISSING_AUTHORITY", "当前月份没有该教师的有效星级权威资料。"))
             checks.append(FieldCheck(row.teacher, "rate", None, row.ae, "RULE_NOT_FOUND", "缺少有效星级资料，不能独立确认档位金额。"))
             continue
-        if payroll_rating is None:
+        if payroll_rating is None and authority.allow_blank_payroll_rating:
+            checks.append(FieldCheck(row.teacher, "rating", authority.rating, None, "MATCH", "该身份无星级展示，按工资政策指定的一星档计算。"))
+        elif payroll_rating is None:
             checks.append(FieldCheck(row.teacher, "rating", authority.rating, None, "MISSING_PAYROLL_VALUE", "工资表未读取到教师星级。"))
         elif payroll_rating != authority.rating:
             checks.append(FieldCheck(row.teacher, "rating", authority.rating, payroll_rating, "RATING_MISMATCH", f"权威星级来自：{authority.source or authority.source_version}。"))

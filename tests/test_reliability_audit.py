@@ -67,6 +67,19 @@ def test_october_requires_new_rating_confirmation():
     assert next(item for item in checks if item.field == "rating").status == "MISSING_AUTHORITY"
 
 
+def test_blank_payroll_rating_can_be_an_explicit_one_star_policy():
+    authority = TeacherRating("教师甲", 1, effective_from="2025-10", effective_to="2026-09", allow_blank_payroll_rating=True)
+    checks = rating_and_rate_checks([row("教师甲", "兼职MT", 70, 32)], [authority], default_compensation_bands(), "2026-08")
+    assert next(item for item in checks if item.field == "rating").status == "MATCH"
+
+
+def test_under_thirty_hours_has_zero_rate_even_when_policy_rating_is_higher():
+    bands = default_compensation_bands()
+    matched = [item for item in bands if item.applies_to("2026-08", "教师", 20) and item.rating == 4]
+    assert len(matched) == 1
+    assert matched[0].base_amount + matched[0].rating_bonus == 0
+
+
 def test_same_trmt_identity_can_have_different_obligation_hour_policy():
     bands = default_compensation_bands()
     profiles = [
