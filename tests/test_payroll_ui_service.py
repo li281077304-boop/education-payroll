@@ -33,6 +33,38 @@ def _prepared_run(tmp_path: Path):
     return service, run, schedule
 
 
+def _prepared_run_with_values(tmp_path: Path, one_to_one: float = 36, class_value: float = 10):
+    """Build a complete, artificial three-file run without real payroll data."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    schedule = tmp_path / "schedule.xlsx"
+    copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    source = tmp_path / "combined.xlsx"
+    copyfile(FIXTURES / "fake_payroll.xlsx", source)
+    book = load_workbook(source)
+    sheet = book.active
+    sheet["AA5"] = one_to_one
+    sheet["AC6"] = class_value
+    book.save(source)
+    math = tmp_path / "math.xlsx"
+    science = tmp_path / "science.xlsx"
+    _payroll_with_only_from(source, math, 5)
+    _payroll_with_only_from(source, science, 6)
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08")
+    for role, path in (("schedule", schedule), ("math", math), ("science", science)):
+        run = service.import_file(run["id"], role, str(path))
+    return service, run, schedule, math, science
+
+
+def _payroll_with_only_from(source: Path, path: Path, row: int) -> None:
+    copyfile(source, path)
+    book = load_workbook(path)
+    sheet = book.active
+    for remove in sorted(({5, 6} - {row}), reverse=True):
+        sheet.delete_rows(remove)
+    book.save(path)
+
+
 def test_ui_run_never_passes_when_ae_af_av_have_no_independent_authority(tmp_path):
     service, run, _ = _prepared_run(tmp_path)
 
@@ -79,3 +111,135 @@ def test_loopback_ui_bootstrap_and_create_run(tmp_path):
         assert payload["period"] == "2026-08"
     finally:
         server.shutdown(); server.server_close(); worker.join()
+
+
+def _post_json(base: str, token: str, path: str, payload: dict) -> dict:
+    request = Request(
+        base + path,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json", "X-Payroll-Token": token},
+    )
+    return json.loads(urlopen(request).read())
+
+
+def test_loopback_fixture_flow_keeps_an_unexplained_difference_visible(tmp_path):
+    _, _, schedule, math, science = _prepared_run_with_values(tmp_path / "files", one_to_one=1.2, class_value=2.16)
+    static = Path(__file__).parents[1] / "payroll_ui" / "static"
+    server = PayrollHttpServer(("127.0.0.1", 0), PayrollService(tmp_path / "web-data"), static)
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+        run = _post_json(base, token, "/api/runs", {"period": "2026-08"})
+        for role, file_path in (("schedule", schedule), ("math", math), ("science", science)):
+            run = _post_json(base, token, f"/api/runs/{run['id']}/files", {"role": role, "path": str(file_path)})
+        checked = _post_json(base, token, f"/api/runs/{run['id']}/check", {})
+        issue = next(item for item in checked["issues"] if item["field"] == "one_to_one")
+        assert checked["status"] == "REVIEW_REQUIRED"
+        assert issue["difference"] == -0.6
+        evidence_request = Request(base + f"/api/runs/{run['id']}/evidence?issue={issue['id']}", headers={"X-Payroll-Token": token})
+        evidence = json.loads(urlopen(evidence_request).read())
+        assert len(evidence["evidence"]) >= 2
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
+
+
+def test_sanitized_happy_path_marks_aa_and_ac_as_independently_checked(tmp_path):
+    service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=1.8, class_value=2.16)
+
+    result = service.check(run["id"])
+    fields = {item["field"]: item for item in result["field_status"]}
+
+    assert result["summary"]["automatic_pass"] is True
+    assert result["status"] == "REVIEW_REQUIRED"  # AE/AF/AV are deliberately not over-claimed.
+    assert fields["one_to_one"]["state"] == "已核对"
+    assert fields["class_value"]["state"] == "已核对"
+    assert fields["one_to_one"]["authority"] is True
+    assert fields["class_value"]["compared"] is True
+
+
+def test_sanitized_one_to_one_difference_has_values_and_source_evidence(tmp_path):
+    service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=1.2, class_value=2.16)
+    checked = service.check(run["id"])
+    issue = next(item for item in checked["issues"] if item["field"] == "one_to_one")
+
+    assert issue["status"] == "UNEXPLAINED_DIFFERENCE"
+    assert issue["expected"] == 1.8
+    assert issue["actual"] == 1.2
+    assert issue["difference"] == -0.6
+    evidence = service.evidence(run["id"], issue["id"])
+    assert any(row["来源"] == "原始排课" and row["来源位置"] for row in evidence["evidence"])
+    assert any(row["来源"] == "工资表" and row["来源位置"] for row in evidence["evidence"])
+
+
+def test_sanitized_class_difference_is_visible_as_a_blocker(tmp_path):
+    service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=1.8, class_value=10)
+    checked = service.check(run["id"])
+    issue = next(item for item in checked["issues"] if item["field"] == "class_value")
+
+    assert checked["status"] == "REVIEW_REQUIRED"
+    assert issue["status"] == "UNEXPLAINED_DIFFERENCE"
+    assert issue["difference"] == 7.84
+
+
+def test_special_confirmation_persists_after_restart_and_never_forces_pass(tmp_path):
+    service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=1.2, class_value=2.16)
+    checked = service.check(run["id"])
+    issue = next(item for item in checked["issues"] if item["field"] == "one_to_one")
+
+    saved = service.decide(run["id"], issue["id"], "special", "审核人", "脱敏的特殊说明")
+    assert next(item for item in saved["issues"] if item["id"] == issue["id"])["decision_label"] == "已确认特殊情况"
+    restarted = PayrollService(tmp_path / "app-data").get(run["id"])
+    assert restarted["decisions"][0]["reason"] == "脱敏的特殊说明"
+    rechecked = PayrollService(tmp_path / "app-data").check(run["id"])
+    assert rechecked["status"] == "REVIEW_REQUIRED"
+    assert rechecked["summary"]["automatic_pass"] is True
+
+
+def test_stale_file_blocks_old_results_and_reimport_recovers(tmp_path):
+    service, run, schedule, *_ = _prepared_run_with_values(tmp_path, one_to_one=36, class_value=2.4)
+    checked = service.check(run["id"])
+    issue = checked["issues"][0]
+    book = load_workbook(schedule)
+    book.active["N2"] = "已变更的测试教室"
+    book.save(schedule)
+
+    stale = service.get(run["id"])
+    assert stale["status"] == "STALE"
+    assert stale["stale_files"] == ["schedule"]
+    try:
+        service.evidence(run["id"], issue["id"])
+    except ValueError as exc:
+        assert "原始文件已变化" in str(exc)
+    else:
+        raise AssertionError("stale run must block evidence")
+    recovered = service.import_file(run["id"], "schedule", str(schedule))
+    assert recovered["status"] == "FILES_READY"
+    assert service.check(run["id"])["status"] == "REVIEW_REQUIRED"
+
+
+def test_check_failure_returns_to_a_recoverable_material_state(tmp_path):
+    service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=36, class_value=2.4)
+    duplicate = tmp_path / "duplicate.xlsx"
+    _payroll_with_only(duplicate, 5)
+    service.import_file(run["id"], "science", str(duplicate))
+
+    try:
+        service.check(run["id"])
+    except ValueError as exc:
+        assert "重复教师" in str(exc)
+    else:
+        raise AssertionError("duplicate teachers must fail visibly")
+    recovered = service.get(run["id"])
+    assert recovered["status"] == "FILES_READY"
+    assert "重复教师" in recovered["last_error"]
+
+
+def test_browser_shell_uses_plain_language_for_core_workflow():
+    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text()
+    for technical_word in ("Adapter", "Fingerprint", "Coverage", "Payroll Core"):
+        assert technical_word not in source
+    for plain_label in ("材料准备", "核对结果", "待处理问题", "管理岗位确认", "排课项目完成度"):
+        assert plain_label in source
