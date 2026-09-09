@@ -3,6 +3,7 @@ let current = null;
 let homeRuns = [];
 let tab = "materials";
 let filters = { field: "all", state: "all", decision: "all", teacher: "" };
+let detailBasisToken = null;
 
 const roleCopy = {
   schedule: ["原始排课数据", "选择原始排课表", "用于重新计算一对一和班课"],
@@ -94,8 +95,10 @@ function historyList() {
   if (!homeRuns.length) return '<div class="empty">还没有核算记录。创建后，即使关闭程序也可以从这里继续。</div>';
   return `<div class="history-list">${homeRuns.map((run) => {
     const summary = run.summary || {};
+    const groupCount = (run.issue_groups || []).length;
+    const fieldCount = run.issues?.length || summary.unexplained || summary.manual_review || 0;
     const next = run.status === "STALE" ? "重新选择变化的材料" : run.status === "DRAFT" ? "继续导入材料" : run.status === "FILES_READY" ? "开始核对" : (summary.unexplained || summary.manual_review) ? "处理核对问题" : "查看核对结果";
-    return `<article class="history-row"><div><strong>${escapeHtml(run.period)}</strong><div class="small muted">编号 ${escapeHtml(run.id)} · 更新于 ${fmtDate(run.updated_at || run.created_at)}</div></div><div>${statusBadge(run)}<div class="small muted">材料 ${run.health.readiness}% · 待处理 ${(summary.unexplained || 0) + (summary.manual_review || 0)} 项</div></div><button class="secondary" onclick="openRun('${run.id}')">${next}</button></article>`;
+    return `<article class="history-row"><div><strong>${escapeHtml(run.period)}</strong><div class="small muted">编号 ${escapeHtml(run.id)} · 更新于 ${fmtDate(run.updated_at || run.created_at)}</div></div><div>${statusBadge(run)}<div class="small muted">材料 ${run.health.readiness}% · 待处理 ${groupCount} 个问题${fieldCount ? `（字段核查 ${fieldCount} 项）` : ""}</div></div><button class="secondary" onclick="openRun('${run.id}')">${next}</button></article>`;
   }).join("")}</div>`;
 }
 
@@ -118,7 +121,7 @@ async function createRun() {
 async function openRun(id) {
   try {
     current = await api(`/api/runs/${id}`);
-    tab = current.status === "STALE" || current.status === "DRAFT" || current.status === "FILES_READY" ? "materials" : (current.summary?.unexplained || current.summary?.manual_review) ? "issues" : "overview";
+    tab = current.status === "STALE" || current.status === "DRAFT" || current.status === "FILES_READY" ? "materials" : (current.issue_groups || []).length ? "issues" : "overview";
     renderRun();
   } catch (error) { showMessage(error.message); }
 }
@@ -130,12 +133,18 @@ function runSteps() {
 
 function navigation() {
   const checked = ["REVIEW_REQUIRED", "PASS"].includes(current.status);
-  const items = [["materials", "材料准备", true], ["overview", "核对结果", checked], ["issues", `待处理问题${current.issues?.length ? ` (${current.issues.length})` : ""}`, checked], ["management", "管理岗位确认", true]];
+  const groupCount = (current.issue_groups || []).length;
+  const items = [["materials", "材料准备", true], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["management", "管理岗位确认", true]];
   return `<nav class="tabs">${items.map(([id, label, enabled]) => `<button class="${tab === id ? "active" : ""}" ${enabled ? `onclick="setTab('${id}')"` : "disabled"}>${label}</button>`).join("")}</nav>`;
 }
 
+function reconfirmationBanner(run) {
+  const count = (run.business_decisions || []).filter(d => d.status === "NEEDS_RECONFIRMATION").length;
+  return count ? `<div class="banner error"><strong>${count} 条人工决定需要重新确认</strong><span>依据已变化，原意见仅保留为历史记录，不再自动生效。更新材料并重新核对后，请重新判断。</span></div>` : "";
+}
+
 function renderRun() {
-  const stale = current.status === "STALE" ? '<div class="banner error"><strong>原始文件已发生变化</strong><span>请重新选择标记为“已变化”的材料，再重新核对。旧结果不会继续显示为有效。</span></div>' : "";
+  const stale = reconfirmationBanner(current) + (current.status === "STALE" ? '<div class="banner error"><strong>原始文件已发生变化</strong><span>请重新选择标记为“已变化”的材料，再重新核对。旧结果不会继续显示为有效。</span></div>' : "");
   const lastError = current.last_error ? `<div class="banner error"><strong>上次核对未完成</strong><span>${escapeHtml(current.last_error)}</span></div>` : "";
   shell(`<div class="run-title"><div><p class="eyebrow">${escapeHtml(current.period)}</p><h1>工资核对</h1><div class="small muted">记录编号 ${escapeHtml(current.id)}</div></div>${statusBadge(current)}</div>${runSteps()}${stale}${lastError}${navigation()}<section id="view"></section>`);
   renderTab();
@@ -167,7 +176,7 @@ function materialCard(material) {
 function overviewPage() {
   const summary = current.summary || {};
   const headline = summary.automatic_pass ? "排课项目核对完成" : "排课项目仍有问题";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">核对结果</p><h2>${headline}</h2><p class="muted">整份工资仍包含需要上游数据或人工确认的项目。</p></div><button class="secondary" onclick="downloadReport()">导出核对报告</button></div><div class="metric-grid"><div class="metric"><span>排课项目完成度</span><strong>${summary.automatic_coverage ?? 0}%</strong><small>${summary.automatic_completed ?? 0} / ${summary.automatic_required ?? 0} 项</small></div><div class="metric"><span>未说明的差异</span><strong>${summary.unexplained ?? 0}</strong><small>必须处理</small></div><div class="metric"><span>需要人工确认</span><strong>${summary.manual_review ?? 0}</strong><small>不能自动判断</small></div></div><h3>每个项目实际检查到哪一步</h3><div class="table-wrap"><table class="table scope"><thead><tr><th>项目</th><th>读取工资表</th><th>可靠原始依据</th><th>重新计算</th><th>与工资表比较</th><th>当前结论</th></tr></thead><tbody>${current.field_status.map(fieldRow).join("")}</tbody></table></div><div class="banner info"><strong>检查范围说明</strong><span>AA、AC 使用原始排课重新计算；AE、AF 只完成公式复算；AV 当前只读取工资表结果。</span></div><div class="action-bar"><div>${summary.automatic_pass ? "AA、AC 没有待处理项。" : "请先处理异常中心中的问题。"}</div><div><button class="secondary" onclick="setTab('issues')">查看待处理问题</button><button onclick="recheck()">重新核对全部材料</button></div></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">核对结果</p><h2>${headline}</h2><p class="muted">整份工资仍包含需要上游数据或人工确认的项目。</p></div><button class="secondary" onclick="downloadReport()">导出核对报告</button></div><div class="metric-grid"><div class="metric"><span>排课项目完成度</span><strong>${summary.automatic_coverage ?? 0}%</strong><small>${summary.automatic_completed ?? 0} / ${summary.automatic_required ?? 0} 项</small></div><div class="metric"><span>未说明的差异</span><strong>${summary.unexplained ?? 0}</strong><small>必须处理</small></div><div class="metric"><span>需要人工确认</span><strong>${summary.manual_review ?? 0}</strong><small>不能自动判断</small></div></div><h3>每个项目实际检查到哪一步</h3><div class="table-wrap"><table class="table scope"><thead><tr><th>项目</th><th>读取工资表</th><th>可靠原始依据</th><th>重新计算</th><th>与工资表比较</th><th>当前结论</th></tr></thead><tbody>${current.field_status.map(fieldRow).join("")}</tbody></table></div><div class="banner info"><strong>检查范围说明</strong><span>星级、档位和课时费政策会按已有资料核对；AD 仍来自工资表目标自身，尚未形成独立闭环。</span></div><div class="action-bar"><div>${summary.automatic_pass ? "AA、AC 没有待处理项。" : "请先处理异常中心中的问题。"}</div><div><button class="secondary" onclick="setTab('issues')">查看待处理问题</button><button onclick="recheck()">重新核对全部材料</button></div></div></section>`;
 }
 
 function fieldRow(field) {
@@ -176,44 +185,66 @@ function fieldRow(field) {
 }
 
 function issuesPage() {
-  const rows = (current.issue_groups || current.issues).filter(issue => !filters.teacher || issue.teacher.includes(filters.teacher.trim()));
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">同一工资依据造成的连带字段会合并为一个业务问题。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label>教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div><div class="result-count">显示 ${rows.length} 个业务问题（字段核查记录 ${current.issues.length} 项）</div>${rows.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>问题</th><th>教师</th><th>影响字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th></th></tr></thead><tbody>${rows.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>'}<div id="issue-detail"></div></section>`;
+  const groups = current.issue_groups || [];
+  const rows = groups.filter((group) => !filters.teacher || String(group.teacher || "").includes(filters.teacher.trim()));
+  const fieldCount = current.issues?.length || groups.reduce((total, group) => total + (group.count || group.field_records?.length || 0), 0);
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">同一原因的字段核查会合并为一个业务问题。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div><div class="result-count">显示 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 项）</div>${rows.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>问题</th><th>教师</th><th>影响字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>${rows.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>'}<div id="issue-detail"></div></section>`;
 }
 
-function filteredIssues() {
-  return (current.issues || []).filter((issue) => {
-    if (filters.field !== "all" && issue.field !== filters.field) return false;
-    if (filters.state === "blocking" && issue.status === "EXPLAINED_DIFFERENCE") return false;
-    if (filters.state === "confirmed" && issue.status !== "EXPLAINED_DIFFERENCE") return false;
-    if (filters.decision === "none" && issue.decision) return false;
-    if (filters.decision === "recorded" && !issue.decision) return false;
-    return !filters.teacher || issue.teacher.includes(filters.teacher.trim());
-  });
-}
-
-function issueRow(issue) {
-  const severity = issue.severity_rank <= 1 ? "bad" : issue.severity_rank === 2 ? "warn" : "ok";
-  return `<tr><td><span class="${severity}">${escapeHtml(issue.severity_label)}</span></td><td>${escapeHtml(issue.title)}</td><td>${escapeHtml(issue.teacher)}</td><td>${escapeHtml((issue.fields || [issue.field_label]).join("、"))}</td><td>${issue.expected ?? "—"}</td><td>${issue.actual ?? "—"}</td><td>${issue.difference ?? "—"}</td><td><button class="quiet" onclick="evidence('${issue.id}')">查看明细</button></td></tr>`;
+function issueRow(group) {
+  const severity = group.severity_rank <= 1 ? "bad" : group.severity_rank === 2 ? "warn" : "ok";
+  return `<tr><td><span class="${severity}">${escapeHtml(group.severity_label)}</span></td><td>${escapeHtml(group.title)}<div class="small muted">${escapeHtml(group.decision_label || "待处理")}</div></td><td>${escapeHtml(group.teacher)}</td><td>${escapeHtml((group.fields || []).join("、"))}</td><td>${escapeHtml(group.expected ?? "—")}</td><td>${escapeHtml(group.actual ?? "—")}</td><td>${escapeHtml(group.difference ?? "—")}</td><td><button class="quiet" aria-label="查看 ${escapeHtml(group.teacher)}：${escapeHtml(group.title)} 的明细" onclick="evidence('${group.id}')">查看明细</button></td></tr>`;
 }
 
 function updateFilters() {
-  filters = { field: $("#filter-field").value, state: $("#filter-state").value, decision: $("#filter-decision").value, teacher: $("#filter-teacher").value };
+  filters.teacher = $("#filter-teacher")?.value || "";
   const scroll = window.scrollY;
   renderTab();
-  $("#filter-field").value = filters.field; $("#filter-state").value = filters.state; $("#filter-decision").value = filters.decision;
   window.scrollTo(0, scroll);
 }
 
 async function evidence(id) {
   try {
     const result = await api(`/api/runs/${current.id}/evidence?issue=${id}`);
-    const issue = result.issue;
-    const decision = issue.decision;
-    const sourceLabel = issue.field === "rating" ? "权威星级" : issue.field === "rate" ? "规则计算金额" : issue.field === "formula" ? "正常公式模式" : "排课重新计算";
-    const targetLabel = issue.field === "rating" ? "工资表星级" : issue.field === "rate" ? "工资表金额" : issue.field === "formula" ? "当前公式" : "工资表填报";
-    $("#issue-detail").innerHTML = `<article class="detail-panel"><div class="section-head"><div><p class="eyebrow">问题详情</p><h3>${escapeHtml(issue.title)}</h3></div><button class="quiet" onclick="$('#issue-detail').innerHTML=''">关闭</button></div><div class="comparison"><div><span>${sourceLabel}</span><strong>${issue.expected ?? "无法计算"}</strong></div><div><span>${targetLabel}</span><strong>${issue.actual ?? "未读取"}</strong></div><div><span>差异</span><strong>${issue.difference ?? "—"}</strong></div></div><p>${escapeHtml(issue.reason)}</p><h4>来源记录</h4>${result.evidence.length ? `<div class="evidence-list">${result.evidence.map(evidenceCard).join("")}</div>` : `<p class="muted">${escapeHtml(result.note || "当前没有可展开的逐课来源。")}</p>`}${decision ? `<div class="decision-saved"><strong>已记录：${escapeHtml(issue.decision_label)}</strong><p>${escapeHtml(decision.reason)} · 确认人：${escapeHtml(decision.person)}</p></div>` : ""}<h4>记录处理意见</h4><div class="decision-form"><label>处理方式<select id="decision"><option value="special">确认属于特殊情况</option><option value="payroll_error">工资表需要修改</option><option value="defer">暂时保留，稍后处理</option><option value="confirm_source">原始依据需要核实</option></select></label><label>确认人<input id="person" value="${escapeHtml(decision?.person || "")}" placeholder="填写姓名"></label><label class="wide">说明<textarea id="reason" placeholder="说明判断依据（必填）">${escapeHtml(decision?.reason || "")}</textarea></label></div><div class="action-bar"><span class="muted small">保存意见不会修改原 Excel，也不会直接让整份工资通过。</span><button onclick="decide('${id}')">保存处理意见</button></div></article>`;
+    const group = result.issue || {};
+    detailBasisToken = group.fingerprint || null;
+    const decision = group.decision;
+    const sections = result.sections || [];
+    const courses = result.evidence || [];
+    const activeAction = decision?.action || "DEFERRED";
+    $("#issue-detail").innerHTML = `<article class="detail-panel"><div class="section-head"><div><p class="eyebrow">问题详情</p><h3>${escapeHtml(group.title)}</h3><p class="muted">${escapeHtml(group.teacher)}</p></div><button class="quiet" aria-label="关闭问题详情" onclick="$('#issue-detail').innerHTML=''">关闭</button></div>${groupFacts(group)}${decision ? `<div class="decision-saved"><strong>${escapeHtml(group.decision_label || "已记录处理意见")}</strong><p>状态：${escapeHtml(decisionStatusLabel(decision.status))} · ${escapeHtml(decision.person)} · ${escapeHtml(decision.reason)}</p></div>` : ""}<section class="action-first" aria-labelledby="decision-heading"><h4 id="decision-heading">记录处理意见</h4><p class="muted small">默认是“暂时保留”，不会把问题认定为已确认。</p><div class="decision-form"><label for="decision">处理方式<select id="decision"><option value="DEFERRED" ${activeAction === "DEFERRED" ? "selected" : ""}>暂时保留，稍后处理</option><option value="CONFIRMED_ERROR" ${activeAction === "CONFIRMED_ERROR" ? "selected" : ""}>确认工资表需要修改</option><option value="ACCEPTED_EXCEPTION" ${activeAction === "ACCEPTED_EXCEPTION" ? "selected" : ""}>确认属于接受的特殊情况</option></select></label><label for="person">确认人<input id="person" value="${escapeHtml(decision?.person || "")}" placeholder="填写姓名"></label><label class="wide" for="reason">判断说明<textarea id="reason" placeholder="说明判断依据（必填）">${escapeHtml(decision?.reason || "")}</textarea></label></div><div class="action-bar"><span class="muted small">保存不会修改原 Excel，也不会直接让整份工资通过。</span><span><button class="secondary" onclick="evidence('${id}')">重新查看证据</button><button onclick="decide('${id}')">保存处理意见</button></span></div></section>${affectedFacts(result.field_records || [])}${sections.map(evidenceSection).join("")}${courseEvidence(courses, result.note)}${boundaryNote(result.boundary)}</article>`;
     $("#issue-detail").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) { showMessage(error.message); }
+}
+
+function groupFacts(group) {
+  return `<div class="comparison"><div><span>系统值</span><strong>${escapeHtml(group.expected ?? "无法计算")}</strong></div><div><span>工资表值</span><strong>${escapeHtml(group.actual ?? "未读取")}</strong></div><div><span>差异</span><strong>${escapeHtml(group.difference ?? "—")}</strong></div></div><p>${escapeHtml(group.reason || "请结合以下字段事实和来源证据判断。")}</p>`;
+}
+
+function decisionStatusLabel(status) {
+  return { ACTIVE: "当前有效", NEEDS_RECONFIRMATION: "依据已变化，需重新确认" }[status] || "已记录";
+}
+
+function affectedFacts(records = []) {
+  if (!records.length) return "";
+  return `<h4>受影响字段事实</h4><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th>结论</th></tr></thead><tbody>${records.map((item) => `<tr><td>${escapeHtml(item.field_label || item.field || "—")}</td><td>${escapeHtml(item.expected ?? "—")}</td><td>${escapeHtml(item.actual ?? "—")}</td><td>${escapeHtml(item.difference ?? "—")}</td><td>${escapeHtml(item.status_label || item.reason || "—")}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function evidenceSection(section) {
+  return `<section class="evidence-section"><h4>${escapeHtml(section.title)}</h4>${section.items?.length ? `<div class="evidence-list">${section.items.map(evidenceCard).join("")}</div>` : '<p class="muted">暂无来源记录。</p>'}</section>`;
+}
+
+function courseEvidence(courses, note) {
+  const lessons = courses.filter((item) => (item["来源"] || item.source) !== "工资表");
+  if (!lessons.length) return `<p class="muted">${escapeHtml(note || "当前没有可展开的逐课来源。")}</p>`;
+  const provenance = lessons[0];
+  return `<section class="evidence-section"><h4>AC 课程来源（${lessons.length} 条）</h4><p class="small muted">来源概览：${escapeHtml(provenance["来源文件"] || provenance.source_file || "原始排课")} · ${escapeHtml(provenance["来源工作表"] || provenance.sheet || "工作表")}</p><details><summary>展开 ${lessons.length} 条课程明细</summary><div class="evidence-list">${lessons.map(evidenceCard).join("")}</div></details></section>`;
+}
+
+function boundaryNote(boundary) {
+  if (!boundary) return "";
+  if (typeof boundary === "string") return `<div class="banner info"><strong>核对边界</strong><span>${escapeHtml(boundary)}</span></div>`;
+  return `<div class="banner info"><strong>核对边界</strong><span>课程来源、工资表目标和独立权威依据分别展示；工资表自身不作为独立依据。</span></div>`;
 }
 
 function evidenceCard(item) {
@@ -245,7 +276,7 @@ async function refreshRun() {
 }
 
 async function recheck() {
-  try { current = await api(`/api/runs/${current.id}/check`, { method: "POST", body: "{}" }); tab = current.issues.length ? "issues" : "overview"; renderRun(); showMessage("已重新核对全部材料。", "success"); }
+  try { current = await api(`/api/runs/${current.id}/check`, { method: "POST", body: "{}" }); tab = (current.issue_groups || []).length ? "issues" : "overview"; renderRun(); showMessage("已重新核对全部材料。", "success"); }
   catch (error) { await refreshAfterError(error); }
 }
 
@@ -256,7 +287,7 @@ async function refreshAfterError(error) {
 
 async function decide(id) {
   try {
-    current = await api(`/api/runs/${current.id}/decisions`, { method: "POST", body: JSON.stringify({ issue_id: id, action: $("#decision").value, person: $("#person").value, reason: $("#reason").value }) });
+    current = await api(`/api/runs/${current.id}/decisions`, { method: "POST", body: JSON.stringify({ issue_id: id, action: $("#decision").value, person: $("#person").value, reason: $("#reason").value, fingerprint: detailBasisToken }) });
     renderRun(); showMessage("处理意见已保存。请重新核对全部材料，使确认结果生效。", "success");
   } catch (error) { showMessage(error.message); }
 }

@@ -15,9 +15,11 @@ from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
-from payroll_core.reconcile.payroll_scope import FieldCheck, schedule_field_checks, total_salary_read_checks
+from payroll_core.reconcile.payroll_scope import CLASS_MULTIPLIERS, HEADCOUNT_COEFFICIENTS, FieldCheck, schedule_field_checks, total_salary_read_checks
+from payroll_core.excel.reconciliation_bridge import GRADE_COEFFICIENTS
 
 from .storage import RunStore
+from .business import build_groups, invalidate as invalidate_business_decisions
 
 REQUIRED = ("schedule",)
 SCOPE_ROLES = ("math", "science")
@@ -73,7 +75,7 @@ class PayrollService:
             raise ValueError("请选择有效月份。")
         versions = [item for item in self.store.list_rating_versions() if item["effective_from"] <= period <= item["effective_to"]]
         policies = [item for item in self.store.list_policy_versions() if item["effective_from"] <= period <= item["effective_to"]]
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "decisions": [], "management": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
         self.store.save(run)
         return self.render(run)
 
@@ -158,7 +160,11 @@ class PayrollService:
             # Grade resolutions are bound to coordinates in the imported
             # schedule workbook. Replacing that source invalidates them.
             run.pop("schedule_grade_resolutions", None)
-        run["issues"], run["decisions"] = [], []
+        # Legacy per-field decisions predate business review cards.  They are
+        # cleared for backward compatibility; durable business decisions are
+        # retained but explicitly require a fresh confirmation.
+        run["issues"], run["field_records"], run["issue_groups"], run["decisions"] = [], [], [], []
+        invalidate_business_decisions(run.setdefault("business_decisions", []))
         run.pop("last_error", None)
         run.pop("stale_files", None)
         run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
@@ -220,11 +226,17 @@ class PayrollService:
             for item in self._formula_audit_for_scope(run["files"][role]["path"], audit_rows):
                 status, evidence = self._formula_status_with_policy(item, audit_rows, profiles)
                 checks.append(FieldCheck("工作簿", "formula", None, None, status, f"{Path(item.workbook).name} / {item.sheet} / {item.cell}：{evidence} 正常模式：{item.expected_pattern or '待确认'}；当前公式：{item.formula or '空白/固定值'}。"))
+        raw_checks = list(checks)
+        # Only historical, field-level actions retain their old display
+        # behaviour.  Business decisions never alter a payroll audit status.
         checks = self._apply_decisions(checks, run["decisions"])
         visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY"}]
+        run["field_records"] = self._annotate_decisions([self._issue(check) for check in raw_checks], run["decisions"])
         run["issues"] = self._annotate_decisions([self._issue(check) for check in visible_checks], run["decisions"])
         run["issues"].sort(key=lambda item: (item["severity_rank"], item["title"], item["teacher"]))
-        run["issue_groups"] = self._group_issues(run["issues"])
+        run["audit_context"] = self._business_context(run)
+        run.pop("business_context_stale", None)
+        run["issue_groups"] = self._business_groups(run)
         run["field_status"] = self._field_status(checks)
         run["summary"] = self._summary(checks)
         run["status"] = "PASS" if run["summary"]["full_scope_complete"] else "REVIEW_REQUIRED"
@@ -339,11 +351,32 @@ class PayrollService:
             run["last_error"] = message
             self.store.save(run)
 
-    def decide(self, run_id: str, issue_id: str, action: str, person: str, reason: str) -> dict:
-        if action not in {"special", "payroll_error", "defer", "confirm_source"} or not person.strip() or not reason.strip():
+    def decide(self, run_id: str, issue_id: str, action: str, person: str, reason: str, expected_fingerprint: str | None = None) -> dict:
+        if action not in {"special", "payroll_error", "defer", "confirm_source", "CONFIRMED_ERROR", "ACCEPTED_EXCEPTION", "DEFERRED"} or not person.strip() or not reason.strip():
             raise ValueError("请选择处理方式，并填写确认人和理由。")
         run = self._load(run_id)
         self._require_fresh(run)
+        if action in {"CONFIRMED_ERROR", "ACCEPTED_EXCEPTION", "DEFERRED"}:
+            self._require_current_audit(run)
+            group = next((item for item in run.get("issue_groups", []) if item["id"] == issue_id), None)
+            # API callers from the pre-card UI can still submit a field id.
+            if group is None:
+                field = next((item for item in run.get("issues", []) if item["id"] == issue_id), None)
+                if field:
+                    group = next((item for item in run.get("issue_groups", []) if field["id"] in item.get("field_record_ids", [])), None)
+            if group is None:
+                raise ValueError("该问题已不存在，请重新核对。")
+            if expected_fingerprint is not None and expected_fingerprint != group["fingerprint"]:
+                raise ValueError("问题依据已变化，请刷新详情并重新确认。")
+            context = self._business_context(run)
+            decision = {"group_id": group["id"], "root_cause_key": group["root_cause_key"], "fingerprint": group["fingerprint"], "affected_fields": group["affected_fields"], "context": context, "action": action, "status": "ACTIVE", "person": person.strip(), "reason": reason.strip(), "created_at": datetime.now(timezone.utc).isoformat()}
+            previous = [item for item in run.setdefault("business_decisions", []) if item.get("group_id") == group["id"]]
+            if previous:
+                run.setdefault("business_decision_history", []).extend({**item, "superseded_at": decision["created_at"], "superseded_by": action} for item in previous)
+            run["business_decisions"] = [item for item in run["business_decisions"] if item.get("group_id") != group["id"]] + [decision]
+            self._refresh_business_groups(run)
+            self.store.save(run)
+            return self.render(run)
         issue = next((item for item in run["issues"] if item["id"] == issue_id), None)
         if issue is None:
             raise ValueError("该问题已不存在，请重新核对。")
@@ -357,11 +390,14 @@ class PayrollService:
 
     def evidence(self, run_id: str, issue_id: str) -> dict:
         run = self._load(run_id); self._require_fresh(run)
+        self._require_current_audit(run)
+        group = next((item for item in run.get("issue_groups", []) if item["id"] == issue_id), None)
         issue = next((item for item in run["issues"] if item["id"] == issue_id), None)
-        if issue is None:
+        if group is None and issue is not None:
+            group = next((item for item in run.get("issue_groups", []) if issue["id"] in item.get("field_record_ids", [])), None)
+        if group is None:
             raise ValueError("未找到问题。")
-        if issue["field"] not in {"one_to_one", "class_value"}:
-            return {"issue": issue, "evidence": [], "note": "该项当前没有独立课程级来源。"}
+        records = [item for item in run.get("field_records", []) if item["id"] in group["field_record_ids"]]
         schedule = self._apply_schedule_grade_resolutions(
             self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"]).records,
             run,
@@ -372,14 +408,15 @@ class PayrollService:
             if role in {"math", "science", "baseline"}
         }
         payroll, _ = self._payroll_records(reads)
-        lines = [{"来源": "原始排课", "来源文件": Path(next(iter(item.provenance.values())).source_file).name, "来源工作表": next(iter(item.provenance.values())).sheet, "课程时间": item.lesson_time, "班级": item.class_name, "班型": item.class_type, "年级": item.grade or "待确认", "实到": item.attended, "来源位置": ", ".join(value.coordinate for name, value in item.provenance.items() if name != "student")} for item in schedule if item.teacher == issue["teacher"]]
-        target = next((item for item in payroll if item.teacher == issue["teacher"]), None)
-        if target:
-            value = target.provenance[issue["field"]]
-            lines.append({"来源": "工资表", "来源文件": Path(value.source_file).name, "来源工作表": value.sheet, "字段": value.source_field, "工资表值": value.normalized_value, "来源位置": value.coordinate, "读取情况": self._cell_state(value.state.value)})
+        target = next((item for item in payroll if item.teacher == group["teacher"]), None)
+        lines = self._course_evidence(schedule, group, target)
+        sections = self._evidence_sections(run, group, records, target)
+        comments = [c for read in reads.values() for c in read.comments if c.target == group["teacher"] and c.field in set(group["affected_fields"]) | {"ae", "af"}]
+        if set(group["affected_fields"]) & {"class_value", "one_to_one"}:
+            sections.append({"title": "特殊处理线索（不代表已获批准）", "items": [{"工资表批注": c.text, "来源文件": Path(c.source_file).name, "工作表": c.sheet, "单元格": c.coordinate} for c in comments] or [{"线索状态": "当前文件没有可读取的相关批注。历史特殊班型须由负责人核实，不自动改变折算规则。"}]})
         if not self._fresh(run):
             raise ValueError("文件在查看证据时发生变化，请重新导入。")
-        return {"issue": issue, "evidence": lines}
+        return {"issue": group, "field_records": records, "sections": sections, "evidence": lines, "note": "课程级明细仅适用于 AC/AA 排课核对；其余依据见分段证据。", "boundary": {"run_id": run["id"], "fingerprint": group["fingerprint"], "source_hashes": {key: item["sha256"] for key, item in run["files"].items()}, "audit_context": run.get("audit_context")}}
 
     def export_csv(self, run_id: str) -> str:
         run = self._load(run_id); self._require_fresh(run)
@@ -406,7 +443,23 @@ class PayrollService:
 
     def _load(self, run_id: str) -> dict:
         run = self.store.get(run_id)
-        self._fresh(run)
+        # A stale source is terminal for this read: never downgrade STALE to
+        # FILES_READY merely because a separately bound authority changed too.
+        if not self._fresh(run):
+            self._refresh_business_groups(run)
+            self.store.save(run)
+            return run
+        if run.get("audit_context") and run["audit_context"] != self._business_context(run):
+            invalidate_business_decisions(run.setdefault("business_decisions", []))
+            self._refresh_business_groups(run)
+            run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
+            run["business_context_stale"] = True
+            self.store.save(run)
+        elif run.get("field_records") or run.get("issues"):
+            prior = [(x.get("group_id"), x.get("status")) for x in run.get("business_decisions", [])]
+            self._refresh_business_groups(run)
+            if prior != [(x.get("group_id"), x.get("status")) for x in run.get("business_decisions", [])]:
+                self.store.save(run)
         return run
 
     def _fresh(self, run: dict) -> bool:
@@ -423,6 +476,7 @@ class PayrollService:
             run["status"] = "STALE"
             run["stale_files"] = stale_roles
             run["decisions"] = []
+            invalidate_business_decisions(run.setdefault("business_decisions", []))
             self.store.save(run)
         else:
             run.pop("stale_files", None)
@@ -431,6 +485,112 @@ class PayrollService:
     def _require_fresh(self, run: dict) -> None:
         if run["status"] == "STALE":
             raise ValueError("原始文件已变化，请重新导入并重新核对。")
+
+    def _business_context(self, run: dict) -> dict:
+        rating = self._rating_version_for_run(run)
+        policy = self._policy_version_for_run(run)
+        bands = [asdict(item) for item in default_compensation_bands()]
+        return {
+            "run_id": run["id"],
+            "period": run["period"],
+            "source_hashes": {key: item.get("sha256") for key, item in sorted(run.get("files", {}).items())},
+            "rating_version": rating,
+            "policy_version": policy,
+            "default_compensation_bands": bands,
+            "schedule_grade_resolutions": run.get("schedule_grade_resolutions", []),
+        }
+
+    def _refresh_business_groups(self, run: dict) -> None:
+        context = self._business_context(run)
+        records = run.get("field_records") or run.get("issues", [])
+        run["issue_groups"] = build_groups(run, records, context["rating_version"], context["policy_version"], context["default_compensation_bands"], ISSUE_LABELS)
+        if run.get("business_context_stale"):
+            for group in run["issue_groups"]:
+                group["status_label"] = "依据已变化，需重新核对"
+
+    def _business_groups(self, run: dict) -> list[dict]:
+        self._refresh_business_groups(run)
+        return run["issue_groups"]
+
+    def _require_current_audit(self, run: dict) -> None:
+        self._require_fresh(run)
+        if run.get("audit_context") != self._business_context(run):
+            invalidate_business_decisions(run.setdefault("business_decisions", []))
+            self._refresh_business_groups(run)
+            run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
+            self.store.save(run)
+            raise ValueError("星级、政策或档位依据已变化，请重新核对后再记录处理意见。")
+
+    def _course_evidence(self, schedule: list, group: dict, target: Any) -> list[dict]:
+        if not set(group["affected_fields"]) & {"one_to_one", "class_value"}:
+            return []
+        lines = []
+        for item in schedule:
+            if item.teacher != group["teacher"]:
+                continue
+            source = next(iter(item.provenance.values()))
+            rationale = "未进入可计算范围"
+            if item.class_type == "1对1":
+                coefficient = GRADE_COEFFICIENTS.get(item.grade)
+                rationale = f"AA：实到 {item.attended} × 2 × 年级系数 {coefficient}" if coefficient is not None and item.attended else "AA：年级或实到缺失，不能计算"
+            elif item.class_type in CLASS_MULTIPLIERS:
+                grade, people = GRADE_COEFFICIENTS.get(item.grade), HEADCOUNT_COEFFICIENTS.get(item.attended)
+                rationale = f"AC：年级系数 {grade} × 实到系数 {people} × 班型系数 {CLASS_MULTIPLIERS[item.class_type]} × 2" if grade is not None and people is not None else "AC：年级或实到超出已确认系数，不能计算"
+            if item.lesson_status.strip() != "已上课" or item.attended is None or item.attended <= 0:
+                rationale = "未计入：只计已上课且实到人数大于零的记录。"
+            lines.append({"来源": "原始排课", "来源文件": Path(source.source_file).name, "来源工作表": source.sheet, "课程时间": item.lesson_time, "课程状态": item.lesson_status, "班级": item.class_name, "班型": item.class_type, "年级": item.grade or "待确认", "实到": item.attended, "计算依据": rationale, "来源位置": ", ".join(value.coordinate for name, value in item.provenance.items() if name != "student")})
+        if target:
+            for field in group["affected_fields"]:
+                value = target.provenance.get(field)
+                if value:
+                    lines.append({"来源": "工资表", "字段": value.source_field, "工资表值": value.normalized_value, "来源文件": Path(value.source_file).name, "来源工作表": value.sheet, "来源位置": value.coordinate, "读取情况": self._cell_state(value.state.value)})
+        return lines
+
+    def _evidence_sections(self, run: dict, group: dict, records: list[dict], target: Any) -> list[dict]:
+        context = self._business_context(run)
+        rating, policy = context["rating_version"], context["policy_version"]
+        target_items = []
+        if target:
+            for field in ("one_to_one", "class_value", "teaching_hours", "ae", "af"):
+                value = target.provenance.get(field)
+                if value:
+                    target_items.append({"字段": {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "teaching_hours": "AD 最终授课小时", "ae": "AE 课时单价", "af": "AF 总课时费"}[field], "实际值": value.normalized_value, "来源文件": Path(value.source_file).name, "来源工作表": value.sheet, "来源位置": value.coordinate, "读取情况": self._cell_state(value.state.value)})
+        audit_names = {"rate": "AE 课时单价", "ae": "AE 课时单价", "af_policy": "AF 总课时费", "af": "AF 总课时费"}
+        audit_items = [{"字段": audit_names.get(row["field"], row["field_label"]), "状态": row["status_label"], "期望值": row["expected"], "实际值": row["actual"], "差异": row["difference"], "审计说明": row["reason"]} for row in records]
+        authority = []
+        if rating:
+            teacher_rating = next((item for item in rating.get("ratings", []) if item.get("teacher") == group["teacher"]), None)
+            authority.append({"依据": "星级权威资料", "来源": rating.get("source"), "有效期": f"{rating.get('effective_from')} 至 {rating.get('effective_to')}", "版本": rating.get("source_version"), "教师": group["teacher"], "权威星级": teacher_rating.get("rating") if teacher_rating else None, "身份": teacher_rating.get("role") if teacher_rating else None})
+        if policy:
+            profile = next((item for item in policy.get("profiles", []) if item.get("teacher") == group["teacher"]), None)
+            authority.append({"依据": "教师工资政策", "来源": policy.get("source"), "有效期": f"{policy.get('effective_from')} 至 {policy.get('effective_to')}", "版本": policy.get("id"), "身份": profile.get("role") if profile else None, "政策星级": (profile.get("rating_override") if profile and profile.get("rating_override") is not None else profile.get("rating")) if profile else None, "义务课时": profile.get("obligation_hours") if profile else None, "扣减义务课时": profile.get("obligation_hours_deduction_enabled") if profile else None, "特殊审批": profile.get("special_approval") if profile else None})
+        sections = [{"title": "原始字段审计", "items": audit_items}, {"title": "工资表目标与 AD 来源", "items": target_items}]
+        if not set(group["affected_fields"]) & {"rate", "af_policy", "ae", "af", "rating"}:
+            return sections
+        teacher_rating = next((x for x in (rating or {}).get("ratings", []) if x["teacher"] == group["teacher"]), None)
+        profile = next((x for x in (policy or {}).get("profiles", []) if x["teacher"] == group["teacher"]), None)
+        hours = target.teaching_hours if target else None
+        sections.append({"title": "共同输入与独立权威依据", "items": [{"AD 最终授课小时": hours, "AD 来源": "工资表自身；具体文件与单元格见上方"}] + authority})
+        for field, label, basis, version_info in (("rate", "AE 规则链", teacher_rating, rating), ("af_policy", "AF 规则链", profile, policy)):
+            if field not in group["affected_fields"]:
+                continue
+            selected_rating = basis.get("rating_override", basis.get("rating")) if basis else None
+            if basis and selected_rating is None:
+                selected_rating = basis.get("rating")
+            valid = version_info and version_info["effective_from"] <= run["period"] <= version_info["effective_to"]
+            # Use the exact Core selector, independently for AE and AF.
+            matched = [b for b in default_compensation_bands() if valid and basis and hours is not None and b.applies_to(run["period"], basis.get("role", "教师"), hours) and b.rating == selected_rating]
+            items = [{"适用星级": selected_rating, "命中规则数": len(matched)}]
+            items.extend({"AD 所属档位": b.band, "小时下界（含）": b.min_hours, "小时上界（含）": b.max_hours if b.max_hours is not None else "无上限", "基础金额": b.base_amount, "星级加成": b.rating_bonus, "规则有效期": f"{b.effective_from} 至 {b.effective_to}", "规则版本": b.source_version, "规则来源": b.source, "规则文件": "skill/payroll/references/ae_tier_rules.md", "单价计算": f"{b.base_amount:g} + {b.rating_bonus:g}"} for b in matched)
+            fact = next((x for x in records if x["field"] == field), None)
+            if field == "af_policy" and basis:
+                deductible = basis.get("obligation_hours", 0) if basis.get("obligation_hours_deduction_enabled", False) else 0
+                items.append({"教师政策版本": (version_info or {}).get("id"), "原始星级": basis.get("rating"), "特批星级": basis.get("rating_override"), "特批说明": basis.get("special_approval") or "无", "是否扣义务课时": "是" if basis.get("obligation_hours_deduction_enabled") else "否", "本月扣减小时": deductible, "计算过程": f"({hours} - {deductible}) × ({matched[0].base_amount} + {matched[0].rating_bonus})" if len(matched) == 1 and hours is not None else "依据不足，不能唯一计算", "政策备注": basis.get("note", "")})
+            if fact:
+                items.append({"系统应有值": fact["expected"], "工资表值": fact["actual"], "差额": fact["difference"], "计算出处": "核算程序的原始字段结果；本页不另行计算工资"})
+            sections.append({"title": label, "items": items})
+        sections.append({"title": "独立性边界", "items": [{"星级": "独立权威" if teacher_rating else "权威缺失", "档位规则": "独立规则表，按生效期匹配", "教师工资政策": "独立权威" if profile else "权威缺失", "AD": "仍来自工资表自身，AE/AF 尚未完全独立闭环"}]})
+        return sections
 
     @staticmethod
     def _read(role: str, path: Path, period: str):
@@ -544,20 +704,20 @@ class PayrollService:
                 state = "已核对" if rows and all(row.status == "MATCH" for row in rows) else "待处理"
                 note = "使用按生效期保存的教师星级权威资料比较工资表。" if state == "已核对" else "缺少、过期或不一致的星级权威资料会阻止通过。"
             elif field == "rate":
-                state = "已核对" if rows and all(row.status == "RATE_MATCH" for row in rows) else "待处理"
-                note = "使用独立星级与生效期档位金额规则计算 AE。" if state == "已核对" else "缺少规则、规则冲突或金额不一致会阻止通过。"
+                state = "依据已比对 / 待AD独立来源" if rows and all(row.status == "RATE_MATCH" for row in rows) else "待处理"
+                note = "已用独立星级与生效期档位规则比对 AE；AD 最终授课小时仍读取自工资表自身，尚非完整独立闭环。" if state.startswith("依据已比对") else "缺少规则、规则冲突或金额不一致会阻止通过。"
             elif field == "formula":
                 state = "已核对" if rows and all(row.status == "FORMULA_MATCH" for row in rows) else "待处理"
                 note = "关键公式区域按同列结构模式扫描。" if state == "已核对" else "尚无足够公式样本，或已发现公式结构异常。"
             elif field == "af_policy":
-                state = "已核对" if rows and all(row.status == "AF_POLICY_MATCH" for row in rows) else "待处理"
-                note = "按独立教师工资政策档案计算 AF，不以工资表 TRMT 文字作为唯一依据。" if state == "已核对" else "缺少有效政策、特殊审批或 AF 金额不一致。"
+                state = "依据已比对 / 待AD独立来源" if rows and all(row.status == "AF_POLICY_MATCH" for row in rows) else "待处理"
+                note = "已按独立教师工资政策计算 AF；AD 最终授课小时仍来自工资表自身，不能声称独立闭环。" if state.startswith("依据已比对") else "缺少有效政策、特殊审批或 AF 金额不一致。"
             else:
                 state, note = "仅读取 / 待人工确认", "总工资包含续费、退费、激励、管理奖等未接入来源。"
             # An empty check cannot be advertised as independently verified.
-            automatic_available = field in {"one_to_one", "class_value", "rating", "rate", "formula", "af_policy"} and bool(rows)
-            formula_recomputed = field in {"ae", "af"} and any(row.expected is not None for row in rows)
-            formula_compared = field in {"ae", "af"} and any(row.expected is not None and row.actual is not None for row in rows)
+            automatic_available = field in {"one_to_one", "class_value", "rating", "formula"} and bool(rows)
+            formula_recomputed = field in {"ae", "af", "rate", "af_policy"} and any(row.expected is not None for row in rows)
+            formula_compared = field in {"ae", "af", "rate", "af_policy"} and any(row.expected is not None and row.actual is not None for row in rows)
             output.append({"field": field, "label": labels[field], "state": state, "note": note, "read": bool(rows), "authority": automatic_available, "computed": automatic_available or formula_recomputed, "compared": automatic_available or formula_compared})
         return output
 

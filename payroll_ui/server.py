@@ -125,7 +125,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action == "check":
                     return self._json(self.server.service.check(run_id))
                 if action == "decisions":
-                    return self._json(self.server.service.decide(run_id, str(payload.get("issue_id", "")), str(payload.get("action", "")), str(payload.get("person", "")), str(payload.get("reason", ""))))
+                    return self._json(self.server.service.decide(run_id, str(payload.get("issue_id", "")), str(payload.get("action", "")), str(payload.get("person", "")), str(payload.get("reason", "")), expected_fingerprint=payload.get("fingerprint")))
                 if action == "management":
                     return self._json(self.server.service.save_management(run_id, payload.get("values", {}), str(payload.get("person", ""))))
             return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)
