@@ -252,7 +252,7 @@ def test_check_failure_returns_to_a_recoverable_material_state(tmp_path):
 
 
 def test_browser_shell_uses_plain_language_for_core_workflow():
-    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text()
+    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text(encoding="utf-8")
     for technical_word in ("Adapter", "Fingerprint", "Coverage", "Payroll Core"):
         assert technical_word not in source
     for plain_label in ("材料准备", "核对结果", "待处理问题", "管理岗位确认", "排课项目完成度"):
