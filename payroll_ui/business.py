@@ -58,6 +58,10 @@ def fingerprint(run: dict, records: list[dict], rating_version: dict | None, pol
         "run_id": run["id"],
         "period": run.get("period"),
         "schedule_grade_resolutions": run.get("schedule_grade_resolutions", []),
+        "resolutions": [
+            {key: value for key, value in item.items() if key not in {"created_at", "updated_at", "status"}}
+            for item in run.get("resolutions", []) if item.get("status") == "ACTIVE"
+        ],
         "facts": facts,
         "source_hashes": {key: value.get("sha256") for key, value in sorted(run.get("files", {}).items())},
         "rating_version": rating_version,

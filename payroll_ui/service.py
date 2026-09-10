@@ -17,6 +17,13 @@ from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
 from payroll_core.reconcile.payroll_scope import CLASS_MULTIPLIERS, HEADCOUNT_COEFFICIENTS, FieldCheck, class_value_contribution, schedule_field_checks, total_salary_read_checks
+from payroll_core.reconcile.ac_resolution import (
+    ApprovedPayrollOverride,
+    SourceDataCorrection,
+    assess_counterfactual_cause,
+    resolve_ac,
+    schedule_record_id,
+)
 from payroll_core.excel.reconciliation_bridge import GRADE_COEFFICIENTS
 
 from .storage import RunStore
@@ -76,7 +83,7 @@ class PayrollService:
             raise ValueError("请选择有效月份。")
         versions = [item for item in self.store.list_rating_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         policies = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
         self.store.save(run)
         return self.render(run)
 
@@ -234,6 +241,11 @@ class PayrollService:
             # Grade resolutions are bound to coordinates in the imported
             # schedule workbook. Replacing that source invalidates them.
             run.pop("schedule_grade_resolutions", None)
+            for item in run.get("resolutions", []):
+                if item.get("status") == "ACTIVE":
+                    item["status"] = "NEEDS_RECONFIRMATION"
+                    item["invalidated_at"] = datetime.now(timezone.utc).isoformat()
+                    run.setdefault("resolution_history", []).append({**item, "history_event": "SOURCE_CHANGED"})
         # Legacy per-field decisions predate business review cards.  They are
         # cleared for backward compatibility; durable business decisions are
         # retained but explicitly require a fresh confirmation.
@@ -246,6 +258,72 @@ class PayrollService:
         self._fresh(run)
         self.store.save(run)
         return self.render(run)
+
+    def create_resolution(self, run_id: str, issue_id: str, kind: str, course_record_id: str, values: dict[str, Any], confirmed_by: str, expected_fingerprint: str) -> dict:
+        """Persist one run-scoped AC correction or approved treatment.
+
+        The API deliberately accepts one selected course at a time.  That keeps
+        every change and its counterfactual evidence attributable to a stable
+        source record.
+        """
+        run = self._load(run_id)
+        self._require_current_audit(run)
+        if run.get("schedule_grade_resolutions"):
+            raise ValueError("该核算含旧版年级修正记录；请先完成历史迁移，避免重复应用。")
+        group = next((item for item in run.get("issue_groups", []) if item["id"] == issue_id), None)
+        if not group or "class_value" not in group.get("affected_fields", []):
+            raise ValueError("只能从当前 AC 班课业务问题创建结构化处理。")
+        if expected_fingerprint != group.get("fingerprint"):
+            raise ValueError("问题依据已变化，请刷新后重新选择课程。")
+        if kind not in {"SOURCE_DATA_CORRECTION", "APPROVED_PAYROLL_OVERRIDE"}:
+            raise ValueError("请选择修正上游事实或特殊核算口径。")
+        if not confirmed_by.strip() or not course_record_id:
+            raise ValueError("请选择具体课程并填写确认人。")
+        schedule = self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"]).records
+        record = next((item for item in schedule if schedule_record_id(item) == course_record_id), None)
+        if record is None or record.teacher != group["teacher"] or record.period != run["period"]:
+            raise ValueError("所选课程不属于当前教师、月份或当前排课来源。")
+        source_hash = run["files"]["schedule"]["sha256"]
+        if any(item.get("status") == "ACTIVE" and item.get("kind") == kind and item.get("source_record_id") == course_record_id for item in run.get("resolutions", [])):
+            raise ValueError("该课程已经存在同类型的有效处理记录。")
+        timestamp = datetime.now(timezone.utc).isoformat()
+        if kind == "SOURCE_DATA_CORRECTION":
+            field = str(values.get("field", ""))
+            original = getattr(record, field, object())
+            correction = SourceDataCorrection(
+                run_id=run["id"], period=run["period"], teacher=record.teacher, source_record_id=course_record_id,
+                source_file_hash=source_hash, field=field, original_value=original,
+                corrected_value=values.get("corrected_value"), reason_code=str(values.get("reason_code", "")),
+                reason_text=str(values.get("reason", "")).strip(), confirmed_by=confirmed_by.strip(), confirmed_at=timestamp,
+            )
+            item = {**asdict(correction), "id": uuid.uuid4().hex[:16], "kind": kind, "issue_id": group["id"], "issue_fingerprint": group["fingerprint"], "created_at": timestamp, "outcome": "PENDING_RECOMPUTE"}
+        else:
+            default_value, calculation = class_value_contribution(record)
+            if default_value is None:
+                raise ValueError("该课程没有可确定的默认班课折算，不能创建特殊核算口径。")
+            override = ApprovedPayrollOverride(
+                run_id=run["id"], period=run["period"], teacher=record.teacher, source_record_id=course_record_id,
+                source_file_hash=source_hash, affected_field="class_value", default_treatment=calculation,
+                default_contribution=default_value, approved_treatment=str(values.get("approved_treatment", "")).strip(),
+                approved_contribution=float(values.get("approved_contribution")), reason=str(values.get("reason", "")).strip(),
+                approved_by=confirmed_by.strip(), created_at=timestamp,
+            )
+            item = {**asdict(override), "id": uuid.uuid4().hex[:16], "kind": kind, "issue_id": group["id"], "issue_fingerprint": group["fingerprint"], "created_at": timestamp, "outcome": "PENDING_RECOMPUTE"}
+        run.setdefault("resolutions", []).append(item)
+        invalidate_business_decisions(run.setdefault("business_decisions", []))
+        self.store.save(run)
+        return self.check(run_id)
+
+    def active_resolution(self, run_id: str, resolution_id: str) -> dict:
+        run = self._load(run_id)
+        item = next((value for value in run.get("resolutions", []) if value.get("id") == resolution_id), None)
+        if item is None:
+            raise ValueError("未找到该结构化处理记录。")
+        return item
+
+    def resolution_recomputation(self, run_id: str, resolution_id: str) -> dict:
+        item = self.active_resolution(run_id, resolution_id)
+        return dict(item.get("recomputation") or {})
 
     def check(self, run_id: str) -> dict:
         run = self._load(run_id)
@@ -283,6 +361,7 @@ class PayrollService:
         resolved_schedule = self._apply_schedule_grade_resolutions(reads["schedule"].records, run)
         scoped_schedule = [row for row in resolved_schedule if row.teacher in scope_teachers]
         checks = schedule_field_checks(scoped_schedule, payroll)
+        checks = self._apply_ac_resolutions(run, scoped_schedule, payroll, checks)
         for teacher in sorted(scope_teachers - {row.teacher for row in payroll}):
             checks.extend((
                 FieldCheck(teacher, "one_to_one", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
@@ -395,6 +474,10 @@ class PayrollService:
         class name.  It remains tied to the imported schedule hash through the
         run's ordinary stale-file gate.
         """
+        if run.get("resolutions"):
+            # New correction records use stable course identities.  Never apply
+            # the older coordinate layer as well.
+            return records
         resolutions = {
             str(item.get("class_name_cell", "")): str(item.get("grade", "")).strip()
             for item in run.get("schedule_grade_resolutions", [])
@@ -408,6 +491,58 @@ class PayrollService:
             else record
             for record in records
         ]
+
+    def _apply_ac_resolutions(self, run: dict, schedule: list, payroll: list, checks: list[FieldCheck]) -> list[FieldCheck]:
+        """Replace AC checks only for teachers with active, verified resolutions."""
+        active = [item for item in run.get("resolutions", []) if item.get("status") == "ACTIVE"]
+        if not active:
+            return checks
+        by_teacher: dict[str, list[dict]] = {}
+        for item in active:
+            by_teacher.setdefault(str(item.get("teacher", "")), []).append(item)
+        payroll_by_teacher = {item.teacher: item for item in payroll}
+        output = [item for item in checks if not (item.field == "class_value" and item.teacher in by_teacher)]
+        for teacher, stored in by_teacher.items():
+            corrections: list[SourceDataCorrection] = []
+            overrides: list[ApprovedPayrollOverride] = []
+            for item in stored:
+                common = {key: value for key, value in item.items() if key not in {"id", "kind", "issue_id", "issue_fingerprint", "outcome", "recomputation", "invalidated_at", "history_event"}}
+                if item["kind"] == "SOURCE_DATA_CORRECTION":
+                    common.pop("created_at", None)
+                    corrections.append(SourceDataCorrection(**common))
+                else:
+                    overrides.append(ApprovedPayrollOverride(**common))
+            teacher_schedule = [row for row in schedule if row.teacher == teacher and row.class_type != "1对1"]
+            result = resolve_ac(
+                teacher_schedule, run_id=run["id"], period=run["period"], corrections=corrections, overrides=overrides,
+                source_hashes={row.source: run["files"]["schedule"]["sha256"] for row in teacher_schedule},
+            )
+            target = payroll_by_teacher.get(teacher)
+            actual = target.class_value if target else None
+            baseline = result.original_total
+            if result.effective_total is None:
+                check = FieldCheck(teacher, "class_value", None, actual, "NEEDS_MANUAL_REVIEW", "已存在结构化处理，但仍有课程没有可确定的班课折算，不能完成重算。")
+                assessment = {"status": "UNEXPLAINED", "blockers": list(result.blockers)}
+            elif actual is None:
+                check = FieldCheck(teacher, "class_value", result.effective_total, None, "NEEDS_MANUAL_REVIEW", "工资表 AC 没有可靠可读值，不能确认结构化处理结果。")
+                assessment = {"status": "UNEXPLAINED", "blockers": []}
+            else:
+                cause = assess_counterfactual_cause(baseline_total=baseline, recomputed_total=result.effective_total, payroll_total=actual)
+                status = "MATCH" if cause.status == "EXACT_CAUSE" else "UNEXPLAINED_DIFFERENCE"
+                reason = "结构化处理重算后与工资表 AC 精确一致。" if status == "MATCH" else "结构化处理已参与重算，但仍未精确闭合工资表 AC 差异。"
+                check = FieldCheck(teacher, "class_value", result.effective_total, actual, status, reason)
+                assessment = asdict(cause)
+            for item in stored:
+                item["recomputation"] = {"original_total": result.original_total, "corrected_total": result.corrected_total, "effective_total": result.effective_total, "assessment": assessment, "contributions": [
+                    {"source_record_id": entry.source_record_id, "default_contribution": entry.default_contribution, "effective_contribution": entry.effective_contribution, "calculation": entry.calculation}
+                    for entry in result.contributions
+                ]}
+                if check.status == "MATCH" and assessment.get("status") == "EXACT_CAUSE":
+                    item["outcome"] = "RESOLVED_BY_SOURCE_CORRECTION" if item["kind"] == "SOURCE_DATA_CORRECTION" else "RESOLVED_BY_APPROVED_OVERRIDE"
+                else:
+                    item["outcome"] = "PENDING_REVIEW"
+            output.append(check)
+        return output
 
     def _policy_version_for_run(self, run: dict) -> dict | None:
         version_id = run.get("policy_version_id")
@@ -493,7 +628,12 @@ class PayrollService:
             sections.append({"title": "特殊处理线索（不代表已获批准）", "items": [{"工资表批注": c.text, "来源文件": Path(c.source_file).name, "工作表": c.sheet, "单元格": c.coordinate} for c in comments] or [{"线索状态": "当前文件没有可读取的相关批注。历史特殊班型须由负责人核实，不自动改变折算规则。"}]})
         if not self._fresh(run):
             raise ValueError("文件在查看证据时发生变化，请重新导入。")
-        return {"issue": group, "field_records": records, "sections": sections, "evidence": lines, "ac_calculation": ac_calculation, "note": "课程级明细仅适用于 AC/AA 排课核对；其余依据见分段证据。", "boundary": {"run_id": run["id"], "fingerprint": group["fingerprint"], "source_hashes": {key: item["sha256"] for key, item in run["files"].items()}, "audit_context": run.get("audit_context")}}
+        resolution_courses = []
+        if "class_value" in group["affected_fields"]:
+            for item in schedule:
+                if item.teacher == group["teacher"] and item.class_type != "1对1":
+                    resolution_courses.append({"id": schedule_record_id(item), "label": " / ".join(value for value in (item.lesson_date, item.class_name, item.course_name, item.class_type, item.grade) if value)})
+        return {"issue": group, "field_records": records, "sections": sections, "evidence": lines, "ac_calculation": ac_calculation, "resolution_courses": resolution_courses, "note": "课程级明细仅适用于 AC/AA 排课核对；其余依据见分段证据。", "boundary": {"run_id": run["id"], "fingerprint": group["fingerprint"], "source_hashes": {key: item["sha256"] for key, item in run["files"].items()}, "audit_context": run.get("audit_context")}}
 
     def export_csv(self, run_id: str) -> str:
         run = self._load(run_id); self._require_fresh(run)

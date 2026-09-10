@@ -3,6 +3,8 @@ let current = null;
 let homeRuns = [];
 let tab = "materials";
 let filters = { field: "all", state: "all", decision: "all", teacher: "" };
+let evidenceResolutionCourses = [];
+let evidenceIssueId = "";
 let detailBasisToken = null;
 
 const roleCopy = {
@@ -247,14 +249,31 @@ async function evidence(id) {
     const sections = result.sections || [];
     const courses = result.evidence || [];
     const acCalculation = result.ac_calculation;
+    const resolutionCourses = result.resolution_courses || [];
+    evidenceResolutionCourses = resolutionCourses;
+    evidenceIssueId = id;
     const activeAction = decision?.action || "DEFERRED";
     $("#issue-detail").innerHTML = `<article class="detail-panel"><div class="section-head"><div><p class="eyebrow">问题详情</p><h3>${escapeHtml(group.title)}</h3><p class="muted">${escapeHtml(group.teacher)}</p></div><button class="quiet" aria-label="关闭问题详情" onclick="$('#issue-detail').innerHTML=''">关闭</button></div>${groupFacts(group)}${decision ? `<div class="decision-saved"><strong>${escapeHtml(group.decision_label || "已记录处理意见")}</strong><p>状态：${escapeHtml(decisionStatusLabel(decision.status))} · ${escapeHtml(decision.person)} · ${escapeHtml(decision.reason)}</p></div>` : ""}<section class="action-first" aria-labelledby="decision-heading"><h4 id="decision-heading">记录处理意见</h4><p class="muted small">默认是“暂时保留”，不会把问题认定为已确认。</p><div class="decision-form"><label for="decision">处理方式<select id="decision"><option value="DEFERRED" ${activeAction === "DEFERRED" ? "selected" : ""}>暂时保留，稍后处理</option><option value="CONFIRMED_ERROR" ${activeAction === "CONFIRMED_ERROR" ? "selected" : ""}>确认工资表需要修改</option><option value="ACCEPTED_EXCEPTION" ${activeAction === "ACCEPTED_EXCEPTION" ? "selected" : ""}>确认属于接受的特殊情况</option></select></label><label for="person">确认人<input id="person" value="${escapeHtml(decision?.person || "")}" placeholder="填写姓名"></label><label class="wide" for="reason">判断说明<textarea id="reason" placeholder="说明判断依据（必填）">${escapeHtml(decision?.reason || "")}</textarea></label></div><div class="action-bar"><span class="muted small">保存不会修改原 Excel，也不会直接让整份工资通过。</span><span><button class="secondary" onclick="evidence('${id}')">重新查看证据</button><button onclick="decide('${id}')">保存处理意见</button></span></div></section>${affectedFacts(result.field_records || [])}${sections.map(evidenceSection).join("")}${acCalculationEvidence(acCalculation)}${courseEvidence(courses, result.note, acCalculation)}${boundaryNote(result.boundary)}</article>`;
     $("#issue-detail").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) { showMessage(error.message); }
 }
 
+function resolutionControls(issueId, courses) {
+  if (!courses.length) return "";
+  const options = courses.map(course => `<option value="${escapeHtml(course.id)}">${escapeHtml(course.label || course.id)}</option>`).join("");
+  return `<section class="action-first"><h4>结构化处理班课差异</h4><p class="muted small">选择具体课程后保存。上游事实修正保留原始排课；特殊核算口径只作用于本次工资核算。</p><div class="decision-form"><label>课程<select id="resolution-course">${options}</select></label><label>处理方式<select id="resolution-kind"><option value="SOURCE_DATA_CORRECTION">修正上游事实</option><option value="APPROVED_PAYROLL_OVERRIDE">特殊核算口径</option></select></label><label>确认人<input id="resolution-person" placeholder="填写姓名"></label><label class="wide">处理内容<textarea id="resolution-values" placeholder='上游事实修正：{"field":"grade","corrected_value":"高二","reason_code":"GRADE_ROLLOVER_NOT_UPDATED","reason":"8月升年级未同步"}&#10;特殊口径：{"approved_treatment":"按批准口径","approved_contribution":1.2,"reason":"已批准"}'></textarea></label></div><div class="action-bar"><button onclick="createResolution('${issueId}')">保存并重新核对</button></div></section>`;
+}
+
+async function createResolution(issueId) {
+  try {
+    const values = JSON.parse($("#resolution-values").value || "{}");
+    current = await api(`/api/runs/${current.id}/resolutions`, { method: "POST", body: JSON.stringify({ issue_id: issueId, kind: $("#resolution-kind").value, course_record_id: $("#resolution-course").value, values, confirmed_by: $("#resolution-person").value, fingerprint: detailBasisToken }) });
+    renderRun(); showMessage("已保存结构化处理并重新核对。", "success");
+  } catch (error) { showMessage(error.message); }
+}
+
 function groupFacts(group) {
-  return `<div class="comparison"><div><span>系统值</span><strong>${escapeHtml(group.expected ?? "无法计算")}</strong></div><div><span>工资表值</span><strong>${escapeHtml(group.actual ?? "未读取")}</strong></div><div><span>差异</span><strong>${escapeHtml(group.difference ?? "—")}</strong></div></div><p>${escapeHtml(group.reason || "请结合以下字段事实和来源证据判断。")}</p>`;
+  return `<div class="comparison"><div><span>系统值</span><strong>${escapeHtml(group.expected ?? "无法计算")}</strong></div><div><span>工资表值</span><strong>${escapeHtml(group.actual ?? "未读取")}</strong></div><div><span>差异</span><strong>${escapeHtml(group.difference ?? "—")}</strong></div></div><p>${escapeHtml(group.reason || "请结合以下字段事实和来源证据判断。")}</p>${resolutionControls(evidenceIssueId, evidenceResolutionCourses)}`;
 }
 
 function decisionStatusLabel(status) {

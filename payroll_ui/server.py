@@ -96,6 +96,9 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 run_id = parsed.path.split("/")[3]
                 issue = parse_qs(parsed.query).get("issue", [""])[0]
                 return self._json(self.server.service.evidence(run_id, issue))
+            if parsed.path.startswith("/api/runs/") and "/resolutions/" in parsed.path:
+                parts = parsed.path.split("/")
+                return self._json(self.server.service.active_resolution(parts[3], parts[5]))
             if parsed.path.startswith("/api/runs/"):
                 return self._json(self.server.service.get(parsed.path.split("/")[3]))
             return self._error("找不到该页面。", HTTPStatus.NOT_FOUND)
@@ -132,6 +135,11 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.save_management(run_id, payload.get("values", {}), str(payload.get("person", ""))))
                 if action == "authority":
                     return self._json(self.server.service.rebind_authority(run_id, str(payload.get("kind", "")), str(payload.get("version_id", ""))))
+                if action == "resolutions":
+                    if len(bits) == 4:
+                        return self._json(self.server.service.create_resolution(run_id, str(payload.get("issue_id", "")), str(payload.get("kind", "")), str(payload.get("course_record_id", "")), payload.get("values", {}), str(payload.get("confirmed_by", "")), str(payload.get("fingerprint", ""))), HTTPStatus.CREATED)
+                    if len(bits) == 5 and bits[4] == "recompute":
+                        return self._json(self.server.service.resolution_recomputation(run_id, str(payload.get("resolution_id", ""))))
             return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             return self._error(str(exc))
