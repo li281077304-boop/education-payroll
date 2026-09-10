@@ -1,8 +1,45 @@
 # CURRENT_STATE
 
-盘点日期：2026-09-08
+盘点日期：2026-09-10
 
-本文件只记录已经检查到的事实，不判断哪个版本正确，也不提出架构重构方案。
+本文件只记录当前仓库和已确认能力，不提出未来架构方案。
+
+## 0. 仓库现场
+
+- 当前 branch：`feature/payroll-resolution-workflows`
+- 最新提交：`3efd8e1 feat: add authority revision workflow and AC calculation evidence`
+- `feature/payroll-resolution-workflows` 已创建；本次审计没有创建新分支。
+- 当前测试：`79 passed`（命令见 `AGENTS.md`）。
+- 当前 `git status` 只有一个未跟踪文件：`payroll_core/reconcile/ac_resolution.py`；无 staged 修改，无已提交业务逻辑变更。
+- 该文件是上一轮/上一位 Agent 留下的 resolution workflow 半成品；本次未修改、未删除、未提交，完成度尚未确认。
+
+## 1. 已完成能力
+
+- Payroll Core 标准模型、AA 一对一与 AC 班课独立核对。
+- 本组 2026-08 Run 的 27 人范围处理。
+- 星级权威版本、教师工资政策档案、AE/AF 检查和 AD 门槛规则。
+- Excel layout/fingerprint、公式完整性审计、provenance、Coverage/PASS 门禁。
+- Business Issue 聚合：字段级审计事实保留，UI 层聚合展示。
+- 完整证据详情、人工决定持久化、rerun/restart 恢复和 source/authority/rule/fingerprint 变化后的重新确认机制。
+- 基础资料修正版 workflow，以及 AC 逐课程计算证据和工资表批注独立展示。
+
+## 2. 当前真实 Run 事实
+
+- 本机存在真实 2026-08 Run；真实数据未复制进仓库。
+- 已验证的匿名业务结论：AA 27/27 一致；星级 27/27 一致；公式完整性通过；AC 有 2 个独立差异；AE/AF 各有 2 条字段差异，已聚合为业务问题。
+- 一条 AC 差异为 0.38：独立排课计算 68.43，工资表/人工批注为 68.05；业务线索是 8 月升年级后排课系统年级未同步。该事实尚未在当前提交中完成结构化 correction workflow。
+- 另一类已知案例是排课事实正确但部分一人班有批准的特殊折算；当前历史决定仍是 `ACCEPTED_EXCEPTION`，具体课程未可靠确定，尚不能自动迁移成 override。
+
+## 3. 当前状态与未完成事项
+
+- 当前分支是 resolution workflow 的开发现场，但 `SOURCE_DATA_CORRECTION` 与 `APPROVED_PAYROLL_OVERRIDE` 尚不能视为已完成或已通过真实 UI 验收。
+- 未完成项：审计并整合未跟踪 `ac_resolution.py`；建立持久化/UI 入口；完成有效事实/局部 override 重算；补齐回归测试和真实 8 月 UI 验收。
+- 当前 RC 状态：不能宣称 resolution workflow 已达到 release candidate。
+
+## 4. 安全与范围
+
+- 本次未读取、修改或提交真实 Excel；未提交真实姓名、工资、学生、排课、续费退费数据。
+- 当前交接不扩展续费、退费、AV，不修改既有 AA/星级/公式算法，不合并 `main`。
 
 ## 1. 当前最新版工资 Skill
 
