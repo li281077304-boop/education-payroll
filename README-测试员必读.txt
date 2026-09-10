@@ -1,5 +1,7 @@
 Education Payroll V1 RC1（Windows x64）
 
+当前 RC1 已在 Windows 11 x64 验证，Windows 10 尚未实机验证。
+
 1. 将整个压缩包解压到一个可写目录。
 2. 双击“Education Payroll\Education Payroll.exe”。程序会启动本机服务并打开浏览器。
 3. 点击“新建工资核算”，选择月份，再按页面提示导入排课表和工资表。
