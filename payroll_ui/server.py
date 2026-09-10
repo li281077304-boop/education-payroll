@@ -84,6 +84,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.rating_versions())
             if parsed.path == "/api/policies":
                 return self._json(self.server.service.policy_versions())
+            if parsed.path == "/api/authorities":
+                return self._json(self.server.service.authority_catalog())
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/export.csv"):
                 run_id = parsed.path.split("/")[3]
                 body = self.server.service.export_csv(run_id).encode("utf-8-sig")
@@ -110,9 +112,9 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             if path == "/api/runs":
                 return self._json(self.server.service.create(str(payload.get("period", ""))), HTTPStatus.CREATED)
             if path == "/api/ratings":
-                return self._json(self.server.service.save_rating_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), str(payload.get("source_version", "")), payload.get("ratings", [])), HTTPStatus.CREATED)
+                return self._json(self.server.service.save_rating_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), str(payload.get("source_version", "")), payload.get("ratings", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
             if path == "/api/policies":
-                return self._json(self.server.service.save_policy_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), payload.get("profiles", [])), HTTPStatus.CREATED)
+                return self._json(self.server.service.save_policy_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), payload.get("profiles", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
             if path == "/api/pick":
                 return self._json({"path": self._pick_excel()})
             if path == "/api/inspect":
@@ -128,6 +130,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.decide(run_id, str(payload.get("issue_id", "")), str(payload.get("action", "")), str(payload.get("person", "")), str(payload.get("reason", "")), expected_fingerprint=payload.get("fingerprint")))
                 if action == "management":
                     return self._json(self.server.service.save_management(run_id, payload.get("values", {}), str(payload.get("person", ""))))
+                if action == "authority":
+                    return self._json(self.server.service.rebind_authority(run_id, str(payload.get("kind", "")), str(payload.get("version_id", ""))))
             return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             return self._error(str(exc))

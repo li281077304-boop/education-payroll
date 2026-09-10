@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 import uuid
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
@@ -15,7 +16,7 @@ from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
-from payroll_core.reconcile.payroll_scope import CLASS_MULTIPLIERS, HEADCOUNT_COEFFICIENTS, FieldCheck, schedule_field_checks, total_salary_read_checks
+from payroll_core.reconcile.payroll_scope import CLASS_MULTIPLIERS, HEADCOUNT_COEFFICIENTS, FieldCheck, class_value_contribution, schedule_field_checks, total_salary_read_checks
 from payroll_core.excel.reconciliation_bridge import GRADE_COEFFICIENTS
 
 from .storage import RunStore
@@ -73,8 +74,8 @@ class PayrollService:
     def create(self, period: str) -> dict:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
             raise ValueError("请选择有效月份。")
-        versions = [item for item in self.store.list_rating_versions() if item["effective_from"] <= period <= item["effective_to"]]
-        policies = [item for item in self.store.list_policy_versions() if item["effective_from"] <= period <= item["effective_to"]]
+        versions = [item for item in self.store.list_rating_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
+        policies = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
         self.store.save(run)
         return self.render(run)
@@ -86,9 +87,9 @@ class PayrollService:
         return self.render(self._load(run_id))
 
     def rating_versions(self) -> list[dict]:
-        return self.store.list_rating_versions()
+        return self._version_views("rating")
 
-    def save_rating_version(self, effective_from: str, effective_to: str, source: str, source_version: str, ratings: list[dict]) -> list[dict]:
+    def save_rating_version(self, effective_from: str, effective_to: str, source: str, source_version: str, ratings: list[dict], supersedes_version_id: str | None = None, source_hash: str = "") -> list[dict]:
         if len(effective_from) != 7 or len(effective_to) != 7 or effective_from > effective_to or not source.strip() or not ratings:
             raise ValueError("请填写生效期、来源和至少一位教师的星级。")
         cleaned = []
@@ -102,14 +103,20 @@ class PayrollService:
                 "role": str(item.get("role", "教师")).strip() or "教师",
                 "allow_blank_payroll_rating": bool(item.get("allow_blank_payroll_rating", False)),
             })
-        version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "source_version": source_version.strip() or effective_from, "ratings": cleaned, "created_at": datetime.now(timezone.utc).isoformat()}
+        if supersedes_version_id:
+            prior = self.store.get_rating_version(supersedes_version_id)
+            if prior["effective_from"] != effective_from or prior["effective_to"] != effective_to:
+                raise ValueError("修正版必须沿用原版本的生效期；请另建新的年度版本。")
+        version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "source_hash": source_hash.strip(), "source_version": source_version.strip() or effective_from, "ratings": cleaned, "created_at": datetime.now(timezone.utc).isoformat(), "status": "ACTIVE", "supersedes_version_id": supersedes_version_id}
         self.store.save_rating_version(version)
+        if supersedes_version_id:
+            self._supersede("rating", supersedes_version_id, version["id"])
         return self.rating_versions()
 
     def policy_versions(self) -> list[dict]:
-        return self.store.list_policy_versions()
+        return self._version_views("policy")
 
-    def save_policy_version(self, effective_from: str, effective_to: str, source: str, profiles: list[dict]) -> list[dict]:
+    def save_policy_version(self, effective_from: str, effective_to: str, source: str, profiles: list[dict], supersedes_version_id: str | None = None, source_hash: str = "") -> list[dict]:
         if len(effective_from) != 7 or len(effective_to) != 7 or effective_from > effective_to or not source.strip() or not profiles:
             raise ValueError("请填写生效期、来源和至少一位教师的工资政策。")
         cleaned = []
@@ -118,9 +125,76 @@ class PayrollService:
             if not teacher or not role:
                 raise ValueError("每条工资政策必须包含教师和身份。")
             cleaned.append({"teacher": teacher, "role": role, "rating": item.get("rating"), "rating_override": item.get("rating_override"), "special_approval": str(item.get("special_approval", "")).strip(), "obligation_hours": float(item.get("obligation_hours", 0)), "obligation_hours_deduction_enabled": bool(item.get("obligation_hours_deduction_enabled", False)), "note": str(item.get("note", "")).strip()})
-        version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "profiles": cleaned, "created_at": datetime.now(timezone.utc).isoformat()}
+        if supersedes_version_id:
+            prior = self.store.get_policy_version(supersedes_version_id)
+            if prior["effective_from"] != effective_from or prior["effective_to"] != effective_to:
+                raise ValueError("修正版必须沿用原版本的生效期；请另建新的年度版本。")
+        version = {"id": uuid.uuid4().hex[:12], "effective_from": effective_from, "effective_to": effective_to, "source": source.strip(), "source_hash": source_hash.strip(), "profiles": cleaned, "created_at": datetime.now(timezone.utc).isoformat(), "status": "ACTIVE", "supersedes_version_id": supersedes_version_id}
         self.store.save_policy_version(version)
+        if supersedes_version_id:
+            self._supersede("policy", supersedes_version_id, version["id"])
         return self.policy_versions()
+
+    def _versions(self, kind: str) -> list[dict]:
+        return self.store.list_rating_versions() if kind == "rating" else self.store.list_policy_versions()
+
+    def _get_version(self, kind: str, version_id: str) -> dict:
+        return self.store.get_rating_version(version_id) if kind == "rating" else self.store.get_policy_version(version_id)
+
+    def _save_version(self, kind: str, version: dict) -> None:
+        (self.store.save_rating_version if kind == "rating" else self.store.save_policy_version)(version)
+
+    def _supersede(self, kind: str, prior_id: str, replacement_id: str) -> None:
+        prior = self._get_version(kind, prior_id)
+        prior.update({"status": "SUPERSEDED", "superseded_by": replacement_id, "superseded_at": datetime.now(timezone.utc).isoformat()})
+        self._save_version(kind, prior)
+
+    def _version_views(self, kind: str) -> list[dict]:
+        binding_key = f"{kind}_version_id"
+        views = []
+        for version in self._versions(kind):
+            view = dict(version)
+            view.setdefault("status", "ACTIVE")
+            view["used_by_runs"] = [
+                {"id": run["id"], "period": run["period"]}
+                for run in self.store.list() if run.get(binding_key) == version["id"]
+            ]
+            views.append(view)
+        return views
+
+    def authority_catalog(self) -> dict:
+        return {
+            "ratings": self.rating_versions(),
+            "policies": self.policy_versions(),
+            "rules": [{
+                "id": "default-compensation-bands",
+                "name": "现行档位金额规则",
+                "source": "skill/payroll/references/ae_tier_rules.md",
+                "source_version": "2025-10",
+                "effective_from": "2025-10",
+                "effective_to": "持续维护",
+                "editable": False,
+            }],
+        }
+
+    def rebind_authority(self, run_id: str, kind: str, version_id: str) -> dict:
+        if kind not in {"rating", "policy"}:
+            raise ValueError("未知基础资料类型。")
+        run = self._load(run_id)
+        self._require_fresh(run)
+        version = self._get_version(kind, version_id)
+        if not version["effective_from"] <= run["period"] <= version["effective_to"]:
+            raise ValueError("该版本不适用于当前核算月份。")
+        key = f"{kind}_version_id"
+        if run.get(key) == version_id:
+            return self.render(run)
+        run.setdefault("authority_rebind_history", []).append({"kind": kind, "from_version_id": run.get(key), "to_version_id": version_id, "changed_at": datetime.now(timezone.utc).isoformat()})
+        run[key] = version_id
+        invalidate_business_decisions(run.setdefault("business_decisions", []))
+        run["business_context_stale"] = True
+        run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
+        self.store.save(run)
+        return self.render(run)
 
     def import_file(self, run_id: str, role: str, path: str, expected_hash: str | None = None) -> dict:
         if role not in LABELS:
@@ -248,7 +322,7 @@ class PayrollService:
         version_id = run.get("rating_version_id")
         if version_id:
             return self.store.get_rating_version(version_id)
-        matches = [item for item in self.store.list_rating_versions() if item["effective_from"] <= run["period"] <= item["effective_to"]]
+        matches = [item for item in self.store.list_rating_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= run["period"] <= item["effective_to"]]
         if len(matches) == 1:
             run["rating_version_id"] = matches[0]["id"]
             return matches[0]
@@ -339,7 +413,7 @@ class PayrollService:
         version_id = run.get("policy_version_id")
         if version_id:
             return self.store.get_policy_version(version_id)
-        matches = [item for item in self.store.list_policy_versions() if item["effective_from"] <= run["period"] <= item["effective_to"]]
+        matches = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= run["period"] <= item["effective_to"]]
         if len(matches) == 1:
             run["policy_version_id"] = matches[0]["id"]
             return matches[0]
@@ -410,13 +484,16 @@ class PayrollService:
         payroll, _ = self._payroll_records(reads)
         target = next((item for item in payroll if item.teacher == group["teacher"]), None)
         lines = self._course_evidence(schedule, group, target)
+        ac_calculation = self._class_value_calculation(schedule, group["teacher"]) if "class_value" in group["affected_fields"] else None
         sections = self._evidence_sections(run, group, records, target)
         comments = [c for read in reads.values() for c in read.comments if c.target == group["teacher"] and c.field in set(group["affected_fields"]) | {"ae", "af"}]
-        if set(group["affected_fields"]) & {"class_value", "one_to_one"}:
+        if "class_value" in group["affected_fields"]:
+            sections.append(self._class_value_comparison(records, comments))
+        elif set(group["affected_fields"]) & {"one_to_one"}:
             sections.append({"title": "特殊处理线索（不代表已获批准）", "items": [{"工资表批注": c.text, "来源文件": Path(c.source_file).name, "工作表": c.sheet, "单元格": c.coordinate} for c in comments] or [{"线索状态": "当前文件没有可读取的相关批注。历史特殊班型须由负责人核实，不自动改变折算规则。"}]})
         if not self._fresh(run):
             raise ValueError("文件在查看证据时发生变化，请重新导入。")
-        return {"issue": group, "field_records": records, "sections": sections, "evidence": lines, "note": "课程级明细仅适用于 AC/AA 排课核对；其余依据见分段证据。", "boundary": {"run_id": run["id"], "fingerprint": group["fingerprint"], "source_hashes": {key: item["sha256"] for key, item in run["files"].items()}, "audit_context": run.get("audit_context")}}
+        return {"issue": group, "field_records": records, "sections": sections, "evidence": lines, "ac_calculation": ac_calculation, "note": "课程级明细仅适用于 AC/AA 排课核对；其余依据见分段证据。", "boundary": {"run_id": run["id"], "fingerprint": group["fingerprint"], "source_hashes": {key: item["sha256"] for key, item in run["files"].items()}, "audit_context": run.get("audit_context")}}
 
     def export_csv(self, run_id: str) -> str:
         run = self._load(run_id); self._require_fresh(run)
@@ -487,8 +564,8 @@ class PayrollService:
             raise ValueError("原始文件已变化，请重新导入并重新核对。")
 
     def _business_context(self, run: dict) -> dict:
-        rating = self._rating_version_for_run(run)
-        policy = self._policy_version_for_run(run)
+        rating = self._stable_authority_version(self._rating_version_for_run(run))
+        policy = self._stable_authority_version(self._policy_version_for_run(run))
         bands = [asdict(item) for item in default_compensation_bands()]
         return {
             "run_id": run["id"],
@@ -498,6 +575,21 @@ class PayrollService:
             "policy_version": policy,
             "default_compensation_bands": bands,
             "schedule_grade_resolutions": run.get("schedule_grade_resolutions", []),
+        }
+
+    @staticmethod
+    def _stable_authority_version(version: dict | None) -> dict | None:
+        """Exclude lifecycle labels from an audit fingerprint.
+
+        Marking v1 as superseded preserves provenance but must not silently
+        invalidate an historical Run that is still explicitly bound to v1.
+        Actual contents, source hash and effective period remain fingerprinted.
+        """
+        if version is None:
+            return None
+        return {
+            key: value for key, value in version.items()
+            if key not in {"status", "superseded_by", "superseded_at", "used_by_runs"}
         }
 
     def _refresh_business_groups(self, run: dict) -> None:
@@ -545,6 +637,120 @@ class PayrollService:
                 if value:
                     lines.append({"来源": "工资表", "字段": value.source_field, "工资表值": value.normalized_value, "来源文件": Path(value.source_file).name, "来源工作表": value.sheet, "来源位置": value.coordinate, "读取情况": self._cell_state(value.state.value)})
         return lines
+
+    @staticmethod
+    def _class_value_calculation(schedule: list, teacher: str) -> dict:
+        """Explain the existing AC calculation without changing its rules.
+
+        This mirrors the already-established ``schedule_field_checks`` formula
+        solely to expose each contributing row as evidence.  Rows without a
+        deterministic coefficient are intentionally not included in the sum;
+        their existing manual-review audit remains the source of truth.
+        """
+        lessons: list[dict] = []
+        total = 0.0
+        for item in schedule:
+            if item.teacher != teacher:
+                continue
+            value, rationale = class_value_contribution(item)
+            if value is None:
+                continue
+            total += value
+            source = next(iter(item.provenance.values()))
+            lessons.append({
+                "日期": item.lesson_date or item.lesson_time or "未提供",
+                "班级": item.class_name or "未提供",
+                "课程": item.course_name or "未提供",
+                "班型": item.class_type,
+                "年级": item.grade,
+                "原始时长/课次": item.duration_text or "未提供",
+                "实到人数": item.attended,
+                "折算规则": rationale,
+                "本条折算值": round(value, 6),
+                "来源文件": Path(source.source_file).name,
+                "来源工作表": source.sheet,
+                "来源位置": ", ".join(value.coordinate for name, value in item.provenance.items() if name != "student"),
+            })
+        return {
+            "教师": teacher,
+            "records": lessons,
+            "system_total": round(total, 6),
+            "formula": "系统 AC 合计 = Σ 每条折算值",
+        }
+
+    @staticmethod
+    def _structured_class_comment(text: str) -> float | None:
+        """Parse only an explicit AC/班课 assertion; prose is never guessed."""
+        normalized = " ".join(str(text).replace("\n", " ").split())
+        matches = re.findall(
+            r"(?:\bAC\b|班课(?:折算(?:小时(?:数)?)?|小时(?:数)?|值)?)\s*(?:为|是|[:：=])\s*(-?\d+(?:\.\d+)?)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        values = {float(value) for value in matches}
+        if len(values) == 1:
+            return next(iter(values))
+        # A labelled grade/headcount tally (for example “高二 2人班×3”)
+        # is also structured.  It is only accepted when every item maps to
+        # the existing small-class table; otherwise it stays natural language.
+        tally = re.findall(r"(九年级|高一|高二|高三)\s*(\d+)\s*人班\s*(?:×|x|X|\*)?\s*(\d+)(?:节|次)?", normalized)
+        if not tally:
+            # The actual payroll comments often put the grade in a heading and
+            # list only “N人班  N” on following lines.  This remains structured
+            # because every count is explicitly under that named heading.
+            current_grade = None
+            nested = []
+            for raw_line in str(text).splitlines():
+                line = raw_line.strip()
+                heading = re.fullmatch(r"(九年级|高一|高二|高三)班课[：:]?", line)
+                if heading:
+                    current_grade = heading.group(1)
+                    continue
+                entry = re.fullmatch(r"(\d+)\s*人班\s*(\d+)", line)
+                if entry and current_grade:
+                    nested.append((current_grade, entry.group(1), entry.group(2)))
+            tally = nested
+        if not tally:
+            return None
+        total = 0.0
+        for grade, people_text, count_text in tally:
+            coefficient = GRADE_COEFFICIENTS.get(grade)
+            people = HEADCOUNT_COEFFICIENTS.get(int(people_text))
+            if coefficient is None or people is None:
+                return None
+            total += coefficient * people * CLASS_MULTIPLIERS["小班"] * 2 * int(count_text)
+        return round(total, 6)
+
+    def _class_value_comparison(self, records: list[dict], comments: list) -> dict:
+        fact = next((item for item in records if item["field"] == "class_value"), None)
+        system_value = fact["expected"] if fact else None
+        payroll_value = fact["actual"] if fact else None
+        items: list[dict] = [{
+            "排课系统计算值": system_value,
+            "工资表 AC 最终值": payroll_value,
+            "系统 vs 工资表": round(system_value - payroll_value, 6) if system_value is not None and payroll_value is not None else "无法比较",
+        }]
+        if not comments:
+            items.append({"人工批注": "当前工资表没有可读取的 AC 批注。", "批注状态": "NO_COMMENT"})
+        for comment in comments:
+            claimed = self._structured_class_comment(comment.text)
+            item = {
+                "人工批注原文": comment.text,
+                "批注来源文件": Path(comment.source_file).name,
+                "批注工作表": comment.sheet,
+                "批注单元格": comment.coordinate,
+                "批注作者": comment.author or "未提供",
+            }
+            if claimed is None:
+                item["批注状态"] = "COMMENT_NOT_STRUCTURED"
+                item["说明"] = "批注不是可可靠解析的“AC/班课 = 数值”声明；只作人工说明，不参与计算。"
+            else:
+                item["批注主张值"] = claimed
+                item["批注状态"] = "STRUCTURED_COMMENT"
+                item["系统 vs 批注"] = round(system_value - claimed, 6) if system_value is not None else "无法比较"
+                item["批注 vs 工资表"] = round(claimed - payroll_value, 6) if payroll_value is not None else "无法比较"
+            items.append(item)
+        return {"title": "排课系统、工资表与人工批注的三方对照", "items": items}
 
     def _evidence_sections(self, run: dict, group: dict, records: list[dict], target: Any) -> list[dict]:
         context = self._business_context(run)
@@ -756,8 +962,7 @@ class PayrollService:
             "EXTERNAL_REFERENCE": "依赖其他文件",
         }.get(state, "待确认")
 
-    @staticmethod
-    def render(run: dict) -> dict:
+    def render(self, run: dict) -> dict:
         required = PayrollService._missing_materials(run)
         summary = run.get("summary", PayrollService._summary([]))
         status_label = STATUS[run["status"]]
@@ -768,6 +973,9 @@ class PayrollService:
             item = run.get("files", {}).get(role)
             state = "失效" if role in run.get("stale_files", []) else "已准备" if item else "未导入"
             materials.append({"role": role, "label": label, "required": role in REQUIRED or (role in SCOPE_ROLES and not any(key in run.get("files", {}) for key in SCOPE_ROLES)), "state": state, "file": item})
+        rating = self._rating_version_for_run(run)
+        policy = self._policy_version_for_run(run)
+        schedule = run.get("files", {}).get("schedule")
         return {
             **run,
             "status_label": status_label,
@@ -778,4 +986,25 @@ class PayrollService:
                 "readiness": round(100 * (int("schedule" in run["files"]) + int(any(key in run["files"] for key in SCOPE_ROLES))) / 2),
                 "warnings": [message for item in run.get("files", {}).values() for message in item.get("warning_messages", [])],
             },
+            "authority_context": {
+                "schedule": {"label": "排课权威源", "name": schedule.get("name") if schedule else "尚未导入", "sha256": schedule.get("sha256") if schedule else None},
+                "rating": self._authority_reference(rating, "教师星级"),
+                "policy": self._authority_reference(policy, "教师工资政策"),
+                "rules": {"label": "工资规则", "name": "现行档位金额规则", "source": "skill/payroll/references/ae_tier_rules.md", "source_version": "2025-10", "effective_period": "2025-10 起持续维护"},
+            },
+        }
+
+    @staticmethod
+    def _authority_reference(version: dict | None, label: str) -> dict:
+        if version is None:
+            return {"label": label, "name": "尚未绑定", "version_id": None}
+        return {
+            "label": label,
+            "name": version.get("source_version") or version.get("id"),
+            "version_id": version.get("id"),
+            "source": version.get("source"),
+            "source_hash": version.get("source_hash") or None,
+            "effective_period": f"{version.get('effective_from')} ～ {version.get('effective_to')}",
+            "created_at": version.get("created_at"),
+            "status": version.get("status", "ACTIVE"),
         }

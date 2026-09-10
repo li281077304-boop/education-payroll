@@ -35,6 +35,28 @@ def _valid(record: ScheduleRecord) -> bool:
     return record.lesson_status.strip() == "已上课" and record.attended is not None and record.attended > 0
 
 
+def class_value_contribution(record: ScheduleRecord) -> tuple[float | None, str]:
+    """Return the exact AC contribution and its human-readable calculation.
+
+    This is deliberately the same small calculation used by ``_schedule_totals``.
+    The UI evidence view calls it too, so a user can add the displayed rows back
+    to the Core's AC result without maintaining a second implementation.
+    """
+    if not _valid(record):
+        return None, "未计入：只计已上课且实到人数大于零的记录。"
+    if record.class_type not in CLASS_MULTIPLIERS:
+        return None, "未计入：该班型没有当前可确定的班课折算规则。"
+    grade = GRADE_COEFFICIENTS.get(record.grade)
+    people = HEADCOUNT_COEFFICIENTS.get(record.attended)
+    if grade is None:
+        return None, "未计入：原始排课无法确定年级。"
+    if people is None:
+        return None, "未计入：实到人数超出当前已确认班课系数范围。"
+    multiplier = CLASS_MULTIPLIERS[record.class_type]
+    value = grade * people * multiplier * 2
+    return value, f"年级系数 {grade:g} × 实到系数 {people:g} × 班型系数 {multiplier:g} × 2 = {value:g}"
+
+
 def _schedule_totals(records: Iterable[ScheduleRecord]) -> tuple[dict[str, dict[str, float]], list[FieldCheck]]:
     totals: dict[str, dict[str, float]] = defaultdict(lambda: {"one_to_one": 0.0, "class_value": 0.0})
     blockers: list[FieldCheck] = []
@@ -48,13 +70,11 @@ def _schedule_totals(records: Iterable[ScheduleRecord]) -> tuple[dict[str, dict[
             else:
                 totals[record.teacher]["one_to_one"] += record.attended * 2 * coeff
         elif record.class_type in CLASS_MULTIPLIERS:
-            grade = GRADE_COEFFICIENTS.get(record.grade)
-            people = HEADCOUNT_COEFFICIENTS.get(record.attended)
-            if grade is None or people is None:
-                reason = "原始排课无法确定年级。" if grade is None else "实到人数超出当前已确认班课系数范围。"
-                blockers.append(FieldCheck(record.teacher, "class_value", None, None, "NEEDS_MANUAL_REVIEW", reason))
+            value, reason = class_value_contribution(record)
+            if value is None:
+                blockers.append(FieldCheck(record.teacher, "class_value", None, None, "NEEDS_MANUAL_REVIEW", reason.removeprefix("未计入：")))
             else:
-                totals[record.teacher]["class_value"] += grade * people * CLASS_MULTIPLIERS[record.class_type] * 2
+                totals[record.teacher]["class_value"] += value
         elif record.class_type:
             blockers.append(FieldCheck(record.teacher, "class_value", None, None, "NEEDS_MANUAL_REVIEW", "原始排课班型没有当前可确定的班课折算规则。"))
     return totals, blockers
