@@ -31,6 +31,11 @@ venv/
 .env
 .env.*
 work/
+build/
+build_rc*/
+dist/
+dist_rc*/
+tmp_rc1_localappdata/
 
 # Explicitly excluded sensitive Skill assets
 skill/payroll/references/学生年级查表.csv
