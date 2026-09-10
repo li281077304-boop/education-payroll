@@ -142,7 +142,22 @@ class RunStore:
         self._upsert("resolutions", item)
 
     def get_resolution(self, resolution_id: str) -> dict:
-        return self._get_entity("resolutions", resolution_id)
+        """Resolve one persisted resolution from either storage shape.
+
+        The AC workflow keeps resolutions inside the run payload, while this
+        store also offers a dedicated table.  Both must resolve to the same
+        record: a class-course note may only be generated from a resolution
+        that really exists, and it must never depend on which side wrote it.
+        """
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT payload FROM resolutions WHERE id=?", (resolution_id,)).fetchone()
+        if row is not None:
+            return json.loads(row[0])
+        for run in self.list():
+            for item in run.get("resolutions") or []:
+                if str(item.get("id", "")) == resolution_id:
+                    return item
+        raise ValueError("未找到指定记录。")
 
     def save_teacher_access(self, teacher_id: str, token_hash: str, item: dict) -> None:
         payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))

@@ -222,6 +222,17 @@ def test_class_course_resolution_generates_comment_candidate(tmp_path):
     assert "升年级" in candidate["content"]
 
 
+def test_class_comment_reads_resolution_persisted_inside_run_payload(tmp_path):
+    """The AC workflow may store resolutions on the run; the note must still trace it."""
+    service, run, _ = _prepared_run(tmp_path)
+    resolution = {"id": "resolution-in-run", "run_id": run["id"], "period": run["period"], "kind": "SOURCE_DATA_CORRECTION", "outcome": "RESOLVED_BY_SOURCE_CORRECTION", "teacher": "张三", "course_label": "高三6人班1节", "reason": "脱敏的年级修正", "corrected_value": "高二", "fingerprint": "run-payload-fingerprint", "created_at": "2026-08-31T00:00:00+00:00"}
+    run.setdefault("resolutions", []).append(resolution)
+    service.store.save(run)
+    candidate = service.create_class_comment_candidate(run["id"], resolution["id"], "math", "Sheet1", "AC5")
+    assert candidate["source_resolution_id"] == resolution["id"]
+    assert candidate["source_resolution_fingerprint"] == resolution["fingerprint"]
+
+
 def test_deferred_issue_does_not_generate_final_comment(tmp_path):
     service, run, _ = _prepared_run(tmp_path)
     service.store.save_resolution({"id": "deferred", "run_id": run["id"], "period": run["period"], "kind": "SOURCE_DATA_CORRECTION", "outcome": "DEFERRED", "teacher": "张三", "fingerprint": "x", "created_at": "2026-08-31T00:00:00+00:00"})
