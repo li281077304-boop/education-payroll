@@ -23,6 +23,7 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS layout_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS submission_batches (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS submission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS import_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_records (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_results (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_events (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
@@ -197,6 +198,13 @@ class RunStore:
         with sqlite3.connect(self.path) as db:
             rows = db.execute("SELECT payload FROM submission_events WHERE batch_id=? ORDER BY id", (batch_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def save_import_profile(self, item: dict) -> None:
+        self._upsert("import_profiles", item)
+
+    def list_import_profiles(self, requirement: str = "") -> list[dict]:
+        items = self._list_entities("import_profiles")
+        return [item for item in items if not requirement or item.get("requirement") == requirement]
 
     def save_assessment_record(self, item: dict) -> None:
         self._upsert("assessment_records", item)

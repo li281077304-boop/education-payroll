@@ -325,9 +325,53 @@ async function choose(role) {
     const picked = await api("/api/pick", { method: "POST", body: "{}" });
     if (!picked.path) return;
     const inspected = await api("/api/inspect", { method: "POST", body: JSON.stringify(picked) });
-    if (!inspected.recognized) throw new Error(`无法识别这张表。检测到的工作表：${inspected.sheets.join("、") || "无"}。${inspected.missing.join("；")}`);
+    if (role === "schedule") {
+      // Known layout imports straight away; anything else opens field recognition
+      // instead of refusing the file.
+      let preview = null;
+      try { preview = await api(`/api/import-mapping?path=${encodeURIComponent(picked.path)}&role=schedule&period=${encodeURIComponent(current.period)}`); }
+      catch (error) { preview = null; }
+      if (preview && preview.status !== "KNOWN_LAYOUT" && preview.status !== "MAPPED") {
+        return mappingPage(picked.path, role, preview);
+      }
+      if (preview && preview.status === "MAPPED" && preview.profile_id) {
+        showMessage("已按之前确认过的格式识别字段。", "success");
+      }
+    }
+    if (!inspected.recognized && role !== "schedule") throw new Error(`无法识别这张表。检测到的工作表：${inspected.sheets.join("、") || "无"}。${inspected.missing.join("；")}`);
     current = await api(`/api/runs/${current.id}/files`, { method: "POST", body: JSON.stringify({ role, path: picked.path }) });
     showMessage(`已将文件识别为“${roleCopy[role][0]}”。`, "success");
+    renderRun();
+  } catch (error) { showMessage(error.message); }
+}
+
+// 字段识别：业务需要哪些字段由业务模块声明，这里只回答“哪一列对应它”
+function mappingPage(path, role, preview) {
+  const options = (selected) => [`<option value="">（不使用）</option>`]
+    .concat(preview.columns.map((item) => `<option value="${item.column}" ${Number(selected) === item.column ? "selected" : ""}>${escapeHtml(item.header)}</option>`)).join("");
+  const pickOf = (item) => {
+    if (item.header) return `已识别为 Excel 列：“${escapeHtml(item.header)}”`;
+    if (item.candidates.length) return `发现 ${item.candidates.length} 个候选：${item.candidates.map(escapeHtml).join("、")}，请选择`;
+    return "未自动确认，请手工选择";
+  };
+  const rows = preview.fields.map((item) => {
+    const mark = item.header ? "✓" : (item.candidates.length ? "⚠" : "✕");
+    const preselected = item.column ?? "";
+    return `<tr><td>${mark} ${escapeHtml(item.label)}${item.required ? "" : '<span class="muted small">（可选）</span>'}</td><td class="muted small">${pickOf(item)}</td><td><select id="map-${item.field}">${options(preselected)}</select></td></tr>`;
+  }).join("");
+  shell(`<section class="section-head"><div><p class="eyebrow">字段识别</p><h1>这份表里，哪一列代表什么？</h1><p class="muted">系统不按固定列号读取，只按业务字段读取。确认一次后会记住这个格式，下个月同结构自动复用。</p></div><button class="secondary" onclick="renderRun()">返回核对</button></section><section class="card">${preview.message ? `<p class="small">${escapeHtml(preview.message)}</p>` : ""}<div class="table-wrap"><table class="table"><thead><tr><th>业务字段</th><th>识别情况</th><th>请指定 Excel 列</th></tr></thead><tbody>${rows}</tbody></table></div><p class="muted small">检测到的列：${preview.detected_columns.map(escapeHtml).join("、") || "无"}</p><div class="decision-form"><label>把这次确认的格式存下来<input id="map-profile-name" placeholder="例如 二校英语组排课格式"></label><label>确认人<input id="map-actor" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">已确认的格式下次自动复用；列有变化时会要求重新确认。</span><button onclick="applyMapping('${escapeHtml(path)}','${role}')">按此映射导入</button></div></section>`, false);
+}
+
+async function applyMapping(path, role) {
+  const mapping = {};
+  document.querySelectorAll("select[id^='map-']").forEach((node) => {
+    if (node.value) mapping[node.id.replace("map-", "")] = Number(node.value);
+  });
+  const profileName = $("#map-profile-name")?.value || "";
+  const actor = $("#map-actor")?.value || "";
+  try {
+    current = await api(`/api/runs/${current.id}/files`, { method: "POST", body: JSON.stringify({ role, path, mapping: { mapping, sheet: "", header_row: 0 }, profile_name: profileName, profile_actor: actor }) });
+    showMessage(profileName ? "已导入，并记住这个格式。" : "已按你的映射导入。", "success");
     renderRun();
   } catch (error) { showMessage(error.message); }
 }

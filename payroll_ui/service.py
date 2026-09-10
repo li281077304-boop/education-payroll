@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
+from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
+from payroll_core.models.evidence import AdapterIssue
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
@@ -426,7 +428,87 @@ class PayrollService:
         self.store.save(run)
         return self.render(run)
 
-    def import_file(self, run_id: str, role: str, path: str, expected_hash: str | None = None) -> dict:
+    # ------------------------------------------------------------------ mapping
+    # A layout mismatch is not an error: the engine maps business fields onto
+    # whatever columns the file actually has, and only asks when it cannot tell.
+    def import_requirement(self, role: str = "schedule"):
+        return SCHEDULE_AC_REQUIREMENT if role in {"schedule", "check"} else None
+
+    def preview_import_mapping(self, path: str, role: str = "schedule", period: str = "") -> dict:
+        source = Path(path).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError("找不到原始文件。请关闭 Excel/WPS 后重新选择。")
+        requirement = self.import_requirement(role)
+        if requirement is None:
+            raise ValueError("该材料类别暂不支持字段映射。")
+        analysis = analyze_mapping(source, requirement, profiles=self.store.list_import_profiles(requirement.name))
+        if role == "schedule":
+            known = read_schedule_excel(source, period or "0000-00")
+            known_ok = known.ok and bool(known.records)
+        else:
+            known_ok = False
+        fields = []
+        for item in requirement.fields:
+            header = analysis.mapped_headers.get(item.field, "")
+            candidates = list(analysis.candidates.get(item.field, ()))
+            fields.append({
+                "field": item.field, "label": item.label, "required": item.required,
+                "column": analysis.mapping.get(item.field),
+                "header": header,
+                "candidates": candidates,
+                "needs_choice": item.required and not header,
+            })
+        return {
+            "status": "KNOWN_LAYOUT" if known_ok else analysis.status,
+            "requirement": requirement.name,
+            "sheet": analysis.sheet,
+            "header_row": analysis.header_row,
+            "fingerprint": analysis.fingerprint,
+            "detected_columns": list(analysis.detected_columns),
+            "columns": [{"column": column, "header": text} for column, text in sorted(analysis.column_headers.items())],
+            "fields": fields,
+            "missing_labels": [requirement.field(name).label for name in analysis.missing],
+            "message": analysis.message,
+            "profile_id": analysis.profile_id,
+            "profile_drift": analysis.profile_drift,
+            "mapping": dict(analysis.mapping),
+        }
+
+    def save_import_profile(self, path: str, role: str, mapping: dict, actor: str, name: str = "") -> dict:
+        requirement = self.import_requirement(role)
+        if requirement is None:
+            raise ValueError("该材料类别暂不支持字段映射。")
+        analysis = analyze_mapping(Path(path).expanduser().resolve(), requirement)
+        if not analysis.fingerprint:
+            raise ValueError("无法识别这份文件的表头，不能保存格式。")
+        profile = {
+            "id": uuid.uuid4().hex[:12], "requirement": requirement.name, "name": name or f"{Path(path).name} 已确认格式",
+            "fingerprint": analysis.fingerprint, "mapping": mapping,
+            "headers": {field: analysis.column_headers.get(int(column), "") for field, column in mapping.items()},
+            "sheet": analysis.sheet,
+            "header_row": analysis.header_row, "created_by": actor.strip(), "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        self.store.save_import_profile(profile)
+        return profile
+
+    def _mapping_error(self, analysis) -> str:
+        """Explain exactly what is missing and what was detected, with a way forward."""
+        lines: list[str] = []
+        if getattr(analysis, "profile_drift", False):
+            lines.append("这份文件用了已确认过的格式，但某些列已经变化，需要重新确认字段。")
+        requirement = SCHEDULE_AC_REQUIREMENT
+        if analysis.candidates:
+            for field, options in analysis.candidates.items():
+                lines.append(f"字段“{requirement.field(field).label}”有多个候选：{'、'.join(options)}，需要你确认用哪一列。")
+        if analysis.missing:
+            labels = "、".join(f"{requirement.field(name).label}（{name}）" for name in analysis.missing)
+            lines.append(f"缺少必要字段：{labels}。")
+        if analysis.detected_columns:
+            lines.append("检测到的列：" + "、".join(analysis.detected_columns) + "。")
+        lines.append("可以在“字段识别”里指定每一列代表哪个业务字段，确认后即可继续导入。")
+        return "\n".join(lines)
+
+    def import_file(self, run_id: str, role: str, path: str, expected_hash: str | None = None, mapping: dict | None = None, profile_name: str = "", profile_actor: str = "") -> dict:
         if role not in LABELS:
             raise ValueError("未知材料类别。")
         source = Path(path).expanduser().resolve()
@@ -442,13 +524,25 @@ class PayrollService:
         if any(key != role and item["sha256"] == before["sha256"] for key, item in run["files"].items()):
             raise ValueError("同一份文件不能同时充当两个材料类别。")
         inspection = inspect_workbook(source)
-        if inspection.errors or not inspection.records:
-            raise ValueError(self._inspection_error(inspection.errors))
+        mapping_capable = self.import_requirement(role) is not None
+        # An unrecognized layout is no longer a dead end for mapping-capable
+        # roles: the semantic engine takes over instead of refusing the file.
+        blocking = [issue for issue in inspection.errors if not (mapping_capable and issue.code == "UNSUPPORTED_LAYOUT")]
+        if blocking or not inspection.records:
+            raise ValueError(self._inspection_error(blocking))
         workbook = inspection.records[0]
-        if workbook.fingerprint.layout != LAYOUTS[role]:
+        if workbook.fingerprint.layout != LAYOUTS[role] and not mapping_capable:
             raise ValueError(f"文件不属于“{LABELS[role]}”，请检查后重新选择。")
         try:
-            result = self._read(role, source, run["period"])
+            if role == "schedule" and mapping_capable:
+                profiles = self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name)
+                result, analysis = resolve_schedule_import(source, run["period"], profiles=profiles, confirmed=mapping)
+                if analysis is not None and not analysis.ready:
+                    raise ValueError(self._mapping_error(analysis))
+                if not result.errors and not result.records:
+                    raise ValueError("这份排课表没有识别到有效课程记录，请检查是否选错了工作表或文件。")
+            else:
+                result = self._read(role, source, run["period"])
         except OSError as exc:
             raise ValueError(self._file_error(exc)) from exc
         if result.errors:
@@ -459,6 +553,10 @@ class PayrollService:
             raise ValueError(self._file_error(exc)) from exc
         if not unchanged:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
+        if mapping and profile_name:
+            # Remember the confirmed layout so next month's identical file imports
+            # without asking again. Drift is still re-checked on every import.
+            self.save_import_profile(str(source), role, dict(mapping.get("mapping", {})), profile_actor, profile_name)
         run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets), "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets), "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets)}
         if role == "schedule":
             # Grade resolutions are bound to coordinates in the imported
@@ -1168,9 +1266,20 @@ class PayrollService:
         sections.append({"title": "独立性边界", "items": [{"星级": "独立权威" if teacher_rating else "权威缺失", "档位规则": "独立规则表，按生效期匹配", "教师工资政策": "独立权威" if profile else "权威缺失", "AD": "仍来自工资表自身，AE/AF 尚未完全独立闭环"}]})
         return sections
 
-    @staticmethod
-    def _read(role: str, path: Path, period: str):
-        return {"schedule": read_schedule_excel, "math": read_payroll_excel, "science": read_payroll_excel, "baseline": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
+    def _read(self, role: str, path: Path, period: str):
+        """Read one material. Schedule falls back to its confirmed mapping.
+
+        The check phase must see the same rows the import produced, so a layout
+        that needed field mapping keeps using it on every later read.
+        """
+        if role == "schedule":
+            result, analysis = resolve_schedule_import(
+                path, period, profiles=self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name),
+            )
+            if analysis is not None and not analysis.ready:
+                result.errors.append(AdapterIssue("NEEDS_FIELD_CONFIRMATION", self._mapping_error(analysis)))
+            return result
+        return {"math": read_payroll_excel, "science": read_payroll_excel, "baseline": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
 
     @staticmethod
     def _issue(item: FieldCheck) -> dict:

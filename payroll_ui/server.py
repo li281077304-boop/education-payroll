@@ -87,6 +87,9 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
             if parsed.path == "/api/comment-candidates":
                 return self._json(self.server.service.comment_candidates(parse_qs(parsed.query).get("run_id", [""])[0]))
+            if parsed.path == "/api/import-mapping":
+                query = parse_qs(parsed.query)
+                return self._json(self.server.service.preview_import_mapping(query.get("path", [""])[0], query.get("role", ["schedule"])[0], query.get("period", [""])[0]))
             if parsed.path == "/api/payroll-submissions":
                 return self._json(self.server.service.submissions.batches(parse_qs(parsed.query).get("period", [""])[0]))
             if parsed.path.startswith("/api/payroll-submissions/") and parsed.path.endswith("/merge-preview"):
@@ -177,7 +180,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             if len(bits) >= 4 and bits[:2] == ["api", "runs"]:
                 run_id, action = bits[2], bits[3]
                 if action == "files":
-                    return self._json(self.server.service.import_file(run_id, str(payload.get("role", "")), str(payload.get("path", "")), payload.get("sha256")))
+                    return self._json(self.server.service.import_file(run_id, str(payload.get("role", "")), str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
                 if action == "check":
                     return self._json(self.server.service.check(run_id))
                 if action == "decisions":
