@@ -58,6 +58,13 @@ def test_counterfactual_and_structure_guards():
     assert comparison.status == "CONTRIBUTION_STRUCTURE_MISMATCH"
 
 
+def test_ambiguous_cause_when_baseline_already_matches_payroll():
+    """A zero baseline gap proves no cause, even when recomputation moves the total."""
+    assessment = assess_counterfactual_cause(baseline_total=10.0, recomputed_total=8.0, payroll_total=10.0)
+    assert assessment.status == "AMBIGUOUS_CAUSE"
+    assert assessment.baseline_difference == pytest.approx(0.0)
+
+
 def test_override_is_persistent_run_scoped_and_closes_issue(tmp_path):
     service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=1.8, class_value=10.0)
     checked = service.check(run["id"])
