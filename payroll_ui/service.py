@@ -27,6 +27,8 @@ from payroll_core.reconcile.ac_resolution import (
 from payroll_core.excel.reconciliation_bridge import GRADE_COEFFICIENTS
 from payroll_core.comments import render_comment
 from payroll_core.excel.writeback import preview as preview_writeback, sha256 as workbook_sha256, write_new_workbook
+from payroll_ui.assessment_flow import AssessmentService
+from payroll_ui.submissions import PayrollSubmissionService
 
 from .storage import RunStore
 from .business import build_groups, invalidate as invalidate_business_decisions
@@ -81,6 +83,37 @@ class PayrollService:
     def __init__(self, root: Path):
         self.store = RunStore(root)
         self.inputs = BusinessInputService(self.store)
+        # Teacher payroll sheets and group-leader assessments are two separate
+        # flows on purpose: a personal payroll sheet is never an assessment.
+        self.submissions = PayrollSubmissionService(self.store)
+        self.assessments = AssessmentService(self.store)
+
+    def import_payroll_sheets(self, paths: list[str], period: str, submitted_by: str, *, default_teacher: str = "") -> dict:
+        return self.submissions.import_sheets(paths, period, submitted_by, default_teacher=default_teacher)
+
+    def confirm_payroll_layout(self, batch_id: str, fingerprint: str, mapping: dict[str, str], confirmed_by: str) -> dict:
+        return self.submissions.confirm_layout(batch_id, fingerprint, mapping, confirmed_by)
+
+    def preview_payroll_merge(self, batch_id: str, expected_teachers: list[str] | None = None) -> dict:
+        return self.submissions.preview_merge(batch_id, expected_teachers=expected_teachers or [])
+
+    def confirm_payroll_merge(self, batch_id: str, output_path: str, reviewer: str, expected_teachers: list[str] | None = None) -> dict:
+        return self.submissions.confirm_merge(batch_id, output_path, reviewer, expected_teachers=expected_teachers or [])
+
+    def import_management_assessment(self, path: str, period: str, leader_id: str, submitted_by: str) -> dict:
+        return self.assessments.import_assessment(path, period, leader_id, submitted_by)
+
+    def assessment_findings(self, period: str = "", expected_leaders: list[str] | None = None) -> list[dict]:
+        return self.assessments.findings(period, expected_leaders=expected_leaders or [])
+
+    def confirm_management_assessment(self, record_id: str, reviewer: str, *, subjective_confirmations: dict[str, float] | None = None, amount_rule: dict | None = None) -> dict:
+        return self.assessments.confirm(record_id, reviewer, subjective_confirmations=subjective_confirmations, amount_rule=amount_rule)
+
+    def bind_management_assessment(self, run_id: str, result_id: str) -> dict:
+        run = self.store.get(run_id)
+        run = self.assessments.bind_to_run(result_id, run)
+        self.store.save(run)
+        return run
 
     # Business inputs are deliberately separate from payroll calculation.
     # These methods only create source-backed records, review them and bind

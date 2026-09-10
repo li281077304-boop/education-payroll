@@ -46,7 +46,7 @@ function statusBadge(run) {
 }
 
 function shell(content, historyButton = true) {
-  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="businessInputsPage()">业务填报</button>${current ? '<button class="quiet" onclick="writebackPage()">批注回填</button>' : ""}${historyButton ? '<button class="quiet" onclick="home()">核算历史</button>' : ""}<a class="quiet" href="/teacher">教师填报</a></div></header>${content}</div>`;
+  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="businessInputsPage()">业务填报</button>${current ? '<button class="quiet" onclick="writebackPage()">批注回填</button>' : ""}${historyButton ? '<button class="quiet" onclick="home()">核算历史</button>' : ""}<button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button><button class="quiet" onclick="assessmentsPage()">岗位考核</button><a class="quiet" href="/teacher">教师填报</a></div></header>${content}</div>`;
 }
 
 async function home() {
@@ -455,4 +455,85 @@ async function writebackApproved(source, ids) {
   const reviewer = $("#write-person").value;
   try { const result = await api(`/api/runs/${current.id}/writeback`, {method: "POST", body: JSON.stringify({source_workbook: source, candidate_ids: ids.split(","), output_path: output, reviewer})}); showMessage(`已输出新文件：${result.output_path}`, "success"); await writebackPage(); }
   catch (error) { showMessage(error.message); }
+}
+
+// ---------------------------------------------------------------------------
+// 教师个人工资表：标准化 -> 合并 -> 标准工资表（与岗位考核完全分开）
+let sheetPaths = [];
+
+async function payrollSheetsPage() {
+  try {
+    const batches = await api("/api/payroll-submissions");
+    const rows = batches.map((batch) => `<tr><td>${escapeHtml(batch.period)}</td><td>${escapeHtml(batch.status)}</td><td>${(batch.files || []).length}</td><td>${escapeHtml(batch.output_workbook || "—")}</td><td><button class="quiet" onclick="previewBatch('${batch.id}')">看合并预览</button></td></tr>`).join("");
+    shell(`<section class="section-head"><div><p class="eyebrow">教师个人工资表</p><h1>多表合并成标准工资表</h1><p class="muted">单个老师的表、多个老师的表、已汇总的总表，都先转成标准内部数据，再生成统一工资表。系统不复制粘贴单元格。</p></div></section><section class="card"><h2>待上传</h2><p class="muted small">可反复点击添加；格式有歧义时系统会停下来让你确认，确认过的格式下次自动复用。</p><div class="action-bar"><button class="secondary" onclick="addSheetPath()">添加工资表</button><span class="muted small">已添加 ${sheetPaths.length} 份</span><button ${sheetPaths.length ? "" : "disabled"} onclick="importSheets()">导入并合并</button></div></section><section class="card"><h2>批次</h2><div class="table-wrap"><table class="table"><thead><tr><th>月份</th><th>状态</th><th>文件数</th><th>标准工资表</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">暂无批次。</td></tr>'}</tbody></table></div></section>`, true);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function addSheetPath() {
+  try { const picked = await api("/api/pick"); if (picked.path) { sheetPaths.push(picked.path); await payrollSheetsPage(); } }
+  catch (error) { showMessage(error.message); }
+}
+
+async function importSheets() {
+  const period = window.prompt("这些工资表属于哪个月份？", new Date().toISOString().slice(0, 7));
+  if (!period) return;
+  try { const batch = await api("/api/payroll-submissions", {method: "POST", body: JSON.stringify({paths: sheetPaths, period, submitted_by: "管理员"})}); sheetPaths = []; showMessage(batch.pending_layouts.length ? "有工资表格式需要你先确认列含义。" : "已导入，请看合并预览。", batch.pending_layouts.length ? "error" : "success"); await previewBatch(batch.id); }
+  catch (error) { showMessage(error.message); }
+}
+
+async function previewBatch(id) {
+  try {
+    const preview = await api(`/api/payroll-submissions/${id}/merge-preview`);
+    const findings = preview.findings.map((item) => `<tr><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.severity)}</td><td>${escapeHtml(item.teacher_id)}</td><td>${escapeHtml(item.message)}</td></tr>`).join("");
+    const teachers = Object.keys(preview.merged).map((name) => `<tr><td>${escapeHtml(name)}</td><td>${preview.merged[name].one_to_one ?? "—"}</td><td>${preview.merged[name].class_value ?? "—"}</td></tr>`).join("");
+    shell(`<section class="section-head"><div><p class="eyebrow">合并预览</p><h1>确认后再进入核对</h1><p class="muted">${escapeHtml(preview.period)} · ${Object.keys(preview.merged).length} 位教师</p></div><button class="secondary" onclick="payrollSheetsPage()">返回</button></section><section class="card"><h2>检查结果</h2><div class="table-wrap"><table class="table"><thead><tr><th>类型</th><th>级别</th><th>教师</th><th>说明</th></tr></thead><tbody>${findings || '<tr><td colspan="4" class="muted">没有发现问题。</td></tr>'}</tbody></table></div></section><section class="card"><h2>标准工资总表</h2><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>一对一折算</th><th>班课折算</th></tr></thead><tbody>${teachers}</tbody></table></div><div class="decision-form"><label>输出文件路径<input id="merge-output" placeholder="例如 /桌面/9月标准工资表.xlsx"></label><label>确认人<input id="merge-person" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">输出由内部模型生成，不会覆盖已有文件。</span><button ${preview.has_errors ? "disabled" : ""} onclick="confirmMerge('${id}')">生成标准工资表</button></div></section>`, false);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function confirmMerge(id) {
+  try { const result = await api(`/api/payroll-submissions/${id}/merge`, {method: "POST", body: JSON.stringify({output_path: $("#merge-output").value, reviewer: $("#merge-person").value})}); showMessage(`已生成标准工资表：${result.output_workbook}`, "success"); await payrollSheetsPage(); }
+  catch (error) { showMessage(error.message); }
+}
+
+// ---------------------------------------------------------------------------
+// 岗位考核：只有组长上传，客观项按已确认口径算，主观项必须人工确认
+async function assessmentsPage() {
+  try {
+    const period = new Date().toISOString().slice(0, 7);
+    const [records, findings, results] = await Promise.all([api(`/api/assessments?period=${period}`), api(`/api/assessment-findings?period=${period}`), api(`/api/assessment-results?period=${period}`)]);
+    const recordRows = records.map((item) => `<tr><td>${escapeHtml(item.teacher_id)}</td><td>${escapeHtml(item.status)}</td><td>${item.objective_score}</td><td>${(item.pending_subjective || []).length}</td><td><button class="quiet" onclick="confirmAssessment('${item.id}')">确认</button></td></tr>`).join("");
+    const findingRows = findings.map((item) => `<tr><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.teacher_id)}</td><td>${escapeHtml(item.message)}</td></tr>`).join("");
+    const resultRows = results.map((item) => `<tr><td>${escapeHtml(item.teacher_id)}</td><td>${item.final_score}</td><td>${escapeHtml(item.amount_status === "RULE_NOT_CONFIGURED" ? "金额规则未配置" : String(item.final_amount))}</td><td>${escapeHtml(item.reviewer)}</td></tr>`).join("");
+    shell(`<section class="section-head"><div><p class="eyebrow">岗位考核（组长）</p><h1>${escapeHtml(period)} 岗位考核表</h1><p class="muted">考核表只由组长上传。客观项按已确认口径自动计算；主观项必须人工确认，系统不替管理者评分。金额规则未配置时不会猜金额。</p></div><button onclick="importAssessment()">上传考核表</button></section><section class="card"><h2>自动检查</h2><div class="table-wrap"><table class="table"><thead><tr><th>类型</th><th>组长</th><th>说明</th></tr></thead><tbody>${findingRows || '<tr><td colspan="3" class="muted">没有发现问题。</td></tr>'}</tbody></table></div></section><section class="card"><h2>已上传</h2><div class="table-wrap"><table class="table"><thead><tr><th>组长</th><th>状态</th><th>客观得分</th><th>待人工确认主观项</th><th></th></tr></thead><tbody>${recordRows || '<tr><td colspan="5" class="muted">暂无考核表。</td></tr>'}</tbody></table></div></section><section class="card"><h2>MANAGEMENT_ASSESSMENT_RESULT</h2><div class="table-wrap"><table class="table"><thead><tr><th>组长</th><th>最终得分</th><th>最终金额</th><th>确认人</th></tr></thead><tbody>${resultRows || '<tr><td colspan="4" class="muted">暂无正式结果。</td></tr>'}</tbody></table></div></section>`, true);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function importAssessment() {
+  try {
+    const picked = await api("/api/pick");
+    if (!picked.path) return;
+    const period = window.prompt("考核表属于哪个月份？", new Date().toISOString().slice(0, 7));
+    if (!period) return;
+    const leader = window.prompt("这是哪位组长的考核表？", "");
+    if (!leader) return;
+    await api("/api/assessments", {method: "POST", body: JSON.stringify({path: picked.path, period, leader_id: leader, submitted_by: leader})});
+    showMessage("已上传并完成自动检查。", "success"); await assessmentsPage();
+  } catch (error) { showMessage(error.message); }
+}
+
+async function confirmAssessment(id) {
+  const reviewer = window.prompt("确认人：", "");
+  if (!reviewer) return;
+  try {
+    const record = (await api(`/api/assessments?period=`)).find((item) => item.id === id);
+    const answers = {};
+    for (const key of (record?.pending_subjective || [])) {
+      const value = window.prompt(`主观项 ${key} 的评分（必须由你填写，系统不会代替评分）：`, "");
+      if (value === null) return;
+      answers[key] = Number(value);
+    }
+    const result = await api(`/api/assessments/${id}/confirm`, {method: "POST", body: JSON.stringify({reviewer, subjective_confirmations: answers})});
+    showMessage(result.status === "FINAL" ? `最终得分 ${result.final_score}；金额状态 ${result.amount_status}` : "仍有主观项待人工确认。", result.status === "FINAL" ? "success" : "error");
+    await assessmentsPage();
+  } catch (error) { showMessage(error.message); }
 }

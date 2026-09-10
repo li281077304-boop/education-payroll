@@ -87,6 +87,16 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
             if parsed.path == "/api/comment-candidates":
                 return self._json(self.server.service.comment_candidates(parse_qs(parsed.query).get("run_id", [""])[0]))
+            if parsed.path == "/api/payroll-submissions":
+                return self._json(self.server.service.submissions.batches(parse_qs(parsed.query).get("period", [""])[0]))
+            if parsed.path.startswith("/api/payroll-submissions/") and parsed.path.endswith("/merge-preview"):
+                return self._json(self.server.service.preview_payroll_merge(parsed.path.split("/")[3]))
+            if parsed.path == "/api/assessments":
+                return self._json(self.server.service.assessments.records(parse_qs(parsed.query).get("period", [""])[0]))
+            if parsed.path == "/api/assessment-results":
+                return self._json(self.server.service.assessments.results(parse_qs(parsed.query).get("period", [""])[0]))
+            if parsed.path == "/api/assessment-findings":
+                return self._json(self.server.service.assessment_findings(parse_qs(parsed.query).get("period", [""])[0]))
             if parsed.path == "/api/ratings":
                 return self._json(self.server.service.rating_versions())
             if parsed.path == "/api/policies":
@@ -143,6 +153,16 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.save_policy_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), payload.get("profiles", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
             if path == "/api/teacher-access":
                 return self._json(self.server.service.create_teacher_access(str(payload.get("teacher_id", "")), str(payload.get("display_name", ""))), HTTPStatus.CREATED)
+            if path == "/api/payroll-submissions":
+                return self._json(self.server.service.import_payroll_sheets(list(payload.get("paths", [])), str(payload.get("period", "")), str(payload.get("submitted_by", "")), default_teacher=str(payload.get("default_teacher", ""))), HTTPStatus.CREATED)
+            if path.startswith("/api/payroll-submissions/") and path.endswith("/layout"):
+                return self._json(self.server.service.confirm_payroll_layout(path.split("/")[3], str(payload.get("fingerprint", "")), dict(payload.get("mapping", {})), str(payload.get("confirmed_by", ""))))
+            if path.startswith("/api/payroll-submissions/") and path.endswith("/merge"):
+                return self._json(self.server.service.confirm_payroll_merge(path.split("/")[3], str(payload.get("output_path", "")), str(payload.get("reviewer", "")), list(payload.get("expected_teachers", []))))
+            if path == "/api/assessments":
+                return self._json(self.server.service.import_management_assessment(str(payload.get("path", "")), str(payload.get("period", "")), str(payload.get("leader_id", "")), str(payload.get("submitted_by", ""))), HTTPStatus.CREATED)
+            if path.startswith("/api/assessments/") and path.endswith("/confirm"):
+                return self._json(self.server.service.confirm_management_assessment(path.split("/")[3], str(payload.get("reviewer", "")), subjective_confirmations=payload.get("subjective_confirmations"), amount_rule=payload.get("amount_rule")))
             if path == "/api/business-inputs/import":
                 return self._json(self.server.service.import_business_results(str(payload.get("input_type", "")), str(payload.get("period", "")), str(payload.get("path", "")), str(payload.get("submitted_by", "")), str(payload.get("activation_scope", "SUPPLEMENT")), list(payload.get("replace_input_ids", []))), HTTPStatus.CREATED)
             if path.startswith("/api/business-inputs/"):
@@ -173,6 +193,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         return self._json(self.server.service.resolution_recomputation(run_id, str(payload.get("resolution_id", ""))))
                 if action == "business-inputs":
                     return self._json(self.server.service.bind_business_input(run_id, str(payload.get("input_id", ""))))
+                if action == "assessments":
+                    return self._json(self.server.service.bind_management_assessment(run_id, str(payload.get("result_id", ""))))
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "refund":
                     return self._json(self.server.service.create_refund_comment_candidate(run_id, str(payload.get("input_id", "")), str(payload.get("target_role", "")), str(payload.get("sheet", "")), str(payload.get("cell", ""))), HTTPStatus.CREATED)
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "class":

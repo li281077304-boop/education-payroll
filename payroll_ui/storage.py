@@ -19,6 +19,13 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS teacher_access (teacher_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS business_input_events (id INTEGER PRIMARY KEY AUTOINCREMENT, input_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS resolutions (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS payroll_submissions (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS layout_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS submission_batches (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS submission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS assessment_records (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS assessment_results (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS assessment_events (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -158,6 +165,63 @@ class RunStore:
                 if str(item.get("id", "")) == resolution_id:
                     return item
         raise ValueError("未找到指定记录。")
+
+    def save_submission(self, item: dict) -> None:
+        self._upsert("payroll_submissions", item)
+
+    def list_submissions(self, batch_id: str = "") -> list[dict]:
+        items = self._list_entities("payroll_submissions")
+        return [item for item in items if not batch_id or item.get("batch_id") == batch_id]
+
+    def save_layout_profile(self, item: dict) -> None:
+        self._upsert("layout_profiles", item)
+
+    def list_layout_profiles(self) -> list[dict]:
+        return self._list_entities("layout_profiles")
+
+    def save_submission_batch(self, item: dict) -> None:
+        self._upsert("submission_batches", item)
+
+    def get_submission_batch(self, batch_id: str) -> dict:
+        return self._get_entity("submission_batches", batch_id)
+
+    def list_submission_batches(self) -> list[dict]:
+        return self._list_entities("submission_batches")
+
+    def append_submission_event(self, batch_id: str, event: dict) -> None:
+        payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO submission_events(batch_id,created_at,payload) VALUES(?,?,?)", (batch_id, event["created_at"], payload))
+
+    def list_submission_events(self, batch_id: str) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT payload FROM submission_events WHERE batch_id=? ORDER BY id", (batch_id,)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_assessment_record(self, item: dict) -> None:
+        self._upsert("assessment_records", item)
+
+    def get_assessment_record(self, record_id: str) -> dict:
+        return self._get_entity("assessment_records", record_id)
+
+    def list_assessment_records(self) -> list[dict]:
+        return self._list_entities("assessment_records")
+
+    def save_assessment_result(self, item: dict) -> None:
+        self._upsert("assessment_results", item)
+
+    def list_assessment_results(self) -> list[dict]:
+        return self._list_entities("assessment_results")
+
+    def append_assessment_event(self, record_id: str, event: dict) -> None:
+        payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO assessment_events(record_id,created_at,payload) VALUES(?,?,?)", (record_id, event["created_at"], payload))
+
+    def list_assessment_events(self, record_id: str) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT payload FROM assessment_events WHERE record_id=? ORDER BY id", (record_id,)).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def save_teacher_access(self, teacher_id: str, token_hash: str, item: dict) -> None:
         payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
