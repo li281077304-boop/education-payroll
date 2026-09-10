@@ -14,6 +14,9 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS rating_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS policy_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS business_inputs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS comment_candidates (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS teacher_access (teacher_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -67,3 +70,52 @@ class RunStore:
         if row is None:
             raise ValueError("未找到教师工资政策版本。")
         return json.loads(row[0])
+
+    def _upsert(self, table: str, item: dict, *, key: str = "id") -> None:
+        identifier = str(item[key])
+        created = str(item.get("created_at") or datetime.now(timezone.utc).isoformat())
+        item.setdefault("created_at", created)
+        item["updated_at"] = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute(f"INSERT INTO {table}({key},created_at,payload) VALUES(?,?,?) ON CONFLICT({key}) DO UPDATE SET payload=excluded.payload", (identifier, created, payload))
+
+    def _get_entity(self, table: str, identifier: str, *, key: str = "id") -> dict:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute(f"SELECT payload FROM {table} WHERE {key}=?", (identifier,)).fetchone()
+        if row is None:
+            raise ValueError("未找到指定记录。")
+        return json.loads(row[0])
+
+    def _list_entities(self, table: str) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(f"SELECT payload FROM {table} ORDER BY created_at DESC").fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_business_input(self, item: dict) -> None:
+        self._upsert("business_inputs", item)
+
+    def get_business_input(self, input_id: str) -> dict:
+        return self._get_entity("business_inputs", input_id)
+
+    def list_business_inputs(self) -> list[dict]:
+        return self._list_entities("business_inputs")
+
+    def save_comment_candidate(self, item: dict) -> None:
+        self._upsert("comment_candidates", item)
+
+    def get_comment_candidate(self, candidate_id: str) -> dict:
+        return self._get_entity("comment_candidates", candidate_id)
+
+    def list_comment_candidates(self) -> list[dict]:
+        return self._list_entities("comment_candidates")
+
+    def save_teacher_access(self, teacher_id: str, token_hash: str, item: dict) -> None:
+        payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO teacher_access(teacher_id,token_hash,payload) VALUES(?,?,?) ON CONFLICT(teacher_id) DO UPDATE SET token_hash=excluded.token_hash,payload=excluded.payload", (teacher_id, token_hash, payload))
+
+    def teacher_access_by_hash(self, token_hash: str) -> dict | None:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT payload FROM teacher_access WHERE token_hash=?", (token_hash,)).fetchone()
+        return json.loads(row[0]) if row else None
