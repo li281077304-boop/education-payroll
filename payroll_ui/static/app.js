@@ -55,7 +55,7 @@ async function home() {
     current = null;
     const today = new Date();
     const defaultPeriod = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，导入排课数据和本次提交表；如有基准最终工资表，系统以它作为工资结果依据。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，导入排课数据和本次提交表；如有基准最终工资表，系统以它作为工资结果依据。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -66,7 +66,7 @@ async function authorityDashboard(runId = null, focus = "") {
     const section = (title, versions, kind, click) => `<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>${title}</h2><p class="muted">版本会保留来源、生效期与被哪些核算记录使用；修正时请创建新版本，不要删除旧版本。</p></div><button class="secondary" onclick="${click}">查看与修正</button></div>${versions.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>来源</th><th>已用于</th></tr></thead><tbody>${versions.map(v => `<tr><td>${escapeHtml(v.source_version || v.id)}</td><td>${escapeHtml(v.effective_from)} ～ ${escapeHtml(v.effective_to)}</td><td>${escapeHtml(v.status || "ACTIVE")}</td><td>${escapeHtml(v.source)}</td><td>${v.used_by_runs?.length || 0} 个 Run</td></tr>`).join("")}</tbody></table></div>` : '<p class="muted">尚未保存版本。</p>'}</section>`;
     const rebind = runId ? `<section class="card"><h2>让当前核算改用修正版</h2><p class="muted">这是明确的人工操作。切换后会要求重新全盘核对，相关人工意见会变为“需重新确认”。</p>${authorityRebindControl("rating", catalog.ratings, runId)}${authorityRebindControl("policy", catalog.policies, runId)}</section>` : "";
     const rules = catalog.rules.map(r => `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.effective_from)} ～ ${escapeHtml(r.effective_to)}</td><td>${escapeHtml(r.source_version)}</td><td>${escapeHtml(r.source)}</td></tr>`).join("");
-    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>核对依据</h1><p class="muted">修正基础资料会新建版本；历史版本和已使用记录都不会被覆盖。</p></div><button class="secondary" onclick="${runId ? `openRun('${runId}')` : "home()"}">返回</button></div>${rebind}${section("教师星级", catalog.ratings, "rating", `ratingDashboard('${runId || ""}')`)}${section("教师工资政策", catalog.policies, "policy", `policyDashboard('${runId || ""}')`)}<section class="card"><div class="section-head"><div><p class="eyebrow">工资规则</p><h2>现行档位金额规则</h2><p class="muted">本版只读展示当前代码化的规则来源，不在这里修改业务规则。</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>规则</th><th>生效期</th><th>版本</th><th>来源</th></tr></thead><tbody>${rules}</tbody></table></div></section>`, false);
+    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>核对依据</h1><p class="muted">修正基础资料会新建版本；历史版本和已使用记录都不会被覆盖。</p></div><button class="secondary" onclick="${runId ? `openRun('${runId}')` : "home()"}">返回</button></div>${rebind}${section("教师星级", catalog.ratings, "rating", `ratingDashboard('${runId || ""}')`)}${section("教师工资政策", catalog.policies, "policy", `policyDashboard('${runId || ""}')`)}<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>班型折算规则</h2><p class="muted">班型系数来自配置而不是代码。以后出现新班型（例如四人精品班），在这里配置即可。</p></div><button class="secondary" onclick="classTypeRulesPage('${runId || ""}')">查看与配置</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">工资规则</p><h2>现行档位金额规则</h2><p class="muted">本版只读展示当前代码化的规则来源，不在这里修改业务规则。</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>规则</th><th>生效期</th><th>版本</th><th>来源</th></tr></thead><tbody>${rules}</tbody></table></div></section>`, false);
   } catch (error) { showMessage(error.message); }
 }
 
@@ -139,7 +139,8 @@ function duplicateHint() {
 
 async function createRun() {
   try {
-    current = await api("/api/runs", { method: "POST", body: JSON.stringify({ period: $("#period").value }) });
+    const mode = $("#mode") ? $("#mode").value : "AUDIT";
+    current = await api("/api/runs", { method: "POST", body: JSON.stringify({ period: $("#period").value, mode }) });
     tab = "materials";
     renderRun();
   } catch (error) { showMessage(error.message); }
@@ -198,7 +199,7 @@ function renderTab() {
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">排课数据和提交表齐全即可开始。导入基准最终工资表后，系统会用它核验本次提交教师。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : "必需材料已准备，可以开始核对。"}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button><button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button></div></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">排课数据和提交表齐全即可开始。导入基准最终工资表后，系统会用它核验本次提交教师。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，可以直接生成工资表（缺基础资料时只会生成草稿）。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? `<button ${current.health.ready ? "" : "disabled"} onclick="generatePayroll()">生成标准工资表</button>` : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>`;
 }
 
 function materialCard(material) {
@@ -579,5 +580,45 @@ async function confirmAssessment(id) {
     const result = await api(`/api/assessments/${id}/confirm`, {method: "POST", body: JSON.stringify({reviewer, subjective_confirmations: answers})});
     showMessage(result.status === "FINAL" ? `最终得分 ${result.final_score}；金额状态 ${result.amount_status}` : "仍有主观项待人工确认。", result.status === "FINAL" ? "success" : "error");
     await assessmentsPage();
+  } catch (error) { showMessage(error.message); }
+}
+
+// ---------------------------------------------------------------------------
+// 班型折算规则：配置化。新增班型只需要配置，不需要改代码。
+async function classTypeRulesPage(runId = "") {
+  try {
+    const versions = await api("/api/class-type-rules");
+    const rows = versions.map((item) => `<tr><td>${escapeHtml(item.id)}</td><td>${escapeHtml(item.effective_from)} ～ ${escapeHtml(item.effective_to)}</td><td>${escapeHtml(item.status || "ACTIVE")}</td><td>${Object.entries(item.rules || {}).map(([name, value]) => `${escapeHtml(name)} ${value}`).join("；")}</td><td>${escapeHtml(item.source || "")}</td></tr>`).join("");
+    const period = new Date().toISOString().slice(0, 7);
+    const current = versions.find((item) => item.status === "ACTIVE" && item.effective_from <= period && period <= item.effective_to);
+    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>班型折算规则</h1><p class="muted">修改系数会生成新版本；旧版本保留，已经结算过的月份不会被改写。</p></div><button class="secondary" onclick="authorityDashboard('${runId}')">返回基础资料</button></div><section class="card"><h2>现有版本</h2><p class="muted small">当前月份适用：${current ? escapeHtml(current.id) : "没有适用版本"}</p><div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>班型系数</th><th>来源</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">暂无规则版本。</td></tr>'}</tbody></table></div></section><section class="card"><h2>新增一个版本</h2><p class="muted small">出现新班型时在这里加上；只改系数也是新增版本，不要删除旧版本。</p><div class="decision-form"><label>生效开始<input id="ctr-from" type="date"></label><label>生效结束<input id="ctr-to" type="date" value="9999-12-31"></label><label>班型系数（每行一个，格式：班型=系数）<textarea id="ctr-rules" rows="4" placeholder="小班=1.0&#10;1对2=1.2&#10;三人班=1.5"></textarea></label><label>来源说明<input id="ctr-source" placeholder="例如：用户确认 / 校区通知"></label><label>操作人<input id="ctr-actor" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">保存后不会影响历史 Run；要让某个 Run 改用新版本，请用基础资料里的切换操作。</span><button onclick="saveClassTypeRules('${runId}')">保存新版本</button></div></section>`, false);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function saveClassTypeRules(runId = "") {
+  const rules = {};
+  ($("#ctr-rules").value || "").split("\n").forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const parts = trimmed.split("=");
+    if (parts.length === 2 && parts[0].trim() && parts[1].trim()) rules[parts[0].trim()] = Number(parts[1].trim());
+  });
+  try {
+    await api("/api/class-type-rules", { method: "POST", body: JSON.stringify({ effective_from: $("#ctr-from").value, effective_to: $("#ctr-to").value, rules, source: $("#ctr-source").value, actor: $("#ctr-actor").value }) });
+    showMessage("已保存新版本，旧版本保留。", "success");
+    await classTypeRulesPage(runId);
+  } catch (error) { showMessage(error.message); }
+}
+
+// ---------------------------------------------------------------------------
+// 生成模式：同一套 Core 结果直接渲染成标准工资表（不复制任何提交表）
+async function generatePayroll() {
+  const output = window.prompt("标准工资表输出路径（不会覆盖已有文件）：", "");
+  if (!output) return;
+  try {
+    const result = await api(`/api/runs/${current.id}/generate`, { method: "POST", body: JSON.stringify({ output_path: output }) });
+    const blockers = [...new Set(result.blockers || [])];
+    showMessage(result.status === "FINAL" ? `已生成标准工资表：${result.path}` : `已生成草稿，仍有待确认项：${blockers.join("、")}`, result.status === "FINAL" ? "success" : "error");
+    await openRun(current.id);
   } catch (error) { showMessage(error.message); }
 }

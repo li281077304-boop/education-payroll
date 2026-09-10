@@ -13,6 +13,9 @@ from typing import Any
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.models.evidence import AdapterIssue
+from payroll_core.models.class_type_rules import default_rule_versions, rule_version_for_period
+from payroll_core.payroll_generation import build_generated_payroll
+from payroll_core.excel.standard_payroll_render import render_generated_payroll
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
@@ -38,6 +41,18 @@ from .business_inputs import BusinessInputService
 
 REQUIRED = ("schedule",)
 SCOPE_ROLES = ("math", "science")
+#: 内部模式名。界面上只说“核对一份工资表 / 直接生成工资表”。
+MODE_AUDIT = "AUDIT"
+MODE_GENERATE = "GENERATE"
+
+
+def _day_before(day: str) -> str:
+    from datetime import date, timedelta
+
+    try:
+        return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    except ValueError:
+        return day
 LABELS = {"schedule": "原始排课数据", "math": "数学组提交表", "science": "理化组提交表", "baseline": "基准最终工资表", "check": "最终工资核对表"}
 LAYOUTS = {"schedule": "SCHEDULE_EXPORT_V1", "math": "PAYROLL_SHEET_V1", "science": "PAYROLL_SHEET_V1", "baseline": "PAYROLL_SHEET_V1", "check": "PAYROLL_CHECK_V1"}
 STATUS = {"DRAFT": "待导入", "FILES_READY": "材料已准备", "CHECKING": "正在核对", "REVIEW_REQUIRED": "需要复核", "STALE": "文件已变化", "PASS": "字段核对完成"}
@@ -303,12 +318,16 @@ class PayrollService:
         if not any(any(item.sheet == sheet and item.coordinate == cell for item in record.provenance.values()) for record in matching):
             raise ValueError("目标单元格不属于该教师的已识别工资表字段。")
 
-    def create(self, period: str) -> dict:
+    def create(self, period: str, mode: str = MODE_AUDIT) -> dict:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
             raise ValueError("请选择有效月份。")
+        if mode not in (MODE_AUDIT, MODE_GENERATE):
+            raise ValueError("未知的工资任务方式。")
         versions = [item for item in self.store.list_rating_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         policies = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "field_status": self._field_status([]), "summary": self._summary([])}
+        class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
+        class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
+        run = {"id": uuid.uuid4().hex[:12], "period": period, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "field_status": self._field_status([]), "summary": self._summary([])}
         self.store.save(run)
         return self.render(run)
 
@@ -427,6 +446,140 @@ class PayrollService:
         run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
         self.store.save(run)
         return self.render(run)
+
+    # --------------------------------------------------------- class type rules
+    # 班型折算来自配置，不是 Python 分支：新增班型只需新增规则版本。
+    def class_type_rule_versions(self) -> list[dict]:
+        stored = self.store.list_class_type_rule_versions()
+        if not stored:
+            for version in default_rule_versions():
+                self.store.save_class_type_rule_version({
+                    "id": version.id, "source": version.source, "effective_from": version.effective_from,
+                    "effective_to": version.effective_to, "rules": dict(version.rules), "status": version.status,
+                    "created_at": version.created_at, "notes": version.notes,
+                })
+            stored = self.store.list_class_type_rule_versions()
+        return sorted(stored, key=lambda item: item.get("effective_from", ""), reverse=True)
+
+    def save_class_type_rule_version(self, *, effective_from: str, effective_to: str, rules: dict, source: str, actor: str, notes: str = "", supersedes_version_id: str | None = None) -> list[dict]:
+        """Editing a coefficient always creates a new version; old ones stay."""
+        if not rules:
+            raise ValueError("请至少配置一个班型。")
+        for name, value in rules.items():
+            if not str(name).strip():
+                raise ValueError("班型名称不能为空。")
+            if float(value) <= 0:
+                raise ValueError(f"班型“{name}”的系数必须大于 0。")
+        if effective_from > effective_to:
+            raise ValueError("生效开始时间不能晚于结束时间。")
+        # The version being superseded is about to be closed, so it must not
+        # count as an overlap; every other active version must stay untouched.
+        overlapping = [
+            item for item in self.class_type_rule_versions()
+            if item.get("status") == "ACTIVE" and item["id"] != supersedes_version_id
+            and item["effective_from"] <= effective_to and effective_from <= item["effective_to"]
+        ]
+        if overlapping:
+            raise ValueError("生效时间与已有规则版本重叠，请先确认旧版本的结束时间。")
+        self.store.save_class_type_rule_version({
+            "id": f"CLASS_TYPE_RULE_{uuid.uuid4().hex[:8]}", "source": source.strip(), "actor": actor.strip(),
+            "effective_from": effective_from, "effective_to": effective_to,
+            "rules": {str(name).strip(): float(value) for name, value in rules.items()},
+            "status": "ACTIVE", "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "notes": notes.strip(),
+            "supersedes": supersedes_version_id or "",
+        })
+        if supersedes_version_id:
+            prior = next((item for item in self.store.list_class_type_rule_versions() if item["id"] == supersedes_version_id), None)
+            if prior is not None:
+                # The old version is closed, never rewritten: months it already
+                # covered keep resolving to it.
+                prior["status"] = "SUPERSEDED"
+                prior["effective_to"] = _day_before(effective_from)
+                self.store.save_class_type_rule_version(prior)
+        return self.class_type_rule_versions()
+
+    def _class_type_rules_for_run(self, run: dict) -> tuple[dict[str, float], str]:
+        bound = run.get("class_type_rule_version_id")
+        versions = self.class_type_rule_versions()
+        if bound:
+            version = next((item for item in versions if item["id"] == bound), None)
+            if version is not None:
+                return dict(version.get("rules", {})), bound
+        version = rule_version_for_period(versions, run["period"])
+        if version is None:
+            return {}, ""
+        return dict(version.get("rules", {})), version["id"]
+
+    def rebind_class_type_rules(self, run_id: str, version_id: str) -> dict:
+        run = self._load(run_id)
+        version = next((item for item in self.class_type_rule_versions() if item["id"] == version_id), None)
+        if version is None:
+            raise ValueError("未找到该班型折算规则版本。")
+        run.setdefault("authority_rebind_history", []).append({"kind": "class_type_rules", "from_version_id": run.get("class_type_rule_version_id"), "to_version_id": version_id, "changed_at": datetime.now(timezone.utc).isoformat()})
+        run["class_type_rule_version_id"] = version_id
+        run["business_context_stale"] = True
+        self.store.save(run)
+        return self.render(run)
+
+    # ----------------------------------------------------------- generate mode
+    def generate_payroll(self, run_id: str, output_path: str, *, confirmed_hours: dict | None = None) -> dict:
+        """生成模式：同一套 Core 结果直接渲染成标准工资表。"""
+        run = self._load(run_id)
+        missing = self._missing_materials(run)
+        if missing:
+            raise ValueError("请先导入：" + "、".join(missing))
+        self._require_fresh(run)
+        coefficients, rule_version_id = self._class_type_rules_for_run(run)
+        reads = self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"])
+        if reads.errors:
+            raise ValueError("排课数据重新读取失败，请返回材料页重新选择。")
+        schedule = self._apply_schedule_grade_resolutions(reads.records, run)
+        rating_version = self._rating_version_for_run(run)
+        ratings = {item["teacher"]: item.get("rating", "") for item in (rating_version or {}).get("ratings", [])}
+        hours = dict(confirmed_hours if confirmed_hours is not None else run.get("confirmed_hours", {}))
+        if confirmed_hours is not None:
+            run["confirmed_hours"] = {key: float(value) for key, value in confirmed_hours.items()}
+        payroll = build_generated_payroll(
+            period=run["period"], schedule_records=schedule, coefficients=coefficients,
+            ratings_by_teacher=ratings, confirmed_hours=hours,
+            rule_versions={"class_type_rules": rule_version_id, "rating": (rating_version or {}).get("id", "")},
+            blocked=bool(run.get("business_context_stale")),
+        )
+        path = render_generated_payroll(payroll, output_path)
+        run["generated_payroll"] = {
+            "path": path, "status": payroll.status, "blockers": list(payroll.blockers),
+            "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "rows": [asdict(row) for row in payroll.rows],
+        }
+        self.store.save(run)
+        return {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rows": [asdict(row) for row in payroll.rows], "rule_versions": dict(payroll.rule_versions)}
+
+    def writeback_to_generated(self, run_id: str, candidate_ids: list[str], output_path: str, reviewer: str, strategy: str = "APPEND") -> dict:
+        """生成模式复用同一套批注机制：同样的预览与回填函数，没有第二套逻辑。"""
+        run = self._load(run_id)
+        generated = (run.get("generated_payroll") or {}).get("path", "")
+        if not generated:
+            raise ValueError("请先生成标准工资表。")
+        rows = {item["teacher"]: index + 4 for index, item in enumerate(sorted((run.get("generated_payroll") or {}).get("rows", []), key=lambda row: row["teacher"]))}
+        items = []
+        for candidate_id in candidate_ids:
+            item = self.store.get_comment_candidate(candidate_id)
+            self._refresh_candidate(item)
+            if item["status"] != "APPROVED":
+                raise ValueError("只有已预览确认的批注候选才能写入。")
+            if item["teacher_id"] not in rows:
+                raise ValueError("目标教师不在本次生成的工资表里，不能写入其他教师单元格。")
+            if item["sheet"] != "标准工资表" or item["cell"] != f"A{rows[item['teacher_id']]}":
+                raise ValueError("生成工资表的批注只能写在该教师自己的行上。")
+            items.append(item)
+        result = write_new_workbook(generated, output_path, items, strategy=strategy, author=reviewer.strip() or "工资核算助手")
+        when = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for item in items:
+            item.update({"status": "WRITTEN", "written_at": when, "output_workbook": str(Path(output_path).resolve())})
+            self.store.save_comment_candidate(item)
+        run.setdefault("writeback_history", []).append({"source_workbook": generated, "output_workbook": str(Path(output_path).resolve()), "candidate_ids": candidate_ids, "written_by": reviewer.strip(), "written_at": when})
+        self.store.save(run)
+        return {"output_path": str(Path(output_path).resolve()), "written": len(result), "candidates": items}
 
     # ------------------------------------------------------------------ mapping
     # A layout mismatch is not an error: the engine maps business fields onto
@@ -672,6 +825,11 @@ class PayrollService:
         if any(result.errors for result in reads.values()):
             raise ValueError("材料重新读取失败，请返回材料页重新选择。")
         payroll, scope_teachers = self._payroll_records(reads)
+        if run.get("mode", MODE_AUDIT) == MODE_GENERATE and not scope_teachers:
+            # Generate mode has no submitted sheet: the schedule itself defines
+            # who is in scope, so blockers such as an unknown class type still
+            # surface instead of quietly producing an empty run.
+            scope_teachers = {row.teacher for row in reads["schedule"].records}
         math_teachers = {row.teacher for row in reads["math"].records} if "math" in reads else set()
         science_teachers = {row.teacher for row in reads["science"].records} if "science" in reads else set()
         if math_teachers & science_teachers:
@@ -681,7 +839,10 @@ class PayrollService:
         # set are out of scope, not missing payroll recipients.
         resolved_schedule = self._apply_schedule_grade_resolutions(reads["schedule"].records, run)
         scoped_schedule = [row for row in resolved_schedule if row.teacher in scope_teachers]
-        checks = schedule_field_checks(scoped_schedule, payroll)
+        # Same Core function both modes use; only the coefficients come from the
+        # run's bound ClassTypeRule version instead of code constants.
+        coefficients, _rule_version_id = self._class_type_rules_for_run(run)
+        checks = schedule_field_checks(scoped_schedule, payroll, rules=coefficients)
         checks = self._apply_ac_resolutions(run, scoped_schedule, payroll, checks)
         for teacher in sorted(scope_teachers - {row.teacher for row in payroll}):
             checks.extend((
@@ -779,7 +940,9 @@ class PayrollService:
     @staticmethod
     def _missing_materials(run: dict) -> list[str]:
         missing = [LABELS[key] for key in REQUIRED if key not in run["files"]]
-        if not any(key in run["files"] for key in SCOPE_ROLES):
+        # A submitted payroll sheet is the cross-check target in audit mode only.
+        # Generate mode computes the payroll itself, so it must never be forced.
+        if run.get("mode", MODE_AUDIT) == MODE_AUDIT and not any(key in run["files"] for key in SCOPE_ROLES):
             missing.append("至少一张教师提交表")
         return missing
 
@@ -1447,14 +1610,17 @@ class PayrollService:
         status_label = STATUS[run["status"]]
         if run["status"] == "REVIEW_REQUIRED":
             status_label = "排课项目已核对，仍需人工确认" if summary.get("automatic_pass") else "有问题待处理"
+        mode = run.get("mode", MODE_AUDIT)
         materials = []
         for role, label in LABELS.items():
             item = run.get("files", {}).get(role)
             state = "失效" if role in run.get("stale_files", []) else "已准备" if item else "未导入"
-            materials.append({"role": role, "label": label, "required": role in REQUIRED or (role in SCOPE_ROLES and not any(key in run.get("files", {}) for key in SCOPE_ROLES)), "state": state, "file": item})
+            scope_required = role in SCOPE_ROLES and mode == MODE_AUDIT and not any(key in run.get("files", {}) for key in SCOPE_ROLES)
+            materials.append({"role": role, "label": label, "required": role in REQUIRED or scope_required, "state": state, "file": item})
         rating = self._rating_version_for_run(run)
         policy = self._policy_version_for_run(run)
         schedule = run.get("files", {}).get("schedule")
+        class_rules, class_rule_version_id = self._class_type_rules_for_run(run)
         return {
             **run,
             "status_label": status_label,
@@ -1462,13 +1628,14 @@ class PayrollService:
             "health": {
                 "ready": not required and run["status"] != "STALE",
                 "missing": required,
-                "readiness": round(100 * (int("schedule" in run["files"]) + int(any(key in run["files"] for key in SCOPE_ROLES))) / 2),
+                "readiness": 100 if mode == MODE_GENERATE and "schedule" in run["files"] else round(100 * (int("schedule" in run["files"]) + int(any(key in run["files"] for key in SCOPE_ROLES))) / 2),
                 "warnings": [message for item in run.get("files", {}).values() for message in item.get("warning_messages", [])],
             },
             "authority_context": {
                 "schedule": {"label": "排课权威源", "name": schedule.get("name") if schedule else "尚未导入", "sha256": schedule.get("sha256") if schedule else None},
                 "rating": self._authority_reference(rating, "教师星级"),
                 "policy": self._authority_reference(policy, "教师工资政策"),
+                "class_type_rules": {"label": "班型折算规则", "version_id": class_rule_version_id, "coefficients": class_rules},
                 "rules": {"label": "工资规则", "name": "现行档位金额规则", "source": "skill/payroll/references/ae_tier_rules.md", "source_version": "2025-10", "effective_period": "2025-10 起持续维护"},
             },
             "business_input_bindings": run.get("business_input_bindings", []),

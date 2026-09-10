@@ -16,7 +16,15 @@ from ..excel.reconciliation_bridge import GRADE_COEFFICIENTS
 from ..models.records import PayrollRecord, ScheduleRecord
 
 HEADCOUNT_COEFFICIENTS = {1: 0.8, 2: 1.0, 3: 1.2, 4: 1.4, 5: 1.7, 6: 1.9, 7: 2.1, 8: 2.3, 9: 2.5, 10: 2.7}
+#: Fallback coefficients, identical to the audited historical values. Callers
+#: normally pass the run's bound ClassTypeRule version instead, so a rule change
+#: is configuration, never a code edit.
 CLASS_MULTIPLIERS = {"小班": 1.0, "1对2": 1.2}
+UNKNOWN_CLASS_TYPE_RULE = "UNKNOWN_CLASS_TYPE_RULE"
+
+
+def class_coefficients(rules=None) -> dict[str, float]:
+    return dict(rules) if rules else dict(CLASS_MULTIPLIERS)
 STAR_BONUS = {1: 0.0, 2: 0.0, 3: 5.0, 4: 10.0, 5: 15.0, 6: 20.0}
 TIER = ((30, 0.0), (60, 30.0), (80, 32.0), (100, 34.0), (130, 36.0), (160, 37.0), (10**9, 38.0))
 
@@ -35,7 +43,7 @@ def _valid(record: ScheduleRecord) -> bool:
     return record.lesson_status.strip() == "已上课" and record.attended is not None and record.attended > 0
 
 
-def class_value_contribution(record: ScheduleRecord) -> tuple[float | None, str]:
+def class_value_contribution(record: ScheduleRecord, rules: dict[str, float] | None = None) -> tuple[float | None, str]:
     """Return the exact AC contribution and its human-readable calculation.
 
     This is deliberately the same small calculation used by ``_schedule_totals``.
@@ -44,20 +52,24 @@ def class_value_contribution(record: ScheduleRecord) -> tuple[float | None, str]
     """
     if not _valid(record):
         return None, "未计入：只计已上课且实到人数大于零的记录。"
-    if record.class_type not in CLASS_MULTIPLIERS:
-        return None, "未计入：该班型没有当前可确定的班课折算规则。"
+    coefficients = class_coefficients(rules)
+    if record.class_type not in coefficients:
+        # Never default to 小班, 1.0 or "the closest class type".
+        return None, f"{UNKNOWN_CLASS_TYPE_RULE}：发现新班型“{record.class_type}”，当前没有有效折算规则，请配置后重新计算。"
     grade = GRADE_COEFFICIENTS.get(record.grade)
     people = HEADCOUNT_COEFFICIENTS.get(record.attended)
     if grade is None:
         return None, "未计入：原始排课无法确定年级。"
     if people is None:
         return None, "未计入：实到人数超出当前已确认班课系数范围。"
-    multiplier = CLASS_MULTIPLIERS[record.class_type]
+    multiplier = coefficients[record.class_type]
     value = grade * people * multiplier * 2
     return value, f"年级系数 {grade:g} × 实到系数 {people:g} × 班型系数 {multiplier:g} × 2 = {value:g}"
 
 
-def _schedule_totals(records: Iterable[ScheduleRecord]) -> tuple[dict[str, dict[str, float]], list[FieldCheck]]:
+def _schedule_totals(records: Iterable[ScheduleRecord], rules: dict[str, float] | None = None) -> tuple[dict[str, dict[str, float]], list[FieldCheck]]:
+    """Compute AA and AC per teacher. 一对一 stays in its own AA chain."""
+    coefficients = class_coefficients(rules)
     totals: dict[str, dict[str, float]] = defaultdict(lambda: {"one_to_one": 0.0, "class_value": 0.0})
     blockers: list[FieldCheck] = []
     for record in records:
@@ -69,19 +81,31 @@ def _schedule_totals(records: Iterable[ScheduleRecord]) -> tuple[dict[str, dict[
                 blockers.append(FieldCheck(record.teacher, "one_to_one", None, None, "NEEDS_MANUAL_REVIEW", "原始排课无法确定年级，不能计算一对一折算。"))
             else:
                 totals[record.teacher]["one_to_one"] += record.attended * 2 * coeff
-        elif record.class_type in CLASS_MULTIPLIERS:
-            value, reason = class_value_contribution(record)
+        elif record.class_type in coefficients:
+            value, reason = class_value_contribution(record, rules)
             if value is None:
                 blockers.append(FieldCheck(record.teacher, "class_value", None, None, "NEEDS_MANUAL_REVIEW", reason.removeprefix("未计入：")))
             else:
                 totals[record.teacher]["class_value"] += value
         elif record.class_type:
-            blockers.append(FieldCheck(record.teacher, "class_value", None, None, "NEEDS_MANUAL_REVIEW", "原始排课班型没有当前可确定的班课折算规则。"))
+            blockers.append(FieldCheck(
+                record.teacher, "class_value", None, None, UNKNOWN_CLASS_TYPE_RULE,
+                f"发现新班型：“{record.class_type}”。当前没有有效折算规则，请配置后重新计算。",
+            ))
     return totals, blockers
 
 
-def schedule_field_checks(records: Iterable[ScheduleRecord], payroll: Iterable[PayrollRecord], tolerance: float = 1e-6) -> list[FieldCheck]:
-    totals, blockers = _schedule_totals(records)
+def schedule_totals(records: Iterable[ScheduleRecord], rules: dict[str, float] | None = None) -> tuple[dict[str, dict[str, float]], list[FieldCheck]]:
+    """Public wrapper: AA/AC totals per teacher plus blockers.
+
+    Both modes call this, so an audit comparison and a generated payroll can
+    never drift apart.
+    """
+    return _schedule_totals(records, rules)
+
+
+def schedule_field_checks(records: Iterable[ScheduleRecord], payroll: Iterable[PayrollRecord], tolerance: float = 1e-6, rules: dict[str, float] | None = None) -> list[FieldCheck]:
+    totals, blockers = _schedule_totals(records, rules)
     actual = {row.teacher: row for row in payroll}
     checks = list(blockers)
     for teacher in sorted(set(totals) | set(actual)):
@@ -115,6 +139,26 @@ def _tier(hours: float) -> float:
     return next(value for upper, value in TIER if hours <= upper)
 
 
+# Public names so the generate mode reuses exactly the same AE/AF arithmetic as
+# the audit mode instead of maintaining a second implementation.
+def tier_for_hours(hours: float) -> float:
+    return _tier(hours)
+
+
+def star_from_level(level: str) -> int | None:
+    return _star(level)
+
+
+def expected_hourly_rate(teaching_hours: float, star: int) -> float:
+    """AE: zero below 30 hours, otherwise tier amount plus star bonus."""
+    return 0.0 if teaching_hours <= 30 else _tier(teaching_hours) + STAR_BONUS[star]
+
+
+def expected_total_fee(teaching_hours: float, hourly_rate: float) -> float:
+    """AF: ordinary (AD - 30) × AE, floored at zero."""
+    return max(0.0, teaching_hours - 30) * hourly_rate
+
+
 def rate_and_fee_checks(payroll: Iterable[PayrollRecord], tolerance: float = 1e-6) -> list[FieldCheck]:
     """Formula recomputation. F-column star remains same-workbook evidence.
 
@@ -133,10 +177,10 @@ def rate_and_fee_checks(payroll: Iterable[PayrollRecord], tolerance: float = 1e-
         if star is None:
             checks.extend((FieldCheck(row.teacher, "ae", None, row.ae, "NEEDS_MANUAL_REVIEW", "教师星级未有独立权威来源，不能确认 AE。"), FieldCheck(row.teacher, "af", None, row.af, "NEEDS_MANUAL_REVIEW", "教师星级未有独立权威来源，不能确认 AF。")))
             continue
-        expected_ae = 0.0 if row.teaching_hours <= 30 else _tier(row.teaching_hours) + STAR_BONUS[star]
+        expected_ae = expected_hourly_rate(row.teaching_hours, star)
         ae_status = "FORMULA_MATCH" if row.ae is not None and isclose(expected_ae, row.ae, abs_tol=tolerance) else "FORMULA_DIFFERENCE"
         checks.append(FieldCheck(row.teacher, "ae", expected_ae, row.ae, ae_status, "按 AD 与本表 F 列星级复算；星级尚未由独立权威表确认。"))
-        expected_af = max(0.0, row.teaching_hours - 30) * expected_ae
+        expected_af = expected_total_fee(row.teaching_hours, expected_ae)
         af_status = "FORMULA_MATCH" if row.af is not None and isclose(expected_af, row.af, abs_tol=tolerance) else "FORMULA_DIFFERENCE"
         checks.append(FieldCheck(row.teacher, "af", expected_af, row.af, af_status, "按 AD、AE 与身份规则复算；输入来源尚未独立确认。"))
     return checks

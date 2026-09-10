@@ -24,6 +24,7 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS submission_batches (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS submission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS import_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS class_type_rules (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_records (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_results (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_events (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
@@ -205,6 +206,12 @@ class RunStore:
     def list_import_profiles(self, requirement: str = "") -> list[dict]:
         items = self._list_entities("import_profiles")
         return [item for item in items if not requirement or item.get("requirement") == requirement]
+
+    def save_class_type_rule_version(self, item: dict) -> None:
+        self._upsert("class_type_rules", item)
+
+    def list_class_type_rule_versions(self) -> list[dict]:
+        return self._list_entities("class_type_rules")
 
     def save_assessment_record(self, item: dict) -> None:
         self._upsert("assessment_records", item)

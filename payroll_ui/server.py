@@ -106,6 +106,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.policy_versions())
             if parsed.path == "/api/authorities":
                 return self._json(self.server.service.authority_catalog())
+            if parsed.path == "/api/class-type-rules":
+                return self._json(self.server.service.class_type_rule_versions())
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/export.csv"):
                 run_id = parsed.path.split("/")[3]
                 body = self.server.service.export_csv(run_id).encode("utf-8-sig")
@@ -149,7 +151,14 @@ class PayrollHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._payload(); path = urlparse(self.path).path
             if path == "/api/runs":
-                return self._json(self.server.service.create(str(payload.get("period", ""))), HTTPStatus.CREATED)
+                return self._json(self.server.service.create(str(payload.get("period", "")), str(payload.get("mode", "AUDIT"))), HTTPStatus.CREATED)
+            if path == "/api/class-type-rules":
+                return self._json(self.server.service.save_class_type_rule_version(
+                    effective_from=str(payload.get("effective_from", "")), effective_to=str(payload.get("effective_to", "")),
+                    rules=dict(payload.get("rules", {})), source=str(payload.get("source", "")),
+                    actor=str(payload.get("actor", "")), notes=str(payload.get("notes", "")),
+                    supersedes_version_id=payload.get("supersedes_version_id"),
+                ), HTTPStatus.CREATED)
             if path == "/api/ratings":
                 return self._json(self.server.service.save_rating_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), str(payload.get("source_version", "")), payload.get("ratings", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
             if path == "/api/policies":
@@ -198,6 +207,12 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.bind_business_input(run_id, str(payload.get("input_id", ""))))
                 if action == "assessments":
                     return self._json(self.server.service.bind_management_assessment(run_id, str(payload.get("result_id", ""))))
+                if action == "generate":
+                    return self._json(self.server.service.generate_payroll(run_id, str(payload.get("output_path", "")), confirmed_hours=payload.get("confirmed_hours")))
+                if action == "class-type-rules":
+                    return self._json(self.server.service.rebind_class_type_rules(run_id, str(payload.get("version_id", ""))))
+                if action == "writeback-generated":
+                    return self._json(self.server.service.writeback_to_generated(run_id, list(payload.get("candidate_ids", [])), str(payload.get("output_path", "")), str(payload.get("reviewer", "")), str(payload.get("strategy", "APPEND"))))
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "refund":
                     return self._json(self.server.service.create_refund_comment_candidate(run_id, str(payload.get("input_id", "")), str(payload.get("target_role", "")), str(payload.get("sheet", "")), str(payload.get("cell", ""))), HTTPStatus.CREATED)
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "class":
