@@ -14,12 +14,33 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS rating_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS policy_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS business_inputs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS comment_candidates (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS teacher_access (teacher_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS business_input_events (id INTEGER PRIMARY KEY AUTOINCREMENT, input_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS resolutions (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
         payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO runs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (run["id"], run["created_at"], payload))
+
+    def save_run_and_business_input(self, run: dict, item: dict) -> None:
+        """Persist an approved binding as one SQLite transaction.
+
+        A run must never claim an input is bound while the input cannot point
+        back at that run (or vice versa), even if the process stops mid-save.
+        """
+        timestamp = datetime.now(timezone.utc).isoformat()
+        run["updated_at"] = timestamp
+        item.setdefault("created_at", timestamp)
+        item["updated_at"] = timestamp
+        run_payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        item_payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO runs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (run["id"], run["created_at"], run_payload))
+            db.execute("INSERT INTO business_inputs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (item["id"], item["created_at"], item_payload))
 
     def get(self, run_id: str) -> dict:
         with sqlite3.connect(self.path) as db:
@@ -67,3 +88,83 @@ class RunStore:
         if row is None:
             raise ValueError("未找到教师工资政策版本。")
         return json.loads(row[0])
+
+    def _upsert(self, table: str, item: dict, *, key: str = "id") -> None:
+        identifier = str(item[key])
+        created = str(item.get("created_at") or datetime.now(timezone.utc).isoformat())
+        item.setdefault("created_at", created)
+        item["updated_at"] = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute(f"INSERT INTO {table}({key},created_at,payload) VALUES(?,?,?) ON CONFLICT({key}) DO UPDATE SET payload=excluded.payload", (identifier, created, payload))
+
+    def _get_entity(self, table: str, identifier: str, *, key: str = "id") -> dict:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute(f"SELECT payload FROM {table} WHERE {key}=?", (identifier,)).fetchone()
+        if row is None:
+            raise ValueError("未找到指定记录。")
+        return json.loads(row[0])
+
+    def _list_entities(self, table: str) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(f"SELECT payload FROM {table} ORDER BY created_at DESC").fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_business_input(self, item: dict) -> None:
+        self._upsert("business_inputs", item)
+
+    def append_business_input_event(self, input_id: str, event: dict) -> None:
+        payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO business_input_events(input_id,created_at,payload) VALUES(?,?,?)", (input_id, event["created_at"], payload))
+
+    def list_business_input_events(self, input_id: str) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT payload FROM business_input_events WHERE input_id=? ORDER BY id", (input_id,)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def get_business_input(self, input_id: str) -> dict:
+        return self._get_entity("business_inputs", input_id)
+
+    def list_business_inputs(self) -> list[dict]:
+        return self._list_entities("business_inputs")
+
+    def save_comment_candidate(self, item: dict) -> None:
+        self._upsert("comment_candidates", item)
+
+    def get_comment_candidate(self, candidate_id: str) -> dict:
+        return self._get_entity("comment_candidates", candidate_id)
+
+    def list_comment_candidates(self) -> list[dict]:
+        return self._list_entities("comment_candidates")
+
+    def save_resolution(self, item: dict) -> None:
+        self._upsert("resolutions", item)
+
+    def get_resolution(self, resolution_id: str) -> dict:
+        """Resolve one persisted resolution from either storage shape.
+
+        The AC workflow keeps resolutions inside the run payload, while this
+        store also offers a dedicated table.  Both must resolve to the same
+        record: a class-course note may only be generated from a resolution
+        that really exists, and it must never depend on which side wrote it.
+        """
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT payload FROM resolutions WHERE id=?", (resolution_id,)).fetchone()
+        if row is not None:
+            return json.loads(row[0])
+        for run in self.list():
+            for item in run.get("resolutions") or []:
+                if str(item.get("id", "")) == resolution_id:
+                    return item
+        raise ValueError("未找到指定记录。")
+
+    def save_teacher_access(self, teacher_id: str, token_hash: str, item: dict) -> None:
+        payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO teacher_access(teacher_id,token_hash,payload) VALUES(?,?,?) ON CONFLICT(teacher_id) DO UPDATE SET token_hash=excluded.token_hash,payload=excluded.payload", (teacher_id, token_hash, payload))
+
+    def teacher_access_by_hash(self, token_hash: str) -> dict | None:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT payload FROM teacher_access WHERE token_hash=?", (token_hash,)).fetchone()
+        return json.loads(row[0]) if row else None

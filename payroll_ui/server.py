@@ -71,6 +71,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self._serve_static("index.html")
+        if parsed.path == "/teacher":
+            return self._serve_static("teacher.html")
         if parsed.path.startswith("/static/"):
             return self._serve_static(parsed.path.removeprefix("/static/"))
         if parsed.path == "/api/bootstrap":
@@ -80,6 +82,11 @@ class PayrollHandler(SimpleHTTPRequestHandler):
         try:
             if parsed.path == "/api/runs":
                 return self._json(self.server.service.list())
+            if parsed.path == "/api/business-inputs":
+                query = parse_qs(parsed.query)
+                return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
+            if parsed.path == "/api/comment-candidates":
+                return self._json(self.server.service.comment_candidates(parse_qs(parsed.query).get("run_id", [""])[0]))
             if parsed.path == "/api/ratings":
                 return self._json(self.server.service.rating_versions())
             if parsed.path == "/api/policies":
@@ -108,6 +115,22 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return self._error("文件无法读取。请关闭 Excel/WPS，确认文件仍在原位置后重试。")
 
     def do_POST(self) -> None:  # noqa: N802
+        # Teacher routes authenticate independently and cannot call admin APIs.
+        if urlparse(self.path).path.startswith("/api/teacher/"):
+            try:
+                payload = self._payload(); path = urlparse(self.path).path
+                token = self.headers.get("X-Teacher-Token", "")
+                if path == "/api/teacher/inputs":
+                    return self._json(self.server.service.teacher_submit(token, str(payload.get("period", "")), str(payload.get("item_type", "")), str(payload.get("note", "")), payload.get("link") or {}), HTTPStatus.CREATED)
+                if path == "/api/teacher/drafts":
+                    return self._json(self.server.service.teacher_save_draft(token, str(payload.get("period", "")), str(payload.get("item_type", "")), str(payload.get("note", "")), payload.get("link") or {}, str(payload.get("input_id", ""))))
+                if path == "/api/teacher/inputs/list":
+                    return self._json(self.server.service.teacher_inputs(token))
+                return self._error("找不到教师端操作。", HTTPStatus.NOT_FOUND)
+            except PermissionError as exc:
+                return self._error(str(exc), HTTPStatus.FORBIDDEN)
+            except ValueError as exc:
+                return self._error(str(exc))
         if not self._authorized():
             return self._error("本地会话已失效，请刷新页面。", HTTPStatus.FORBIDDEN)
         try:
@@ -118,6 +141,14 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.save_rating_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), str(payload.get("source_version", "")), payload.get("ratings", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
             if path == "/api/policies":
                 return self._json(self.server.service.save_policy_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), payload.get("profiles", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
+            if path == "/api/teacher-access":
+                return self._json(self.server.service.create_teacher_access(str(payload.get("teacher_id", "")), str(payload.get("display_name", ""))), HTTPStatus.CREATED)
+            if path == "/api/business-inputs/import":
+                return self._json(self.server.service.import_business_results(str(payload.get("input_type", "")), str(payload.get("period", "")), str(payload.get("path", "")), str(payload.get("submitted_by", "")), str(payload.get("activation_scope", "SUPPLEMENT")), list(payload.get("replace_input_ids", []))), HTTPStatus.CREATED)
+            if path.startswith("/api/business-inputs/"):
+                bits = path.strip("/").split("/")
+                if len(bits) == 4 and bits[3] == "review":
+                    return self._json(self.server.service.review_business_input(bits[2], str(payload.get("action", "")), str(payload.get("reviewer", "")), str(payload.get("note", ""))))
             if path == "/api/pick":
                 return self._json({"path": self._pick_excel()})
             if path == "/api/inspect":
@@ -140,6 +171,18 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         return self._json(self.server.service.create_resolution(run_id, str(payload.get("issue_id", "")), str(payload.get("kind", "")), str(payload.get("course_record_id", "")), payload.get("values", {}), str(payload.get("confirmed_by", "")), str(payload.get("fingerprint", ""))), HTTPStatus.CREATED)
                     if len(bits) == 5 and bits[4] == "recompute":
                         return self._json(self.server.service.resolution_recomputation(run_id, str(payload.get("resolution_id", ""))))
+                if action == "business-inputs":
+                    return self._json(self.server.service.bind_business_input(run_id, str(payload.get("input_id", ""))))
+                if action == "comment-candidates" and len(bits) == 5 and bits[4] == "refund":
+                    return self._json(self.server.service.create_refund_comment_candidate(run_id, str(payload.get("input_id", "")), str(payload.get("target_role", "")), str(payload.get("sheet", "")), str(payload.get("cell", ""))), HTTPStatus.CREATED)
+                if action == "comment-candidates" and len(bits) == 5 and bits[4] == "class":
+                    return self._json(self.server.service.create_class_comment_candidate(run_id, str(payload.get("resolution_id", "")), str(payload.get("target_role", "")), str(payload.get("sheet", "")), str(payload.get("cell", ""))), HTTPStatus.CREATED)
+                if action == "comment-candidates" and len(bits) == 5 and bits[4] == "preview":
+                    return self._json(self.server.service.preview_comment_candidate(str(payload.get("candidate_id", "")), str(payload.get("strategy", "APPEND"))))
+                if action == "comment-candidates" and len(bits) == 5 and bits[4] == "approve":
+                    return self._json(self.server.service.approve_comment_candidate(str(payload.get("candidate_id", "")), str(payload.get("reviewer", "")), str(payload.get("preview_token", ""))))
+                if action == "writeback":
+                    return self._json(self.server.service.writeback_comments(run_id, str(payload.get("source_workbook", "")), list(payload.get("candidate_ids", [])), str(payload.get("output_path", "")), str(payload.get("reviewer", ""))))
             return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             return self._error(str(exc))

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>工资相关事项填报</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main id="app"></main>
+<script>
+let teacherToken = "";
+const $ = selector => document.querySelector(selector);
+const escapeHtml = value => String(value ?? "").replace(/[&<>\"]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[char]));
+async function teacherApi(path, body) {
+  const response = await fetch(path, {method: "POST", headers: {"Content-Type":"application/json", "X-Teacher-Token":teacherToken}, body: JSON.stringify(body || {})});
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "操作未完成。");
+  return payload;
+}
+function page(content) {
+  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">本月工资相关事项</div><div class="muted small">只显示本人提交；提交后由主管审核</div></div><a class="quiet" href="/">返回工资核算</a></header>${content}</div>`;
+}
+async function load() {
+  try {
+    const rows = await teacherApi("/api/teacher/inputs/list", {});
+    page(`<section class="card"><h1>新增申报</h1><div class="decision-form"><label>月份<input id="period" type="month"></label><label>事项类型<select id="kind"><option>排课信息有误</option><option>班课特殊核算</option><option>退费说明</option><option>续费问题</option><option>推荐奖励</option><option>其他</option></select></label><label class="wide">说明<textarea id="note" placeholder="说明本月需要审核的事实或申请"></textarea></label><label class="wide">关联课程/学生（可选）<input id="link" placeholder="可填写课程、学生或其他识别信息"></label></div><div class="action-bar"><span class="muted small">草稿仅本人可编辑；提交后由主管审核，不会直接修改工资。</span><span><button class="secondary" onclick="saveDraft()">保存草稿</button><button onclick="submitInput()">提交</button></span></div></section><section class="card"><h2>我的提交</h2><div class="table-wrap"><table class="table"><thead><tr><th>月份</th><th>事项</th><th>状态</th><th>说明</th></tr></thead><tbody>${rows.map(row => `<tr><td>${escapeHtml(row.period)}</td><td>${escapeHtml(row.payload.item_type)}</td><td>${escapeHtml(row.status)}</td><td>${escapeHtml(row.payload.note)}</td></tr>`).join("") || '<tr><td colspan="4" class="muted">尚未提交。</td></tr>'}</tbody></table></div></section>`);
+  } catch (error) { page(`<section class="card"><h1>无法加载</h1><p>${escapeHtml(error.message)}</p></section>`); }
+}
+async function submitInput() {
+  try {
+    await teacherApi("/api/teacher/inputs", {period: $("#period").value, item_type: $("#kind").value, note: $("#note").value, link: {reference: $("#link").value}});
+    await load();
+  } catch (error) { alert(error.message); }
+}
+async function saveDraft() {
+  try { await teacherApi("/api/teacher/drafts", {period: $("#period").value, item_type: $("#kind").value, note: $("#note").value, link: {reference: $("#link").value}}); await load(); }
+  catch (error) { alert(error.message); }
+}
+teacherToken = window.prompt("请输入教师访问码：", "") || "";
+load();
+</script>
+</body>
+</html>
