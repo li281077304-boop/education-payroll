@@ -37,15 +37,18 @@ def preview(source: str | Path, candidates: Iterable[dict], *, strategy: str = "
         raise ValueError("未知已有批注处理方式。")
     workbook = load_workbook(source, data_only=False, read_only=False, keep_links=True)
     views: list[WritebackPreview] = []
+    effective: dict[tuple[str, str], str] = {}
     for candidate in candidates:
         sheet = workbook[candidate["sheet"]]
         existing = sheet[candidate["cell"]].comment
-        before = existing.text if existing else ""
+        key = (candidate["sheet"], candidate["cell"])
+        before = effective.get(key, existing.text if existing else "")
         proposed = str(candidate["content"])
         if before and strategy == "KEEP_EXISTING":
             proposed = before
         elif before and strategy == "APPEND":
             proposed = before.rstrip() + "\n\n" + proposed
+        effective[key] = proposed
         views.append(WritebackPreview(candidate["sheet"], candidate["cell"], before, proposed, strategy))
     return views
 
@@ -54,6 +57,10 @@ def write_new_workbook(source: str | Path, output: str | Path, candidates: Itera
     source_path, output_path = Path(source), Path(output)
     if source_path.resolve() == output_path.resolve():
         raise ValueError("回填必须输出为新文件，不能覆盖原工资表。")
+    if output_path.exists():
+        raise ValueError("输出文件已存在，请选择新的文件名。")
+    if source_path.suffix.lower() == ".xlsm":
+        raise ValueError("当前版本不能可靠保留 XLSM 宏，拒绝回填。")
     if not source_path.is_file():
         raise ValueError("找不到原工资表。")
     items = list(candidates)
@@ -69,17 +76,26 @@ def write_new_workbook(source: str | Path, output: str | Path, candidates: Itera
     shutil.copy2(source_path, output_path)
     source_book = load_workbook(source_path, data_only=False, read_only=False, keep_links=True)
     book = load_workbook(output_path, data_only=False, read_only=False, keep_links=True)
-    for row in preview_rows:
-        book[row.sheet][row.cell].comment = Comment(row.proposed_comment, author)
+    final_comments = {(row.sheet, row.cell): row.proposed_comment for row in preview_rows}
+    for (sheet, cell), content in final_comments.items():
+        book[sheet][cell].comment = Comment(content, author)
     book.save(output_path)
     verified = load_workbook(output_path, data_only=False, read_only=False, keep_links=True)
-    for row in preview_rows:
-        actual = verified[row.sheet][row.cell].comment
-        if actual is None or actual.text != row.proposed_comment:
+    for (sheet, cell), content in final_comments.items():
+        actual = verified[sheet][cell].comment
+        if actual is None or actual.text != content:
             raise ValueError("回填后的批注无法验证。")
+    if [sheet.title for sheet in source_book.worksheets] != [sheet.title for sheet in verified.worksheets]:
+        raise ValueError("回填意外改变了工作表结构。")
+    target_cells = set(final_comments)
     for source_sheet, result_sheet in zip(source_book.worksheets, verified.worksheets, strict=True):
+        if tuple(str(rng) for rng in source_sheet.merged_cells.ranges) != tuple(str(rng) for rng in result_sheet.merged_cells.ranges):
+            raise ValueError(f"回填意外改变了合并单元格：{source_sheet.title}")
         for source_row in source_sheet.iter_rows():
             for cell in source_row:
-                if isinstance(cell.value, str) and cell.value.startswith("=") and result_sheet[cell.coordinate].value != cell.value:
+                result = result_sheet[cell.coordinate]
+                if (source_sheet.title, cell.coordinate) not in target_cells and result.value != cell.value:
+                    raise ValueError(f"回填意外改变了单元格值：{source_sheet.title}!{cell.coordinate}")
+                if isinstance(cell.value, str) and cell.value.startswith("=") and result.value != cell.value:
                     raise ValueError(f"回填意外改变了公式：{source_sheet.title}!{cell.coordinate}")
     return preview_rows

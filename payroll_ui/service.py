@@ -93,8 +93,8 @@ class PayrollService:
     def business_inputs(self, period: str = "", status: str = "") -> list[dict]:
         return self.inputs.list_admin(period=period, status=status)
 
-    def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str) -> list[dict]:
-        return self.inputs.import_results(input_type, period, path, submitted_by)
+    def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None) -> list[dict]:
+        return self.inputs.import_results(input_type, period, path, submitted_by, activation_scope=activation_scope, replace_input_ids=replace_input_ids)
 
     def review_business_input(self, input_id: str, action: str, reviewer: str, note: str = "") -> dict:
         return self.inputs.review(input_id, action, reviewer, note)
@@ -102,11 +102,12 @@ class PayrollService:
     def bind_business_input(self, run_id: str, input_id: str) -> dict:
         run = self._load(run_id)
         self._require_fresh(run)
-        run, _ = self.inputs.bind_to_run(input_id, run)
+        run, item = self.inputs.bind_to_run(input_id, run, persist=False)
         run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
         run["business_context_stale"] = True
         invalidate_business_decisions(run.setdefault("business_decisions", []))
-        self.store.save(run)
+        self.store.save_run_and_business_input(run, item)
+        self.inputs._event(item, "BOUND_TO_RUN", "系统", f"绑定核算 {run['id']}")
         return self.render(run)
 
     def comment_candidates(self, run_id: str = "") -> list[dict]:
@@ -120,25 +121,29 @@ class PayrollService:
     def create_refund_comment_candidate(self, run_id: str, input_id: str, target_role: str, sheet: str, cell: str) -> dict:
         run = self._load(run_id); self._require_fresh(run)
         source = self.store.get_business_input(input_id)
-        if source.get("input_type") != "REFUND_RESULT" or source.get("status") not in {"APPROVED", "APPLIED"}:
+        if source.get("input_type") != "REFUND_RESULT" or source.get("status") != "APPROVED" or not self.inputs.current(source["id"]):
             raise ValueError("只有已审核通过的退费结果才能生成退费批注候选。")
         if source.get("period") != run["period"]:
             raise ValueError("退费结果月份与当前工资核算月份不一致。")
+        if source["id"] not in {item.get("input_id") for item in run.get("business_input_bindings", [])}:
+            raise ValueError("退费结果必须先绑定到当前工资核算。")
         return self._create_candidate(run, source, "REFUND_NOTE", target_role, sheet, cell, {
             "period": run["period"], "note": source.get("payload", {}).get("note") or source.get("payload", {}).get("说明") or "已审核退费结果",
             "source_label": f"退费结果表第{source.get('source_row') or '—'}行",
         })
 
-    def create_class_comment_candidate(self, run_id: str, resolution: dict, target_role: str, sheet: str, cell: str) -> dict:
+    def create_class_comment_candidate(self, run_id: str, resolution_id: str, target_role: str, sheet: str, cell: str) -> dict:
         """Create a note only from an already confirmed structured resolution.
 
-        This branch does not create or infer SOURCE_DATA_CORRECTION / override
-        records. A future resolution module must supply an explicit confirmed
-        resolution payload; possible causes never become definitive comments.
+        The caller may only name a persisted resolution.  It cannot claim a
+        browser-supplied dictionary is confirmed.
         """
         run = self._load(run_id); self._require_fresh(run)
+        resolution = self.store.get_resolution(resolution_id)
         kind = str(resolution.get("kind", ""))
-        state = str(resolution.get("status", ""))
+        state = str(resolution.get("outcome", resolution.get("status", "")))
+        if resolution.get("run_id") != run_id or resolution.get("period") != run["period"]:
+            raise ValueError("该班课处理不属于当前工资核算。")
         if kind not in {"SOURCE_DATA_CORRECTION", "APPROVED_PAYROLL_OVERRIDE"} or state not in {"CONFIRMED", "RESOLVED_BY_SOURCE_CORRECTION", "RESOLVED_BY_APPROVED_OVERRIDE"}:
             raise ValueError("只有已确认且可追溯的结构化班课处理，才能生成确定性批注。")
         template = "SOURCE_CORRECTION_NOTE" if kind == "SOURCE_DATA_CORRECTION" else "APPROVED_OVERRIDE_NOTE"
@@ -148,19 +153,25 @@ class PayrollService:
             "approved_treatment": resolution.get("approved_treatment", "批准口径"), "system_value": resolution.get("system_value", ""),
         }, resolution=resolution)
 
-    def approve_comment_candidate(self, candidate_id: str, reviewer: str, strategy: str = "APPEND") -> dict:
-        if strategy not in {"KEEP_EXISTING", "APPEND", "REPLACE_CONFIRMED"} or not reviewer.strip():
-            raise ValueError("请选择已有批注处理方式并填写确认人。")
+    def preview_comment_candidate(self, candidate_id: str, strategy: str = "APPEND") -> dict:
         item = self.store.get_comment_candidate(candidate_id)
         self._refresh_candidate(item)
         if item["status"] == "NEEDS_RECONFIRMATION":
-            raise ValueError("批注依据已变化，请重新生成并确认。")
-        if item["status"] not in {"PROPOSED", "APPROVED"}:
-            raise ValueError("该批注候选当前不能确认。")
-        source = Path(item["source_workbook"])
-        views = preview_writeback(source, [item], strategy=strategy)
-        view = views[0]
-        item.update({"status": "APPROVED", "approved_by": reviewer.strip(), "approved_at": datetime.now(timezone.utc).isoformat(), "writeback_strategy": strategy, "before_comment": view.before_comment, "after_comment": view.proposed_comment})
+            raise ValueError("批注依据已变化，请重新生成。")
+        view = preview_writeback(Path(item["source_workbook"]), [item], strategy=strategy)[0]
+        token = hashlib.sha256((item["id"] + view.before_comment + view.proposed_comment + strategy).encode()).hexdigest()
+        item.update({"status": "PREVIEWED", "preview_token": token, "previewed_at": datetime.now(timezone.utc).isoformat(), "preview_strategy": strategy, "before_comment": view.before_comment, "after_comment": view.proposed_comment})
+        self.store.save_comment_candidate(item)
+        return item
+
+    def approve_comment_candidate(self, candidate_id: str, reviewer: str, preview_token: str) -> dict:
+        if not reviewer.strip() or not preview_token:
+            raise ValueError("请先预览最终批注，再填写确认人。")
+        item = self.store.get_comment_candidate(candidate_id)
+        self._refresh_candidate(item)
+        if item.get("status") != "PREVIEWED" or item.get("preview_token") != preview_token:
+            raise ValueError("请先预览最终批注；若预览已失效，请重新预览后确认。")
+        item.update({"status": "APPROVED", "approved_by": reviewer.strip(), "approved_at": datetime.now(timezone.utc).isoformat(), "writeback_strategy": item["preview_strategy"]})
         self.store.save_comment_candidate(item)
         return item
 
@@ -199,11 +210,13 @@ class PayrollService:
         source = Path(target["path"])
         if not source.is_file():
             raise ValueError("目标工资表无法读取。")
+        teacher_id = (source_input or resolution or {}).get("teacher_id", (source_input or resolution or {}).get("teacher", ""))
+        self._verify_comment_target(run, target_role, sheet, cell, teacher_id)
         content, template_version = render_comment(kind, values)
         item = {
-            "id": uuid.uuid4().hex[:16], "run_id": run["id"], "period": run["period"], "teacher_id": (source_input or resolution or {}).get("teacher_id", (source_input or resolution or {}).get("teacher", "")),
+            "id": uuid.uuid4().hex[:16], "run_id": run["id"], "period": run["period"], "teacher_id": teacher_id,
             "comment_type": kind, "source_workbook": str(source), "source_file_hash": workbook_sha256(source), "sheet": sheet, "cell": cell,
-            "content": content, "template_version": template_version, "source_input_ids": [source_input["id"]] if source_input else [], "source_resolution": resolution or {},
+            "content": content, "template_version": template_version, "source_input_ids": [source_input["id"]] if source_input else [], "source_input_hashes": [source_input.get("source_file_hash", "")] if source_input else [], "source_resolution_id": resolution.get("id", "") if resolution else "", "source_resolution_fingerprint": resolution.get("fingerprint", "") if resolution else "", "source_resolution_source_hash": (resolution or {}).get("source_hash", (resolution or {}).get("source_file_hash", "")), "source_resolution_rule_version": (resolution or {}).get("rule_version", ""), "source_resolution": resolution or {},
             "before_comment": "", "after_comment": "", "status": "PROPOSED", "created_at": datetime.now(timezone.utc).isoformat(), "approved_by": "", "approved_at": "", "written_at": "",
         }
         self.store.save_comment_candidate(item)
@@ -221,12 +234,29 @@ class PayrollService:
         for input_id in item.get("source_input_ids", []):
             try:
                 input_record = self.store.get_business_input(input_id)
-                stale = stale or input_record.get("status") not in {"APPROVED", "APPLIED"}
+                stale = stale or not self.inputs.current(input_id, item.get("source_input_hashes", [""])[0])
+            except ValueError:
+                stale = True
+        resolution_id = item.get("source_resolution_id")
+        if resolution_id:
+            try:
+                resolution = self.store.get_resolution(resolution_id)
+                stale = stale or resolution.get("fingerprint") != item.get("source_resolution_fingerprint") or resolution.get("outcome") not in {"RESOLVED_BY_SOURCE_CORRECTION", "RESOLVED_BY_APPROVED_OVERRIDE"}
+                stale = stale or resolution.get("source_hash", resolution.get("source_file_hash", "")) != item.get("source_resolution_source_hash", "")
+                stale = stale or resolution.get("rule_version", "") != item.get("source_resolution_rule_version", "")
             except ValueError:
                 stale = True
         if stale and item.get("status") != "NEEDS_RECONFIRMATION":
             item["status"] = "NEEDS_RECONFIRMATION"
             self.store.save_comment_candidate(item)
+
+    def _verify_comment_target(self, run: dict, role: str, sheet: str, cell: str, teacher_id: str) -> None:
+        records = self._read(role, Path(run["files"][role]["path"]), run["period"]).records
+        matching = [record for record in records if getattr(record, "teacher", "") == teacher_id]
+        if not matching:
+            raise ValueError("目标工资表没有该教师，不能写入其他教师单元格。")
+        if not any(any(item.sheet == sheet and item.coordinate == cell for item in record.provenance.values()) for record in matching):
+            raise ValueError("目标单元格不属于该教师的已识别工资表字段。")
 
     def create(self, period: str) -> dict:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:

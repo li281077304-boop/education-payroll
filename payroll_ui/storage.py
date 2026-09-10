@@ -17,12 +17,30 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS business_inputs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS comment_candidates (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS teacher_access (teacher_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS business_input_events (id INTEGER PRIMARY KEY AUTOINCREMENT, input_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS resolutions (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
         payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         with sqlite3.connect(self.path) as db:
             db.execute("INSERT INTO runs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (run["id"], run["created_at"], payload))
+
+    def save_run_and_business_input(self, run: dict, item: dict) -> None:
+        """Persist an approved binding as one SQLite transaction.
+
+        A run must never claim an input is bound while the input cannot point
+        back at that run (or vice versa), even if the process stops mid-save.
+        """
+        timestamp = datetime.now(timezone.utc).isoformat()
+        run["updated_at"] = timestamp
+        item.setdefault("created_at", timestamp)
+        item["updated_at"] = timestamp
+        run_payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        item_payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO runs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (run["id"], run["created_at"], run_payload))
+            db.execute("INSERT INTO business_inputs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (item["id"], item["created_at"], item_payload))
 
     def get(self, run_id: str) -> dict:
         with sqlite3.connect(self.path) as db:
@@ -95,6 +113,16 @@ class RunStore:
     def save_business_input(self, item: dict) -> None:
         self._upsert("business_inputs", item)
 
+    def append_business_input_event(self, input_id: str, event: dict) -> None:
+        payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO business_input_events(input_id,created_at,payload) VALUES(?,?,?)", (input_id, event["created_at"], payload))
+
+    def list_business_input_events(self, input_id: str) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute("SELECT payload FROM business_input_events WHERE input_id=? ORDER BY id", (input_id,)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
     def get_business_input(self, input_id: str) -> dict:
         return self._get_entity("business_inputs", input_id)
 
@@ -109,6 +137,12 @@ class RunStore:
 
     def list_comment_candidates(self) -> list[dict]:
         return self._list_entities("comment_candidates")
+
+    def save_resolution(self, item: dict) -> None:
+        self._upsert("resolutions", item)
+
+    def get_resolution(self, resolution_id: str) -> dict:
+        return self._get_entity("resolutions", resolution_id)
 
     def save_teacher_access(self, teacher_id: str, token_hash: str, item: dict) -> None:
         payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))

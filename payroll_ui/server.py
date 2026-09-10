@@ -141,7 +141,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             if path == "/api/teacher-access":
                 return self._json(self.server.service.create_teacher_access(str(payload.get("teacher_id", "")), str(payload.get("display_name", ""))), HTTPStatus.CREATED)
             if path == "/api/business-inputs/import":
-                return self._json(self.server.service.import_business_results(str(payload.get("input_type", "")), str(payload.get("period", "")), str(payload.get("path", "")), str(payload.get("submitted_by", ""))), HTTPStatus.CREATED)
+                return self._json(self.server.service.import_business_results(str(payload.get("input_type", "")), str(payload.get("period", "")), str(payload.get("path", "")), str(payload.get("submitted_by", "")), str(payload.get("activation_scope", "SUPPLEMENT")), list(payload.get("replace_input_ids", []))), HTTPStatus.CREATED)
             if path.startswith("/api/business-inputs/"):
                 bits = path.strip("/").split("/")
                 if len(bits) == 4 and bits[3] == "review":
@@ -168,9 +168,11 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "refund":
                     return self._json(self.server.service.create_refund_comment_candidate(run_id, str(payload.get("input_id", "")), str(payload.get("target_role", "")), str(payload.get("sheet", "")), str(payload.get("cell", ""))), HTTPStatus.CREATED)
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "class":
-                    return self._json(self.server.service.create_class_comment_candidate(run_id, payload.get("resolution") or {}, str(payload.get("target_role", "")), str(payload.get("sheet", "")), str(payload.get("cell", ""))), HTTPStatus.CREATED)
+                    return self._json(self.server.service.create_class_comment_candidate(run_id, str(payload.get("resolution_id", "")), str(payload.get("target_role", "")), str(payload.get("sheet", "")), str(payload.get("cell", ""))), HTTPStatus.CREATED)
+                if action == "comment-candidates" and len(bits) == 5 and bits[4] == "preview":
+                    return self._json(self.server.service.preview_comment_candidate(str(payload.get("candidate_id", "")), str(payload.get("strategy", "APPEND"))))
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "approve":
-                    return self._json(self.server.service.approve_comment_candidate(str(payload.get("candidate_id", "")), str(payload.get("reviewer", "")), str(payload.get("strategy", "APPEND"))))
+                    return self._json(self.server.service.approve_comment_candidate(str(payload.get("candidate_id", "")), str(payload.get("reviewer", "")), str(payload.get("preview_token", ""))))
                 if action == "writeback":
                     return self._json(self.server.service.writeback_comments(run_id, str(payload.get("source_workbook", "")), list(payload.get("candidate_ids", [])), str(payload.get("output_path", "")), str(payload.get("reviewer", ""))))
             return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)

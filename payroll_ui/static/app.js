@@ -385,8 +385,16 @@ async function createTeacherAccess() {
 }
 
 async function reviewInput(id) {
+  const items = await api("/api/business-inputs");
+  const item = items.find(value => value.id === id);
+  if (!item) { showMessage("找不到这条业务输入。", "error"); return; }
   const reviewer = window.prompt("审核人：", "");
   if (!reviewer) return;
+  if (["SUBMITTED", "REQUEST_MORE_INFO"].includes(item.status)) {
+    try { await api(`/api/business-inputs/${id}/review`, { method: "POST", body: JSON.stringify({ action: "START_REVIEW", reviewer, note: "开始审核" }) }); showMessage("已进入审核，可再次打开后给出结论。", "success"); await businessInputsPage(); }
+    catch (error) { showMessage(error.message, "error"); }
+    return;
+  }
   const action = window.prompt("输入 APPROVE、REJECT 或 REQUEST_MORE_INFO：", "APPROVE");
   if (!action) return;
   const note = window.prompt("审核说明（可选）：", "") || "";
@@ -405,7 +413,7 @@ async function writebackPage() {
   try {
     const [inputs, candidates] = await Promise.all([api(`/api/business-inputs?period=${encodeURIComponent(current.period)}&status=APPROVED`), api(`/api/comment-candidates?run_id=${encodeURIComponent(current.id)}`)]);
     const refunds = inputs.filter(item => item.input_type === "REFUND_RESULT");
-    const rows = candidates.map(item => `<tr><td>${escapeHtml(item.comment_type)}</td><td>${escapeHtml(item.sheet)}!${escapeHtml(item.cell)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.content)}</td><td>${item.status === "PROPOSED" ? `<button class="quiet" onclick="approveCandidate('${item.id}')">预览并确认</button>` : ""}</td></tr>`).join("");
+  const rows = candidates.map(item => `<tr><td>${escapeHtml(item.comment_type)}</td><td>${escapeHtml(item.sheet)}!${escapeHtml(item.cell)}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.content)}</td><td>${["PROPOSED", "PREVIEWED"].includes(item.status) ? `<button class="quiet" onclick="approveCandidate('${item.id}')">预览并确认</button>` : ""}</td></tr>`).join("");
     const approved = candidates.filter(item => item.status === "APPROVED");
     const source = approved[0]?.source_workbook || "";
     shell(`<section class="section-head"><div><p class="eyebrow">批注回填</p><h1>预览后输出新工资表</h1><p class="muted">原 Excel 永远不覆盖。只有已确认来源与已确认候选才能写回新文件。</p></div><button class="secondary" onclick="openRun('${current.id}')">返回核对</button></section><section class="card"><h2>生成退费批注候选</h2><div class="decision-form"><label>已审核退费结果<select id="refund-input">${refunds.map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.teacher_id)} · 第${escapeHtml(item.source_row)}行</option>`).join("") || '<option value="">暂无已审核退费结果</option>'}</select></label><label>目标工资表<select id="comment-role">${Object.keys(current.files || {}).filter(key => ["math", "science", "baseline"].includes(key)).map(key => `<option value="${key}">${escapeHtml(roleCopy[key][0])}</option>`).join("")}</select></label><label>工作表<input id="comment-sheet" placeholder="例如 工资表"></label><label>目标单元格<input id="comment-cell" placeholder="例如 AC23"></label></div><div class="action-bar"><span class="muted small">目标位置由管理员确认；不会猜测该写入哪个工资单元格。</span><button ${refunds.length ? "" : "disabled"} onclick="createRefundCandidate()">生成候选</button></div></section><section class="card"><h2>批注候选</h2><div class="table-wrap"><table class="table"><thead><tr><th>类型</th><th>位置</th><th>状态</th><th>建议内容</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">暂无候选。</td></tr>'}</tbody></table></div></section>${approved.length ? `<section class="card"><h2>确认输出新文件</h2><p class="muted">将写入 ${approved.length} 条已预览确认的批注。原工资表不会修改。</p><div class="decision-form"><label>输出文件路径<input id="write-output" placeholder="例如 /桌面/数学组9月工资_系统回填.xlsx"></label><label>回填确认人<input id="write-person" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">本次只处理同一原工资表的已确认候选。</span><button onclick="writebackApproved('${escapeHtml(source)}', '${approved.map(item => item.id).join(',')}')">输出新 Excel</button></div></section>` : ""}`, false);
@@ -418,9 +426,8 @@ async function createRefundCandidate() {
 }
 
 async function approveCandidate(id) {
-  const reviewer = window.prompt("确认人：", ""); if (!reviewer) return;
   const strategy = window.prompt("已有批注处理方式：APPEND、KEEP_EXISTING 或 REPLACE_CONFIRMED", "APPEND"); if (!strategy) return;
-  try { const result = await api(`/api/runs/${current.id}/comment-candidates/approve`, {method: "POST", body: JSON.stringify({candidate_id: id, reviewer, strategy})}); window.alert(`预览完成。\n原批注：${result.before_comment || "无"}\n新批注：${result.after_comment}`); await writebackPage(); }
+  try { const preview = await api(`/api/runs/${current.id}/comment-candidates/preview`, {method: "POST", body: JSON.stringify({candidate_id: id, strategy})}); if (!window.confirm(`请确认最终批注：\n\n原批注：${preview.before_comment || "无"}\n\n新批注：${preview.after_comment}`)) { await writebackPage(); return; } const reviewer = window.prompt("确认人：", ""); if (!reviewer) return; await api(`/api/runs/${current.id}/comment-candidates/approve`, {method: "POST", body: JSON.stringify({candidate_id: id, reviewer, preview_token: preview.preview_token})}); showMessage("批注已确认，可以输出新工资表。", "success"); await writebackPage(); }
   catch (error) { showMessage(error.message); }
 }
 
