@@ -2,7 +2,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from payroll_core.grade_inference import CourseExportSnapshot, StudentGradeEvidence, course_export_grade_override, infer_historical_grade
+from payroll_core.grade_inference import CourseExportSnapshot, StudentGradeEvidence, course_export_grade_override, infer_historical_grade, remove_export_pollution
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_ui.service import PayrollService
 
@@ -72,6 +72,46 @@ def test_old_history_cannot_create_a_conflict_with_recent_evidence():
     assert result.grade == "九年级" and len(result.evidence) == 1
 
 
+def test_august_later_exported_grade_is_pollution_before_september_twentieth():
+    old = StudentGradeEvidence(
+        "学生甲", "2026-08-10", "高二", "/排课_202608261058.xls", "old", "课表", "A2",
+        teacher="教师甲", subject="物理", lesson_start_time="17:30",
+    )
+    later = StudentGradeEvidence(
+        "学生甲", "2026-08-10", "高三", "/排课_202609011519.xls", "later", "课表", "A2",
+        teacher="教师甲", subject="物理", lesson_start_time="17:30",
+    )
+    kept, ignored = remove_export_pollution([old, later])
+    assert kept == (old,)
+    assert ignored == (later,)
+
+
+def test_non_august_later_export_is_not_treated_as_grade_pollution():
+    old = StudentGradeEvidence(
+        "学生甲", "2026-11-10", "高二", "/排课_202611011058.xls", "old", "课表", "A2",
+        teacher="教师甲", subject="物理", lesson_start_time="17:30",
+    )
+    later = StudentGradeEvidence(
+        "学生甲", "2026-11-10", "高三", "/排课_202611151519.xls", "later", "课表", "A2",
+        teacher="教师甲", subject="物理", lesson_start_time="17:30",
+    )
+    kept, ignored = remove_export_pollution([old, later])
+    assert len(kept) == 2 and not ignored
+
+
+def test_same_student_same_day_different_courses_are_not_merged_for_pollution():
+    first = StudentGradeEvidence(
+        "学生甲", "2026-08-10", "高二", "/排课_202608261058.xls", "old", "课表", "A2",
+        teacher="教师甲", subject="物理", lesson_start_time="17:30",
+    )
+    second = StudentGradeEvidence(
+        "学生甲", "2026-08-10", "高三", "/排课_202609011519.xls", "later", "课表", "A3",
+        teacher="教师乙", subject="化学", lesson_start_time="18:30",
+    )
+    kept, ignored = remove_export_pollution([first, second])
+    assert len(kept) == 2 and not ignored
+
+
 def test_manual_confirmation_is_not_limited_to_twelve_month_history_window():
     result = infer_historical_grade(
         "学生甲", "2026-08", [evidence("学生甲", "2025-07-18", "八年级")], recent_history_only=False,
@@ -110,6 +150,17 @@ def _gift_workbook(path: Path, class_name: str = "赠送课程", student: str = 
     headers = ["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"]
     sheet.append(headers)
     sheet.append([class_name, "一对一", lesson_time, "已上课", 1, student, "数学", "教师甲"])
+    book.save(path)
+    return path
+
+
+def _ordinary_class_workbook(path: Path, class_name: str = "高三小班数学", student: str = "学生甲,学生乙", lesson_time: str = "2026-08-03 09:00") -> Path:
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "排课记录-08月03日到08月30日"
+    headers = ["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"]
+    sheet.append(headers)
+    sheet.append([class_name, "集体班", lesson_time, "已上课", 2, student, "数学", "教师甲"])
     book.save(path)
     return path
 
@@ -159,6 +210,48 @@ def test_partial_history_agreeing_with_current_class_grade_can_use_direct_grade(
     assert result.records[0].grade_origin == "DIRECT_SOURCE"
 
 
+def test_ordinary_single_grade_class_needs_only_one_same_direction_history_fact(tmp_path):
+    current = _ordinary_class_workbook(tmp_path / "current.xlsx")
+    result = read_schedule_excel(current, "2026-08", historical_grade_evidence=[evidence("学生甲", "2026-07-18", "高二")])
+    assert result.records[0].grade == "高二"
+    assert result.records[0].grade_origin == "HISTORICAL_SCHEDULE"
+    assert "不构成反证" in result.records[0].grade_reason
+
+
+def test_ordinary_single_grade_class_can_use_one_lookup_fact(tmp_path):
+    current = _ordinary_class_workbook(tmp_path / "current.xlsx")
+    result = read_schedule_excel(current, "2026-08", student_grades={"学生甲": "高二"})
+    assert result.records[0].grade == "高二"
+    assert result.records[0].grade_origin == "MANUAL_LOOKUP"
+
+
+def test_ordinary_single_grade_class_still_rejects_opposing_history(tmp_path):
+    current = _ordinary_class_workbook(tmp_path / "current.xlsx")
+    result = read_schedule_excel(current, "2026-08", historical_grade_evidence=[
+        evidence("学生甲", "2026-07-18", "高二"), evidence("学生乙", "2026-07-18", "高三", source_hash="opposite"),
+    ])
+    assert result.records[0].grade == ""
+    assert result.records[0].grade_origin == "NEEDS_INPUT"
+
+
+def test_unrelated_subject_history_is_not_counterevidence_for_current_class(tmp_path):
+    current = _ordinary_class_workbook(tmp_path / "current.xlsx")
+    history = [
+        StudentGradeEvidence("学生甲", "2026-07-18", "高二", "math.xlsx", "m", "课表", "A2", subject="数学"),
+        StudentGradeEvidence("学生甲", "2026-07-18", "高三", "english.xlsx", "e", "课表", "A2", subject="英语"),
+    ]
+    result = read_schedule_excel(current, "2026-08", historical_grade_evidence=history)
+    assert result.records[0].grade == "高二"
+    assert result.records[0].grade_origin == "HISTORICAL_SCHEDULE"
+
+
+def test_special_one_to_one_does_not_propagate_one_partial_roster_fact(tmp_path):
+    current = _gift_workbook(tmp_path / "current.xlsx", "高三数学", "学生甲,学生乙")
+    result = read_schedule_excel(current, "2026-08", historical_grade_evidence=[evidence("学生甲", "2026-07-18", "高二")])
+    assert result.records[0].grade == ""
+    assert result.records[0].grade_origin == "NEEDS_INPUT"
+
+
 def test_complete_roster_history_overrides_current_class_grade(tmp_path):
     current = _gift_workbook(tmp_path / "current.xlsx", "九年级数学", "学生甲,学生乙", "2026-08-03 09:00")
     result = read_schedule_excel(current, "2026-08", historical_grade_evidence=[
@@ -202,6 +295,14 @@ def test_true_same_day_history_conflict_without_export_timestamps_needs_input():
         evidence("学生甲", "2026-08-10", "七年级", source_hash="a"),
         evidence("学生甲", "2026-08-10", "八年级", source_hash="b"),
     ], target_date="2026-08-10")
+    assert result.grade == "" and result.status == "NEEDS_INPUT"
+
+
+def test_export_pollution_rule_does_not_apply_outside_august():
+    result = infer_historical_grade("学生甲", "2026-11", [
+        evidence("学生甲", "2026-11-10", "高二", source_hash="before", source_file="schedule_202611101200.xlsx"),
+        evidence("学生甲", "2026-11-10", "高三", source_hash="after", source_file="schedule_202611211200.xlsx"),
+    ], target_date="2026-11-10")
     assert result.grade == "" and result.status == "NEEDS_INPUT"
 
 

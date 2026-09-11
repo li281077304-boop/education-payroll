@@ -96,6 +96,7 @@ def read_schedule_with_mapping(
             continue
         subject = subject_from_source(text("subject"))
         direct_grade = grade_from_class_name(class_name) or text("grade")
+        class_type = normalize_schedule_class_type(text("class_type"), class_name, text("course_name"))
         snapshot_override = course_export_grade_override(
             teacher=text("teacher"), subject=subject, lesson_date=lesson_date,
             lesson_time=lesson_time, current_grade=direct_grade,
@@ -109,6 +110,8 @@ def read_schedule_with_mapping(
             direct_grade=direct_grade, course_date=lesson_date,
             course_export_grade=snapshot_override[0] if snapshot_override else "",
             course_export_reason=snapshot_override[1] if snapshot_override else "",
+            class_type=class_type,
+            course_subject=subject,
         )
         if not grade:
             unknown_grades += 1
@@ -117,7 +120,7 @@ def read_schedule_with_mapping(
             teacher=text("teacher"),
             grade=grade,
             subject=subject,
-            class_type=normalize_schedule_class_type(text("class_type"), class_name, text("course_name")),
+            class_type=class_type,
             attended=attended,
             lesson_status=text("lesson_status"),
             student=text("student"),

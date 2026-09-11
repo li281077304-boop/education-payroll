@@ -20,6 +20,7 @@ NATURAL_GRADE_LADDER = (
 )
 ACADEMIC_ADVANCEMENT_MONTH = 9
 ACADEMIC_ADVANCEMENT_DAY = 20
+SUMMER_ROLLOVER_MONTH = 8
 EXPORT_TIMESTAMP_PATTERN = re.compile(r"(?P<year>20\d{2})(?P<month>0[1-9]|1[0-2])(?P<day>[0-3]\d)(?P<hour>[0-2]\d)?(?P<minute>[0-5]\d)?")
 
 
@@ -55,6 +56,9 @@ class StudentGradeEvidence:
     confirmed_by: str = ""
     note: str = ""
     exported_at: str = ""
+    teacher: str = ""
+    subject: str = ""
+    lesson_start_time: str = ""
 
 
 @dataclass(frozen=True)
@@ -179,7 +183,9 @@ def course_export_grade_override(
         and _parse_export_datetime(snapshot.exported_at or export_timestamp_from_source(snapshot.source_file)) < current_dt
         and snapshot.parsed_grade in NATURAL_GRADE_LADDER
     )
-    if lesson_day >= date(lesson_day.year, ACADEMIC_ADVANCEMENT_MONTH, ACADEMIC_ADVANCEMENT_DAY) or not candidates:
+    # The source-system early class-name promotion is a known end-of-summer
+    # phenomenon, not a year-round permission to downgrade class names.
+    if lesson_day.month != SUMMER_ROLLOVER_MONTH or not candidates:
         return None
     def snapshot_datetime(snapshot: CourseExportSnapshot) -> datetime | None:
         return _parse_export_datetime(snapshot.exported_at or export_timestamp_from_source(snapshot.source_file))
@@ -272,8 +278,11 @@ def infer_historical_grade(
     )
 
 
-def evidence_identity(item: StudentGradeEvidence) -> tuple[str, str, str, str, str]:
-    return (item.student.strip(), item.lesson_date[:10], item.grade, item.source_hash, item.coordinate)
+def evidence_identity(item: StudentGradeEvidence) -> tuple[str, str, str, str, str, str, str, str]:
+    return (
+        item.student.strip(), item.lesson_date[:10], item.grade, item.source_hash,
+        item.coordinate, item.teacher.strip(), item.subject.strip(), item.lesson_start_time.strip(),
+    )
 
 
 def _export_day(item: StudentGradeEvidence) -> date | None:
@@ -295,18 +304,26 @@ def remove_export_pollution(evidence: Iterable[StudentGradeEvidence]) -> tuple[t
 def _remove_export_pollution_cached(items: tuple[StudentGradeEvidence, ...]) -> tuple[tuple[StudentGradeEvidence, ...], tuple[StudentGradeEvidence, ...]]:
     """Ignore later-export class-name upgrades for the same old lesson.
 
-    This is intentionally narrow.  A later export can only be treated as
-    pollution when the lesson happened before 20 September, the later export
-    happened on/after that boundary, and its grade is exactly the next grade
-    after the earliest dated export's grade.  Without export timestamps the
-    disagreement remains a genuine conflict requiring input.
+    This is intentionally narrow.  The known source-system early promotion is
+    only handled for August lessons in the summer changeover window.  A later
+    export may be dated before 20 September (the real system can already show
+    the promoted class name on 1 September), so the export ordering—not a
+    hard-coded source-system switch date—is decisive.  Without export
+    timestamps the disagreement remains a genuine conflict requiring input.
     """
     items = list(items)
     ignored: set[int] = set()
-    grouped: dict[tuple[str, str], list[tuple[int, StudentGradeEvidence]]] = {}
+    grouped: dict[tuple[str, str, str, str, str], list[tuple[int, StudentGradeEvidence]]] = {}
     for index, item in enumerate(items):
-        grouped.setdefault((item.student.strip(), item.lesson_date[:10]), []).append((index, item))
-    for (_student, lesson_date), group in grouped.items():
+        # New evidence carries the stable course identity.  Legacy rows that
+        # predate those fields retain the old student+date fallback so they can
+        # still be read, but new imports no longer merge different courses on
+        # the same day.
+        course_key = (
+            item.teacher.strip(), item.subject.strip(), item.lesson_start_time.strip(),
+        ) if item.teacher.strip() and item.subject.strip() and item.lesson_start_time.strip() else ("", "", "")
+        grouped.setdefault((item.student.strip(), item.lesson_date[:10], *course_key), []).append((index, item))
+    for (_student, lesson_date, _teacher, _subject, _start_time), group in grouped.items():
         grades = {item.grade for _index, item in group}
         if len(grades) < 2:
             continue
@@ -314,8 +331,7 @@ def _remove_export_pollution_cached(items: tuple[StudentGradeEvidence, ...]) -> 
             lesson_day = date.fromisoformat(lesson_date[:10])
         except ValueError:
             continue
-        boundary = date(lesson_day.year, ACADEMIC_ADVANCEMENT_MONTH, ACADEMIC_ADVANCEMENT_DAY)
-        if lesson_day >= boundary:
+        if lesson_day.month != SUMMER_ROLLOVER_MONTH:
             continue
         dated = [(index, item, _export_day(item)) for index, item in group]
         if any(export_day is None for _index, _item, export_day in dated):
@@ -327,7 +343,7 @@ def _remove_export_pollution_cached(items: tuple[StudentGradeEvidence, ...]) -> 
             continue
         for index, item, export_day in dated[1:]:
             expected_next = NATURAL_GRADE_LADDER[base_grade_index + 1] if base_grade_index + 1 < len(NATURAL_GRADE_LADDER) else ""
-            if export_day >= boundary and item.grade == expected_next and item.grade != base_item.grade:
+            if export_day > base_export and item.grade == expected_next and item.grade != base_item.grade:
                 ignored.add(index)
     return tuple(item for index, item in enumerate(items) if index not in ignored), tuple(item for index, item in enumerate(items) if index in ignored)
 

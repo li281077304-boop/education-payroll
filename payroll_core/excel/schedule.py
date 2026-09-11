@@ -88,6 +88,11 @@ def read_schedule_excel(
             continue
         subject = subject_from_source(evidence["subject"].normalized_value)
         direct_grade = grade_from_class_name(evidence["class_name"].normalized_value)
+        class_type = normalize_schedule_class_type(
+            evidence["class_type"].normalized_value,
+            evidence["class_name"].normalized_value,
+            evidence["course_name"].normalized_value,
+        )
         snapshot_override = course_export_grade_override(
             teacher=str(evidence["teacher"].normalized_value or "").strip(),
             subject=subject,
@@ -107,6 +112,8 @@ def read_schedule_excel(
             course_date=lesson_date,
             course_export_grade=snapshot_override[0] if snapshot_override else "",
             course_export_reason=snapshot_override[1] if snapshot_override else "",
+            class_type=class_type,
+            course_subject=subject,
         )
         if not grade:
             unknown_grades += 1
@@ -116,11 +123,7 @@ def read_schedule_excel(
                 teacher=str(evidence["teacher"].normalized_value).strip(),
                 grade=grade,
                 subject=subject,
-                class_type=normalize_schedule_class_type(
-                    evidence["class_type"].normalized_value,
-                    evidence["class_name"].normalized_value,
-                    evidence["course_name"].normalized_value,
-                ),
+                class_type=class_type,
                 attended=attended,
                 lesson_status=str(evidence["lesson_status"].normalized_value or "").strip(),
                 student=str(evidence["student"].normalized_value or "").strip(),

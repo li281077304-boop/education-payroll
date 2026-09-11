@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..models.evidence import CellValueState, SourceEvidence
-from ..grade_inference import GradeInference, StudentGradeEvidence, infer_historical_grade, remove_export_pollution, split_student_names
+from ..grade_inference import NATURAL_GRADE_LADDER, GradeInference, StudentGradeEvidence, infer_historical_grade, remove_export_pollution, split_student_names
 
 
 # “一对多” does not tell us whether the approved special treatment is 1对2
@@ -196,20 +196,24 @@ def resolve_schedule_grade(
     course_date: str = "",
     course_export_grade: str = "",
     course_export_reason: str = "",
+    class_type: str = "",
+    course_subject: str = "",
 ) -> tuple[str, str, str]:
     """Resolve one grade with an auditable authority order.
 
     Dated student evidence is stronger than a current class name.  This
     protects historical courses from class labels auto-promoted by a later
-    export. Contradictory facts for one student require input; a multi-student
-    roster that cannot form one conclusion falls back to an explicit course
-    grade when one exists. The old local CSV remains a compatibility fallback.
+    export. For an ordinary single-grade K12 class, one or more same-subject
+    student facts may determine the roster when they agree; missing students
+    are not counterevidence. Contradictory same-subject facts require input.
+    The old local CSV remains a compatibility fallback.
     """
     direct = normalize_grade(direct_grade) or grade_from_class_name(class_name)
 
     names = split_student_names(student)
+    allow_partial_roster = _is_ordinary_single_grade_k12(class_name, direct, class_type)
     name = "" if student is None else str(student).strip()
-    confirmed = _infer_roster_grade(names, period, manual_evidence, recent_history_only=False, course_date=course_date)
+    confirmed = _infer_roster_grade(names, period, manual_evidence, recent_history_only=False, course_date=course_date, allow_partial=allow_partial_roster)
     if confirmed.grade:
         reason = confirmed.reason
         if direct and direct != confirmed.grade:
@@ -230,7 +234,8 @@ def resolve_schedule_grade(
     if course_export_grade:
         return course_export_grade, "COURSE_EXPORT_SNAPSHOT", course_export_reason
 
-    inferred = _infer_roster_grade(names, period, historical_evidence, course_date=course_date)
+    relevant_history = _course_relevant_grade_evidence(historical_evidence, course_subject)
+    inferred = _infer_roster_grade(names, period, relevant_history, course_date=course_date, allow_partial=allow_partial_roster)
     if inferred.grade:
         reason = inferred.reason
         if direct and direct != inferred.grade:
@@ -244,6 +249,13 @@ def resolve_schedule_grade(
             return legacy_grade, "MANUAL_LOOKUP", "历史课表年级存在冲突；使用已保存的本地学生年级确认（兼容来源）。"
         return "", "NEEDS_INPUT", inferred.reason
 
+    # During the August end-of-summer window, one consistent lookup fact can
+    # also explain a later-exported high-three class name.  This is deliberately
+    # narrower than a general "lower the class name" rule.
+    if allow_partial_roster and student_grades:
+        legacy_partial = _lookup_roster_grade(names, student_grades, allow_partial=True)
+        if legacy_partial and (not direct or direct == legacy_partial or _is_august_rollover_pair(direct, legacy_partial, course_date)):
+            return legacy_partial, "MANUAL_LOOKUP", "普通单年级班课至少有一条同向的已保存学生年级资料，缺少资料的其他学生不构成反证。"
     if direct:
         return direct, "DIRECT_SOURCE", "当前课程或源表已明确标注年级。"
 
@@ -253,19 +265,59 @@ def resolve_schedule_grade(
     return "", "NEEDS_INPUT", inferred.reason or "当前课程未标年级，且没有可用历史证据或人工确认。"
 
 
-def _lookup_roster_grade(students: Sequence[str], lookup: Mapping[str, str] | None) -> str:
-    """Use a saved compatibility confirmation only when it covers one roster.
+def _lookup_roster_grade(students: Sequence[str], lookup: Mapping[str, str] | None, *, allow_partial: bool = False) -> str:
+    """Use a saved compatibility confirmation for one roster.
 
     The legacy lookup is an existing local human fact, not an automatic
-    inference.  It can break a conflict between historical exports, but it
-    must cover every listed student and agree on one grade.
+    inference.  In strict mode it must cover every listed student and agree on
+    one grade; ordinary single-grade K12 classes may use one agreeing entry
+    while treating missing entries as unknown rather than contradictory.
     """
     if not students or not lookup:
         return ""
     values = [normalize_grade(lookup.get(student, "")) for student in students]
-    if not all(values) or len(set(values)) != 1:
+    known = [value for value in values if value]
+    if not known or len(set(known)) != 1 or (not allow_partial and len(known) != len(values)):
         return ""
-    return values[0]
+    return known[0]
+
+
+def _course_relevant_grade_evidence(
+    evidence: Sequence[StudentGradeEvidence],
+    course_subject: str,
+) -> tuple[StudentGradeEvidence, ...]:
+    """Keep historical facts that can speak to the current course.
+
+    A student may appear in multiple subjects on the same day, and a legacy
+    export can carry unrelated class-name errors in another subject.  New
+    evidence stores its subject, so a subject-specific course should use the
+    same-subject facts plus legacy facts that predate this field.  Same-subject
+    opposing facts remain a real conflict; unrelated-subject facts do not
+    become counterevidence for this class.
+    """
+    subject = str(course_subject or "").strip()
+    if not subject:
+        return tuple(evidence)
+    return tuple(item for item in evidence if not item.subject.strip() or item.subject.strip() == subject)
+
+
+def _is_ordinary_single_grade_k12(class_name: Any, direct_grade: str, class_type: str) -> bool:
+    """Whether one roster grade may safely propagate across missing students."""
+    if direct_grade not in NATURAL_GRADE_LADDER or class_type != "小班":
+        return False
+    text = "" if class_name is None else str(class_name)
+    if any(keyword in text for keyword in (*SPECIAL_GRADE_KEYWORDS, *BRIDGE_GRADE_MAP, "跨年级", "混合班")):
+        return False
+    return True
+
+
+def _is_august_rollover_pair(direct_grade: str, saved_grade: str, course_date: str) -> bool:
+    if not course_date.startswith(tuple(str(year) + "-08" for year in range(2000, 2100))):
+        return False
+    if direct_grade not in NATURAL_GRADE_LADDER or saved_grade not in NATURAL_GRADE_LADDER:
+        return False
+    index = NATURAL_GRADE_LADDER.index(saved_grade)
+    return index + 1 < len(NATURAL_GRADE_LADDER) and NATURAL_GRADE_LADDER[index + 1] == direct_grade
 
 
 def _infer_roster_grade(
@@ -275,13 +327,13 @@ def _infer_roster_grade(
     *,
     recent_history_only: bool = True,
     course_date: str = "",
+    allow_partial: bool = False,
 ) -> "GradeInference":
     """Infer one course grade from one or more named students.
 
-    A multi-student row may override a current class-name grade only when
-    every listed student has a non-conflicting conclusion and all conclusions
-    agree.  This prevents a single remembered student from silently assigning
-    a grade to their classmates.
+    A multi-student row may propagate one conclusion across missing students
+    only when the caller has explicitly identified it as an ordinary
+    single-grade K12 class.  Other class types retain strict roster coverage.
     """
     if not students:
         return infer_historical_grade("", period, evidence, recent_history_only=recent_history_only, target_date=course_date)
@@ -294,10 +346,23 @@ def _infer_roster_grade(
     if conflicted:
         return GradeInference(reason=conflicted[0].reason, evidence=tuple(item for result in results for item in result.evidence), coverage="CONFLICT")
     known = [result for result in results if result.grade]
-    if len(known) != len(students):
+    if len(known) != len(students) and not allow_partial:
         facts = tuple(item for result in known for item in result.evidence)
         return GradeInference(reason="部分学生已有历史年级证据，但仍有学生缺少历史证据，需要人工确认。", evidence=facts, coverage="PARTIAL", grades=frozenset(result.grade for result in known))
+    if not known:
+        return GradeInference(
+            reason="没有找到这些学生在此前正常课程中的明确年级证据。",
+            coverage="NONE",
+        )
     grades = {result.grade for result in known}
+    if allow_partial and known and len(grades) == 1:
+        grade = next(iter(grades))
+        facts = tuple(item for result in known for item in result.evidence)
+        coverage = "COMPLETE" if len(known) == len(students) else "PARTIAL"
+        reason = f"依据 {len(known)} 名学生的同向年级证据自动确定班课年级。"
+        if coverage == "PARTIAL":
+            reason += " 其余学生没有可用证据，不构成反证。"
+        return GradeInference(grade=grade, status="DETERMINED", reason=reason, evidence=facts, coverage=coverage, grades=frozenset({grade}))
     if len(grades) != 1:
         # This is a roster-level disagreement, not contradictory history for
         # the same student.  It cannot safely override an explicit course

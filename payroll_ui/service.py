@@ -29,6 +29,7 @@ from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.grade_inference import (
     CourseExportSnapshot,
     StudentGradeEvidence,
+    course_export_grade_override,
     evidence_identity,
     export_timestamp_from_source,
     normalize_lesson_start_time,
@@ -1736,6 +1737,7 @@ class PayrollService(CoreFlow):
                     source_file=str(item.get("source_file", "")), source_hash=str(item.get("source_hash", "")),
                     sheet=str(item.get("sheet", "")), coordinate=str(item.get("coordinate", "")), origin=str(item.get("origin", "")),
                     confirmed_by=str(item.get("confirmed_by", "")), note=str(item.get("note", "")), exported_at=str(item.get("exported_at", "")),
+                    teacher=str(item.get("teacher", "")), subject=str(item.get("subject", "")), lesson_start_time=str(item.get("lesson_start_time", "")),
                 )
             except (TypeError, ValueError):
                 continue
@@ -1810,11 +1812,30 @@ class PayrollService(CoreFlow):
 
     def _save_direct_grade_evidence(self, records: list, source: dict[str, Any]) -> int:
         candidates = []
+        snapshot_index = self._stored_course_export_snapshots()
+        snapshot_pollution_count = 0
         for record in records:
             if (
                 record.grade_origin != "DIRECT_SOURCE" or not record.student or not record.lesson_date or not record.grade
                 or record.lesson_status != "已上课" or record.attended is None or record.attended <= 0
             ):
+                continue
+            # The current export can already contain a promoted class name
+            # even when it was exported before 20 September.  If an earlier
+            # snapshot of the same stable lesson proves the natural previous
+            # grade, do not persist the later class label as a student fact.
+            # The snapshot remains available for course-level audit and the
+            # current read will use it through the same override function.
+            if course_export_grade_override(
+                teacher=record.teacher,
+                subject=record.subject,
+                lesson_date=record.lesson_date,
+                lesson_time=record.lesson_time,
+                current_grade=record.grade,
+                current_source_file=record.source,
+                snapshots=snapshot_index,
+            ):
+                snapshot_pollution_count += len(split_student_names(record.student))
                 continue
             class_cell = record.provenance.get("grade") or record.provenance.get("class_name")
             coordinate = getattr(class_cell, "coordinate", "")
@@ -1825,10 +1846,12 @@ class PayrollService(CoreFlow):
                     "id": identifier, "student": student, "lesson_date": record.lesson_date, "grade": record.grade,
                     "origin": "HISTORICAL_SCHEDULE", "source_file": record.source, "source_hash": source["sha256"],
                     "sheet": sheet, "coordinate": coordinate, "confirmed_by": "", "note": "源课表直接年级。",
+                    "teacher": record.teacher, "subject": record.subject, "lesson_start_time": normalize_lesson_start_time(record.lesson_time),
                 }
                 candidates.append((item, StudentGradeEvidence(
                     student=student, lesson_date=record.lesson_date, grade=record.grade,
                     source_file=record.source, source_hash=source["sha256"], sheet=sheet, coordinate=coordinate,
+                    teacher=record.teacher, subject=record.subject, lesson_start_time=normalize_lesson_start_time(record.lesson_time),
                 )))
         existing_rows = self.store.list_student_grade_evidence()
         existing = []
@@ -1840,6 +1863,7 @@ class PayrollService(CoreFlow):
                 source_file=str(raw.get("source_file", "")), source_hash=str(raw.get("source_hash", "")),
                 sheet=str(raw.get("sheet", "")), coordinate=str(raw.get("coordinate", "")),
                 origin=str(raw.get("origin", "HISTORICAL_SCHEDULE")), exported_at=str(raw.get("exported_at", "")),
+                teacher=str(raw.get("teacher", "")), subject=str(raw.get("subject", "")), lesson_start_time=str(raw.get("lesson_start_time", "")),
             ))
         _kept, ignored = remove_export_pollution([*existing, *(evidence for _item, evidence in candidates)])
         ignored_keys = {evidence_identity(item) for item in ignored}
@@ -1850,11 +1874,12 @@ class PayrollService(CoreFlow):
                 student=str(raw.get("student", "")), lesson_date=str(raw.get("lesson_date", "")), grade=str(raw.get("grade", "")),
                 source_file=str(raw.get("source_file", "")), source_hash=str(raw.get("source_hash", "")),
                 sheet=str(raw.get("sheet", "")), coordinate=str(raw.get("coordinate", "")),
+                teacher=str(raw.get("teacher", "")), subject=str(raw.get("subject", "")), lesson_start_time=str(raw.get("lesson_start_time", "")),
             )
             if evidence_identity(evidence) in ignored_keys:
                 self.store.save_student_grade_evidence({**raw, "status": "EXPORT_POLLUTION", "note": "后续导出导致班名提前升级，未作为学生历史年级事实使用。"})
         saved = 0
-        ignored_count = 0
+        ignored_count = snapshot_pollution_count
         for item, evidence in candidates:
             if evidence_identity(evidence) in ignored_keys:
                 item["status"] = "EXPORT_POLLUTION"
