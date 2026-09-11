@@ -3,9 +3,10 @@ from __future__ import annotations
 import csv
 import re
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from ..models.evidence import CellValueState, SourceEvidence
+from ..grade_inference import StudentGradeEvidence, infer_historical_grade
 
 
 # “一对多” does not tell us whether the approved special treatment is 1对2
@@ -181,6 +182,46 @@ def grade_from_schedule(
             if candidate and candidate in text:
                 return normalize_grade(lookup[candidate])
     return ""
+
+
+def resolve_schedule_grade(
+    class_name: Any,
+    student: Any,
+    *,
+    period: str,
+    student_grades: Mapping[str, str] | None = None,
+    manual_evidence: Sequence[StudentGradeEvidence] = (),
+    historical_evidence: Sequence[StudentGradeEvidence] = (),
+    direct_grade: Any = "",
+) -> tuple[str, str, str]:
+    """Resolve one grade with an auditable authority order.
+
+    A current source cell is strongest.  A prior human confirmation comes
+    next: it is an explicit fact, so it is safer than a statistical inference.
+    Historical normal-course evidence is used only when it agrees.  The old
+    local CSV remains a compatibility fallback for existing installations.
+    """
+    direct = normalize_grade(direct_grade) or grade_from_class_name(class_name)
+    if direct:
+        return direct, "DIRECT_SOURCE", "当前课程或源表已明确标注年级。"
+
+    name = "" if student is None else str(student).strip()
+    confirmed = infer_historical_grade(name, period, manual_evidence)
+    if confirmed.grade:
+        return confirmed.grade, "MANUAL_CONFIRMATION", confirmed.reason
+    if confirmed.evidence:
+        return "", "NEEDS_INPUT", confirmed.reason
+
+    inferred = infer_historical_grade(name, period, historical_evidence)
+    if inferred.grade:
+        return inferred.grade, "HISTORICAL_SCHEDULE", inferred.reason
+    if inferred.evidence:
+        return "", "NEEDS_INPUT", inferred.reason
+
+    legacy = grade_from_schedule(class_name, student, student_grades)
+    if legacy:
+        return legacy, "MANUAL_LOOKUP", "来自本地学生年级确认表（兼容来源）。"
+    return "", "NEEDS_INPUT", inferred.reason or "当前课程未标年级，且没有可用历史证据或人工确认。"
 
 
 def subject_from_source(value: Any) -> str:

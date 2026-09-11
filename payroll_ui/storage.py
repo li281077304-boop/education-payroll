@@ -30,6 +30,9 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS assessment_records (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_results (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_events (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            # Only the minimum dated fact needed for grade inference is kept.
+            # The original schedule workbook is never copied into local storage.
+            db.execute("CREATE TABLE IF NOT EXISTS student_grade_evidence (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -204,6 +207,12 @@ class RunStore:
 
     def save_import_profile(self, item: dict) -> None:
         self._upsert("import_profiles", item)
+
+    def save_student_grade_evidence(self, item: dict) -> None:
+        self._upsert("student_grade_evidence", item)
+
+    def list_student_grade_evidence(self) -> list[dict]:
+        return self._list_entities("student_grade_evidence")
 
     def list_import_profiles(self, requirement: str = "") -> list[dict]:
         items = self._list_entities("import_profiles")

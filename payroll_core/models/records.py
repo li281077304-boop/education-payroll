@@ -21,6 +21,10 @@ class ScheduleRecord:
     class_name: str = ""
     course_name: str = ""
     duration_text: str = ""
+    # Direct values, explicit confirmations and historical inference must stay
+    # distinguishable: an inferred grade is never presented as a source cell.
+    grade_origin: str = ""
+    grade_reason: str = ""
     source: str = ""
     provenance: Mapping[str, SourceEvidence] = field(default_factory=dict)
 

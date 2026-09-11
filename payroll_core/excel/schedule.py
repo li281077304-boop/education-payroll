@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from ..models.evidence import AdapterIssue, AdapterResult, CellValueState
 from ..models.records import ScheduleRecord
@@ -10,12 +10,13 @@ from .common import (
     cell_evidence,
     date_from_time,
     find_header_row,
-    grade_from_schedule,
+    resolve_schedule_grade,
     header_map,
     normalize_schedule_class_type,
     subject_from_source,
 )
 from .inspect import detect_fingerprint, load_workbook_pair
+from ..grade_inference import StudentGradeEvidence
 
 
 REQUIRED_SCHEDULE_HEADERS = {"上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"}
@@ -26,6 +27,8 @@ def read_schedule_excel(
     period: str,
     *,
     student_grades: Mapping[str, str] | None = None,
+    manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
+    historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
 ) -> AdapterResult[ScheduleRecord]:
     result: AdapterResult[ScheduleRecord] = AdapterResult()
     try:
@@ -75,10 +78,13 @@ def read_schedule_excel(
         if _is_period(period) and lesson_date and not lesson_date.startswith(period):
             out_of_period += 1
             continue
-        grade = grade_from_schedule(
+        grade, grade_origin, grade_reason = resolve_schedule_grade(
             evidence["class_name"].normalized_value,
             evidence["student"].normalized_value,
-            student_grades,
+            period=period,
+            student_grades=student_grades,
+            manual_evidence=manual_grade_evidence,
+            historical_evidence=historical_grade_evidence,
         )
         if not grade:
             unknown_grades += 1
@@ -101,6 +107,8 @@ def read_schedule_excel(
                 class_name=str(evidence["class_name"].normalized_value or "").strip(),
                 course_name=str(evidence["course_name"].normalized_value or "").strip(),
                 duration_text=str(evidence["duration_text"].normalized_value or "").strip(),
+                grade_origin=grade_origin,
+                grade_reason=grade_reason,
                 source=source_file,
                 provenance=evidence,
             )

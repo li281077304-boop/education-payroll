@@ -26,6 +26,7 @@ from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.common import load_student_grade_lookup
 from payroll_core.excel.schedule import read_schedule_excel
+from payroll_core.grade_inference import StudentGradeEvidence
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
 from payroll_core.reconcile.payroll_scope import HEADCOUNT_COEFFICIENTS, LESSON_HOUR_FACTOR, SMALL_GROUP_CLASS_TYPES, FieldCheck, class_value_contribution, normalize_class_rules, schedule_field_checks, total_salary_read_checks
@@ -770,6 +771,11 @@ class PayrollService(CoreFlow):
             raise ValueError(self._file_error(exc)) from exc
         if not unchanged:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
+        if role == "schedule":
+            # Persist only direct, dated facts after the stable read check.  A
+            # later gift/exchange course can use these facts without needing a
+            # user-maintained student-grade workbook.
+            self._save_direct_grade_evidence(result.records, before)
         if mapping and profile_name:
             # Remember the confirmed layout so next month's identical file imports
             # without asking again. Drift is still re-checked on every import.
@@ -1578,13 +1584,91 @@ class PayrollService(CoreFlow):
             # fixture.  Empty/missing means the adapter leaves such grades
             # unresolved rather than inventing a default.
             lookup = self._student_grade_lookup()
+            manual, history = self._stored_grade_evidence()
             result, analysis = resolve_schedule_import(
                 path, period, profiles=self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name), student_grades=lookup,
+                manual_grade_evidence=manual, historical_grade_evidence=history,
             )
             if analysis is not None and not analysis.ready:
                 result.errors.append(AdapterIssue("NEEDS_FIELD_CONFIRMATION", self._mapping_error(analysis)))
             return result
         return {"math": read_payroll_excel, "science": read_payroll_excel, "baseline": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
+
+    def import_grade_history(self, path: str, period: str, expected_hash: str | None = None) -> dict:
+        """Store direct grade facts from a prior schedule without retaining it.
+
+        This is the one-time migration path for a school that starts using the
+        product after the academic year has already begun.
+        """
+        source = Path(path).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError("找不到历史课表。请关闭 Excel/WPS 后重试。")
+        before = version(source)
+        if expected_hash and expected_hash != before["sha256"]:
+            raise ValueError("所选历史课表与刚才识别的文件不一致。")
+        # No lookup/history is supplied here: this operation must save only
+        # facts explicitly present in that historical schedule.
+        result, analysis = resolve_schedule_import(source, period)
+        if analysis is not None and not analysis.ready:
+            raise ValueError(self._mapping_error(analysis))
+        if result.errors:
+            raise ValueError("历史课表缺少必要字段：" + "；".join(issue.message for issue in result.errors))
+        if version(source) != before:
+            raise ValueError("历史课表在读取期间发生变化，请关闭 Excel/WPS 后重试。")
+        stored = self._save_direct_grade_evidence(result.records, before)
+        return {"source": source.name, "period": period, "direct_grade_evidence": stored, "records": len(result.records)}
+
+    def save_student_grade_confirmation(self, student: str, grade: str, period: str, confirmed_by: str, note: str = "") -> dict:
+        """Save a human-confirmed dated fact for later, explainable reuse."""
+        name, value = student.strip(), grade.strip()
+        if not name or not value or not period:
+            raise ValueError("请填写学生、确认年级和适用月份。")
+        if not confirmed_by.strip():
+            raise ValueError("请填写确认人。")
+        identifier = hashlib.sha256(f"manual-grade|{name}|{period}".encode()).hexdigest()[:24]
+        item = {
+            "id": identifier, "student": name, "lesson_date": f"{period}-28", "grade": value,
+            "origin": "MANUAL_CONFIRMATION", "confirmed_by": confirmed_by.strip(), "note": note.strip(),
+            "source_file": "", "source_hash": "", "sheet": "", "coordinate": "",
+        }
+        self.store.save_student_grade_evidence(item)
+        return item
+
+    def _stored_grade_evidence(self) -> tuple[list[StudentGradeEvidence], list[StudentGradeEvidence]]:
+        manual: list[StudentGradeEvidence] = []
+        history: list[StudentGradeEvidence] = []
+        for item in self.store.list_student_grade_evidence():
+            try:
+                evidence = StudentGradeEvidence(
+                    student=str(item.get("student", "")), lesson_date=str(item.get("lesson_date", "")), grade=str(item.get("grade", "")),
+                    source_file=str(item.get("source_file", "")), source_hash=str(item.get("source_hash", "")),
+                    sheet=str(item.get("sheet", "")), coordinate=str(item.get("coordinate", "")), origin=str(item.get("origin", "")),
+                    confirmed_by=str(item.get("confirmed_by", "")), note=str(item.get("note", "")),
+                )
+            except (TypeError, ValueError):
+                continue
+            (manual if evidence.origin == "MANUAL_CONFIRMATION" else history).append(evidence)
+        return manual, history
+
+    def _save_direct_grade_evidence(self, records: list, source: dict[str, Any]) -> int:
+        saved = 0
+        for record in records:
+            if (
+                record.grade_origin != "DIRECT_SOURCE" or not record.student or not record.lesson_date or not record.grade
+                or record.lesson_status != "已上课" or record.attended is None or record.attended <= 0
+            ):
+                continue
+            class_cell = record.provenance.get("grade") or record.provenance.get("class_name")
+            coordinate = getattr(class_cell, "coordinate", "")
+            sheet = getattr(class_cell, "sheet", "")
+            identifier = hashlib.sha256(f"schedule-grade|{source['sha256']}|{coordinate}|{record.student}|{record.lesson_date}|{record.grade}".encode()).hexdigest()[:24]
+            self.store.save_student_grade_evidence({
+                "id": identifier, "student": record.student, "lesson_date": record.lesson_date, "grade": record.grade,
+                "origin": "HISTORICAL_SCHEDULE", "source_file": record.source, "source_hash": source["sha256"],
+                "sheet": sheet, "coordinate": coordinate, "confirmed_by": "", "note": "源课表直接年级。",
+            })
+            saved += 1
+        return saved
 
     def _student_grade_lookup(self) -> dict[str, str]:
         """Return the local grade authority, with a read-only legacy bridge.

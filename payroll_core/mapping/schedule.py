@@ -13,7 +13,7 @@ from ..excel.common import (
     as_float,
     cell_evidence,
     date_from_time,
-    grade_from_schedule,
+    resolve_schedule_grade,
     normalize_schedule_class_type,
     subject_from_source,
 )
@@ -21,6 +21,7 @@ from ..excel.inspect import load_workbook_pair
 from ..excel.schedule import read_schedule_excel
 from ..models.evidence import AdapterIssue, AdapterResult
 from ..models.records import ScheduleRecord
+from ..grade_inference import StudentGradeEvidence
 from .requirements import SCHEDULE_AC_REQUIREMENT, ImportRequirement
 from .semantic import MappingAnalysis, analyze_mapping
 
@@ -34,6 +35,8 @@ def read_schedule_with_mapping(
     sheet_name: str = "",
     header_row: int = 0,
     student_grades: Mapping[str, str] | None = None,
+    manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
+    historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
 ) -> AdapterResult[ScheduleRecord]:
     """Parse a schedule sheet using an explicit field-to-column mapping."""
     result: AdapterResult[ScheduleRecord] = AdapterResult()
@@ -90,7 +93,11 @@ def read_schedule_with_mapping(
             continue
         # 年级 may have its own column; otherwise it is derived from the class
         # name and, for explicit authority data only, the student-grade table.
-        grade = text("grade") or grade_from_schedule(class_name, text("student"), student_grades)
+        grade, grade_origin, grade_reason = resolve_schedule_grade(
+            class_name, text("student"), period=period, student_grades=student_grades,
+            manual_evidence=manual_grade_evidence, historical_evidence=historical_grade_evidence,
+            direct_grade=text("grade"),
+        )
         if not grade:
             unknown_grades += 1
         result.records.append(ScheduleRecord(
@@ -107,6 +114,8 @@ def read_schedule_with_mapping(
             class_name=class_name or text("course_name"),
             course_name=class_name or text("course_name"),
             duration_text="",  # every course defaults to two hours; duration is not required
+            grade_origin=grade_origin,
+            grade_reason=grade_reason,
             source=str(path),
             provenance=evidence_for,
         ))
@@ -128,26 +137,28 @@ def resolve_schedule_import(
     confirmed: Mapping[str, Any] | None = None,
     requirement: ImportRequirement = SCHEDULE_AC_REQUIREMENT,
     student_grades: Mapping[str, str] | None = None,
+    manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
+    historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
 ) -> tuple[AdapterResult[ScheduleRecord], MappingAnalysis | None]:
     """Try the known adapter; only fall back to semantic mapping when it fails.
 
     ``confirmed`` carries a mapping the user has already approved, in which
     case parsing happens directly and no question is asked again.
     """
-    known = read_schedule_excel(path, period, student_grades=student_grades)
+    known = read_schedule_excel(path, period, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence)
     if known.ok and known.records:
         return known, None
     if confirmed:
         result = read_schedule_with_mapping(
             path, period, mapping=confirmed.get("mapping", {}), requirement=requirement,
-            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0), student_grades=student_grades,
+            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0), student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence,
         )
         return result, None
     analysis = analyze_mapping(path, requirement, profiles=profiles)
     if analysis.ready:
         result = read_schedule_with_mapping(
             path, period, mapping=analysis.mapping, requirement=requirement,
-            sheet_name=analysis.sheet, header_row=analysis.header_row, student_grades=student_grades,
+            sheet_name=analysis.sheet, header_row=analysis.header_row, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence,
         )
         return result, analysis
     return known, analysis
