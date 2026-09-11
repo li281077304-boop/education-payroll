@@ -119,6 +119,14 @@ def test_unknown_lesson_status_requires_input_and_known_non_teaching_status_is_e
     assert calculate_course(record(lesson_status="已取消"), rules).state == ValueState.NOT_APPLICABLE
 
 
+def test_zero_attendance_is_not_an_unknown_contribution_or_a_hidden_zero_grade():
+    result = calculate_payroll("2026-08", [record(class_type="1对1", grade="", attended=0)], load_core_rules())
+    contribution = result.course_contributions[0]
+    assert contribution.state == ValueState.NOT_APPLICABLE
+    assert contribution.value == Decimal("0")
+    assert row(result).aa.value == row(result).ac.value == row(result).ad.value == Decimal("0")
+
+
 def test_unknown_ac_grade_blocks_only_ac_and_evidence_contains_hand_calculation_inputs():
     rules = load_core_rules()
     result = calculate_payroll("2026-08", [record(class_type="1对1"), record(class_type="小班", grade="未配置年级")], rules)

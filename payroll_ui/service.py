@@ -24,6 +24,7 @@ from payroll_core.payroll_generation import build_legacy_generated_payroll, gene
 from payroll_core.excel.standard_payroll_render import render_generated_payroll
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
+from payroll_core.excel.common import load_student_grade_lookup
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
@@ -105,7 +106,8 @@ def safe_csv(value: Any) -> Any:
 
 class PayrollService(CoreFlow):
     def __init__(self, root: Path):
-        self.store = RunStore(root)
+        self.root = Path(root)
+        self.store = RunStore(self.root)
         self.inputs = BusinessInputService(self.store)
         # Teacher payroll sheets and group-leader assessments are two separate
         # flows on purpose: a personal payroll sheet is never an assessment.
@@ -1572,13 +1574,31 @@ class PayrollService(CoreFlow):
         that needed field mapping keeps using it on every later read.
         """
         if role == "schedule":
+            # This is deliberately a local authority file, never a repository
+            # fixture.  Empty/missing means the adapter leaves such grades
+            # unresolved rather than inventing a default.
+            lookup = self._student_grade_lookup()
             result, analysis = resolve_schedule_import(
-                path, period, profiles=self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name),
+                path, period, profiles=self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name), student_grades=lookup,
             )
             if analysis is not None and not analysis.ready:
                 result.errors.append(AdapterIssue("NEEDS_FIELD_CONFIRMATION", self._mapping_error(analysis)))
             return result
         return {"math": read_payroll_excel, "science": read_payroll_excel, "baseline": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
+
+    def _student_grade_lookup(self) -> dict[str, str]:
+        """Return the local grade authority, with a read-only legacy bridge.
+
+        New installations keep this file under the application data directory.
+        On this Mac, the existing Skill is still the authoritative local source
+        during migration; reading it is intentionally a fallback only and
+        never copies sensitive student data into the repository.
+        """
+        configured = self.root / "config" / "student_grade_lookup.csv"
+        if configured.is_file():
+            return load_student_grade_lookup(configured)
+        legacy = Path.home() / ".workbuddy" / "skills" / "工资核对表制作" / "references" / "学生年级查表.csv"
+        return load_student_grade_lookup(legacy)
 
     @staticmethod
     def _issue(item: FieldCheck) -> dict:

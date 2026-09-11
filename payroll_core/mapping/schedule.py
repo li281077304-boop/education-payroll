@@ -13,8 +13,8 @@ from ..excel.common import (
     as_float,
     cell_evidence,
     date_from_time,
-    grade_from_class_name,
-    normalize_class_type,
+    grade_from_schedule,
+    normalize_schedule_class_type,
     subject_from_source,
 )
 from ..excel.inspect import load_workbook_pair
@@ -33,6 +33,7 @@ def read_schedule_with_mapping(
     requirement: ImportRequirement = SCHEDULE_AC_REQUIREMENT,
     sheet_name: str = "",
     header_row: int = 0,
+    student_grades: Mapping[str, str] | None = None,
 ) -> AdapterResult[ScheduleRecord]:
     """Parse a schedule sheet using an explicit field-to-column mapping."""
     result: AdapterResult[ScheduleRecord] = AdapterResult()
@@ -66,7 +67,7 @@ def read_schedule_with_mapping(
         evidence = evidence_for.get(name)
         return str(evidence.normalized_value or "").strip() if evidence is not None else ""
 
-    unknown_grades = missing_attendance = 0
+    unknown_grades = missing_attendance = out_of_period = 0
     for row in range(header_row + 1, sheet.max_row + 1):
         if not str(sheet.cell(row, mapping["teacher"]).value or "").strip():
             continue
@@ -82,8 +83,14 @@ def read_schedule_with_mapping(
             attended = int(attendance)
 
         class_name = text("class_name")
-        # 年级 may have its own column; otherwise it is derived from the class name.
-        grade = text("grade") or grade_from_class_name(class_name)
+        lesson_time = text("lesson_time")
+        lesson_date = date_from_time(lesson_time)
+        if _is_period(period) and lesson_date and not lesson_date.startswith(period):
+            out_of_period += 1
+            continue
+        # 年级 may have its own column; otherwise it is derived from the class
+        # name and, for explicit authority data only, the student-grade table.
+        grade = text("grade") or grade_from_schedule(class_name, text("student"), student_grades)
         if not grade:
             unknown_grades += 1
         result.records.append(ScheduleRecord(
@@ -91,12 +98,12 @@ def read_schedule_with_mapping(
             teacher=text("teacher"),
             grade=grade,
             subject=subject_from_source(text("subject")),
-            class_type=normalize_class_type(text("class_type")),
+            class_type=normalize_schedule_class_type(text("class_type"), class_name, text("course_name")),
             attended=attended,
             lesson_status=text("lesson_status"),
             student=text("student"),
-            lesson_time=text("lesson_time"),
-            lesson_date=date_from_time(text("lesson_time")),
+            lesson_time=lesson_time,
+            lesson_date=lesson_date,
             class_name=class_name or text("course_name"),
             course_name=class_name or text("course_name"),
             duration_text="",  # every course defaults to two hours; duration is not required
@@ -107,6 +114,8 @@ def read_schedule_with_mapping(
         result.warnings.append(AdapterIssue("GRADE_UNRESOLVED", f"{unknown_grades} schedule rows have no grade", sheet.title, "grade"))
     if missing_attendance:
         result.warnings.append(AdapterIssue("MISSING_ATTENDANCE", f"{missing_attendance} schedule rows have no numeric attendance", sheet.title, "actual_student_count"))
+    if out_of_period:
+        result.warnings.append(AdapterIssue("OUT_OF_PERIOD_ROWS_EXCLUDED", f"{out_of_period} schedule rows are outside salary period {period} and were excluded", sheet.title, "lesson_time"))
     result.coverage = {"records": len(result.records), "required_columns": len(requirement.required_fields), "mapped_columns": len(mapping)}
     return result
 
@@ -118,26 +127,27 @@ def resolve_schedule_import(
     profiles: Sequence[Mapping[str, Any]] = (),
     confirmed: Mapping[str, Any] | None = None,
     requirement: ImportRequirement = SCHEDULE_AC_REQUIREMENT,
+    student_grades: Mapping[str, str] | None = None,
 ) -> tuple[AdapterResult[ScheduleRecord], MappingAnalysis | None]:
     """Try the known adapter; only fall back to semantic mapping when it fails.
 
     ``confirmed`` carries a mapping the user has already approved, in which
     case parsing happens directly and no question is asked again.
     """
-    known = read_schedule_excel(path, period)
+    known = read_schedule_excel(path, period, student_grades=student_grades)
     if known.ok and known.records:
         return known, None
     if confirmed:
         result = read_schedule_with_mapping(
             path, period, mapping=confirmed.get("mapping", {}), requirement=requirement,
-            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0),
+            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0), student_grades=student_grades,
         )
         return result, None
     analysis = analyze_mapping(path, requirement, profiles=profiles)
     if analysis.ready:
         result = read_schedule_with_mapping(
             path, period, mapping=analysis.mapping, requirement=requirement,
-            sheet_name=analysis.sheet, header_row=analysis.header_row,
+            sheet_name=analysis.sheet, header_row=analysis.header_row, student_grades=student_grades,
         )
         return result, analysis
     return known, analysis
@@ -162,3 +172,7 @@ def _detect_header_row(sheet, mapping: Mapping[str, int]) -> int:
         if hits > best_hits:
             best_row, best_hits = row, hits
     return best_row
+
+
+def _is_period(value: str) -> bool:
+    return len(value) == 7 and value[4] == "-" and value[:4].isdigit() and value[5:].isdigit() and 1 <= int(value[5:]) <= 12
