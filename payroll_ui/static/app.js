@@ -876,23 +876,38 @@ async function confirmAssessment(id) {
 async function classTypeRulesPage(runId = "") {
   try {
     const versions = await api("/api/class-type-rules");
-    const rows = versions.map((item) => `<tr><td>${escapeHtml(item.id)}</td><td>${escapeHtml(item.effective_from)} ～ ${escapeHtml(item.effective_to)}</td><td>${escapeHtml(item.status || "ACTIVE")}</td><td>${Object.entries(item.rules || {}).map(([name, value]) => `${escapeHtml(name)} ${value}`).join("；")}</td><td>${escapeHtml(item.source || "")}</td></tr>`).join("");
+    const rows = versions.map((item) => `<tr><td>${escapeHtml(item.id)}</td><td>${escapeHtml(item.effective_from)} ～ ${escapeHtml(item.effective_to)}</td><td>${escapeHtml(item.status || "ACTIVE")}</td><td>${Object.entries(item.rules?.special_class_coefficients || {}).map(([name, value]) => `${escapeHtml(name)} ${value}`).join("；") || "—"}</td><td>${Object.entries(item.rules?.small_group_headcount_coefficients || {}).map(([name, value]) => `${escapeHtml(name)}人 ${value}`).join("；") || "—"}</td><td>${escapeHtml(item.source || "")}</td></tr>`).join("");
     const period = new Date().toISOString().slice(0, 7);
     const current = versions.find((item) => item.status === "ACTIVE" && item.effective_from <= period && period <= item.effective_to);
-    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>班型折算规则</h1><p class="muted">修改系数会生成新版本；旧版本保留，已经结算过的月份不会被改写。</p></div><button class="secondary" onclick="authorityDashboard('${runId}')">返回基础资料</button></div><section class="card"><h2>现有版本</h2><p class="muted small">当前月份适用：${current ? escapeHtml(current.id) : "没有适用版本"}</p><div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>班型系数</th><th>来源</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">暂无规则版本。</td></tr>'}</tbody></table></div></section><section class="card"><h2>新增一个版本</h2><p class="muted small">出现新班型时在这里加上；只改系数也是新增版本，不要删除旧版本。</p><div class="decision-form"><label>生效开始<input id="ctr-from" type="date"></label><label>生效结束<input id="ctr-to" type="date" value="9999-12-31"></label><label>班型系数（每行一个，格式：班型=系数）<textarea id="ctr-rules" rows="4" placeholder="小班=1.0&#10;1对2=1.2&#10;三人班=1.5"></textarea></label><label>来源说明<input id="ctr-source" placeholder="例如：用户确认 / 校区通知"></label><label>操作人<input id="ctr-actor" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">保存后不会影响历史 Run；要让某个 Run 改用新版本，请用基础资料里的切换操作。</span><button onclick="saveClassTypeRules('${runId}')">保存新版本</button></div></section>`, false);
+    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>班型折算规则</h1><p class="muted">修改系数会生成新版本；旧版本保留，已经结算过的月份不会被改写。</p></div><button class="secondary" onclick="authorityDashboard('${runId}')">返回基础资料</button></div><section class="card"><h2>现有版本</h2><p class="muted small">当前月份适用：${current ? escapeHtml(current.id) : "没有适用版本"}</p><div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>特殊班型固定系数</th><th>普通小班实到人数系数</th><th>来源</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="muted">暂无规则版本。</td></tr>'}</tbody></table></div></section><section class="card"><h2>新增一个版本</h2><p class="muted small">特殊班型是固定系数；普通小班只按实到人数折算，两者不会互相相乘。出现新班型时在这里加上，只改系数也是新增版本，不要删除旧版本。</p><div class="decision-form"><label>生效开始<input id="ctr-from" type="date"></label><label>生效结束<input id="ctr-to" type="date" value="9999-12-31"></label><label>特殊班型固定系数（每行一个：班型=系数）<textarea id="ctr-special" rows="3" placeholder="1对2=1.2&#10;1对3=1.5"></textarea></label><label>普通小班实到人数系数（每行一个：人数=系数）<textarea id="ctr-headcount" rows="4" placeholder="1=0.8&#10;2=1.0&#10;3=1.2"></textarea></label><label>来源说明<input id="ctr-source" placeholder="例如：用户确认 / 校区通知"></label><label>操作人<input id="ctr-actor" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">保存后不会影响历史 Run；要让某个 Run 改用新版本，请用基础资料里的切换操作。</span><button onclick="saveClassTypeRules('${runId}')">保存新版本</button></div></section>`, false);
   } catch (error) { showMessage(error.message); }
 }
 
-async function saveClassTypeRules(runId = "") {
-  const rules = {};
-  ($("#ctr-rules").value || "").split("\n").forEach((line) => {
+// 表单解析：两张表分开，普通小班永远不接收固定班型系数
+function parseRuleLines(value) {
+  const table = {};
+  (value || "").split("\n").forEach((line) => {
     const trimmed = line.trim();
     if (!trimmed) return;
     const parts = trimmed.split("=");
-    if (parts.length === 2 && parts[0].trim() && parts[1].trim()) rules[parts[0].trim()] = Number(parts[1].trim());
+    if (parts.length === 2 && parts[0].trim() && parts[1].trim()) table[parts[0].trim()] = Number(parts[1].trim());
   });
+  return table;
+}
+
+async function saveClassTypeRules(runId = "") {
+  const special = parseRuleLines($("#ctr-special").value);
+  const headcounts = parseRuleLines($("#ctr-headcount").value);
+  if (Object.keys(special).some((name) => name === "小班")) {
+    showMessage("普通小班按实到人数折算，不能配置固定班型系数。", "error");
+    return;
+  }
   try {
-    await api("/api/class-type-rules", { method: "POST", body: JSON.stringify({ effective_from: $("#ctr-from").value, effective_to: $("#ctr-to").value, rules, source: $("#ctr-source").value, actor: $("#ctr-actor").value }) });
+    await api("/api/class-type-rules", { method: "POST", body: JSON.stringify({
+      effective_from: $("#ctr-from").value, effective_to: $("#ctr-to").value,
+      rules: { special_class_coefficients: special, small_group_headcount_coefficients: headcounts },
+      source: $("#ctr-source").value, actor: $("#ctr-actor").value,
+    }) });
     showMessage("已保存新版本，旧版本保留。", "success");
     await classTypeRulesPage(runId);
   } catch (error) { showMessage(error.message); }

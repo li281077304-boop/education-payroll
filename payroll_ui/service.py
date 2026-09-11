@@ -13,7 +13,13 @@ from typing import Any
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.models.evidence import AdapterIssue
-from payroll_core.models.class_type_rules import default_rule_versions, rule_version_for_period
+from payroll_core.models.class_type_rules import (
+    HEADCOUNT_RULES_KEY,
+    SPECIAL_RULES_KEY,
+    default_rule_versions,
+    rule_version_for_period,
+    structured_rules,
+)
 from payroll_core.payroll_generation import build_legacy_generated_payroll, generated_from_calculation
 from payroll_core.excel.standard_payroll_render import render_generated_payroll
 from payroll_core.excel.inspect import inspect_workbook
@@ -21,7 +27,7 @@ from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
-from payroll_core.reconcile.payroll_scope import CLASS_MULTIPLIERS, HEADCOUNT_COEFFICIENTS, FieldCheck, class_value_contribution, schedule_field_checks, total_salary_read_checks
+from payroll_core.reconcile.payroll_scope import HEADCOUNT_COEFFICIENTS, LESSON_HOUR_FACTOR, SMALL_GROUP_CLASS_TYPES, FieldCheck, class_value_contribution, normalize_class_rules, schedule_field_checks, total_salary_read_checks
 from payroll_core.reconcile.ac_resolution import (
     ApprovedPayrollOverride,
     SourceDataCorrection,
@@ -483,13 +489,7 @@ class PayrollService(CoreFlow):
 
     def save_class_type_rule_version(self, *, effective_from: str, effective_to: str, rules: dict, source: str, actor: str, notes: str = "", supersedes_version_id: str | None = None) -> list[dict]:
         """Editing a coefficient always creates a new version; old ones stay."""
-        if not rules:
-            raise ValueError("请至少配置一个班型。")
-        for name, value in rules.items():
-            if not str(name).strip():
-                raise ValueError("班型名称不能为空。")
-            if float(value) <= 0:
-                raise ValueError(f"班型“{name}”的系数必须大于 0。")
+        special, headcounts = self._validate_class_rules(rules)
         if effective_from > effective_to:
             raise ValueError("生效开始时间不能晚于结束时间。")
         # The version being superseded is about to be closed, so it must not
@@ -504,7 +504,7 @@ class PayrollService(CoreFlow):
         self.store.save_class_type_rule_version({
             "id": f"CLASS_TYPE_RULE_{uuid.uuid4().hex[:8]}", "source": source.strip(), "actor": actor.strip(),
             "effective_from": effective_from, "effective_to": effective_to,
-            "rules": {str(name).strip(): float(value) for name, value in rules.items()},
+            "rules": structured_rules(special, headcounts),
             "status": "ACTIVE", "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "notes": notes.strip(),
             "supersedes": supersedes_version_id or "",
         })
@@ -518,7 +518,44 @@ class PayrollService(CoreFlow):
                 self.store.save_class_type_rule_version(prior)
         return self.class_type_rule_versions()
 
-    def _class_type_rules_for_run(self, run: dict) -> tuple[dict[str, float], str]:
+    @staticmethod
+    def _validate_class_rules(rules: dict) -> tuple[dict[str, float], dict[int, float]]:
+        """Accept only the two-table shape: 特殊班型固定系数 + 普通小班人数系数。
+
+        普通小班 must never carry a fixed coefficient; it is priced by attendance.
+        """
+        if not rules:
+            raise ValueError("请至少配置特殊班型系数或普通小班实到人数系数。")
+        if SPECIAL_RULES_KEY not in rules and HEADCOUNT_RULES_KEY not in rules:
+            # A flat mapping is only meaningful for special class types.
+            if any(name in SMALL_GROUP_CLASS_TYPES for name in rules):
+                raise ValueError("普通小班按实到人数折算，不能配置固定班型系数。")
+            rules = {SPECIAL_RULES_KEY: rules, HEADCOUNT_RULES_KEY: {}}
+        special = {str(name).strip(): float(value) for name, value in (rules.get(SPECIAL_RULES_KEY) or {}).items()}
+        if any(name in SMALL_GROUP_CLASS_TYPES for name in special):
+            raise ValueError("普通小班按实到人数折算，不能配置固定班型系数。")
+        for name, value in special.items():
+            if not name:
+                raise ValueError("班型名称不能为空。")
+            if value <= 0:
+                raise ValueError(f"特殊班型“{name}”的系数必须大于 0。")
+        headcounts: dict[int, float] = {}
+        for key, value in (rules.get(HEADCOUNT_RULES_KEY) or {}).items():
+            try:
+                people = int(key)
+            except (TypeError, ValueError):
+                raise ValueError(f"实到人数必须是整数：{key!r}") from None
+            if people < 1:
+                raise ValueError("实到人数必须大于 0。")
+            if float(value) <= 0:
+                raise ValueError(f"实到 {people} 人的人数系数必须大于 0。")
+            headcounts[people] = float(value)
+        if not special and not headcounts:
+            raise ValueError("请至少配置特殊班型系数或普通小班实到人数系数。")
+        headcounts = headcounts or dict(HEADCOUNT_COEFFICIENTS)
+        return special or dict(SPECIAL_CLASS_COEFFICIENTS), headcounts
+
+    def _class_type_rules_for_run(self, run: dict) -> tuple[dict[str, object], str]:
         bound = run.get("class_type_rule_version_id")
         versions = self.class_type_rule_versions()
         if bound:
@@ -1169,7 +1206,7 @@ class PayrollService(CoreFlow):
         }
         payroll, _ = self._payroll_records(reads)
         target = next((item for item in payroll if item.teacher == group["teacher"]), None)
-        lines = self._course_evidence(schedule, group, target)
+        lines = self._course_evidence(schedule, group, target, run)
         ac_calculation = self._class_value_calculation(schedule, group["teacher"]) if "class_value" in group["affected_fields"] else None
         sections = self._evidence_sections(run, group, records, target)
         if run.get("calculation_engine") == "CONFIGURED_V1":
@@ -1332,9 +1369,13 @@ class PayrollService(CoreFlow):
             self.store.save(run)
             raise ValueError("星级、政策或档位依据已变化，请重新核对后再记录处理意见。")
 
-    def _course_evidence(self, schedule: list, group: dict, target: Any) -> list[dict]:
+    def _course_evidence(self, schedule: list, group: dict, target: Any, run: dict | None = None) -> list[dict]:
         if not set(group["affected_fields"]) & {"one_to_one", "class_value"}:
             return []
+        # Explain each row with the rule it actually used: 普通小班 只看实到人数系数，
+        # 特殊班型用固定系数，两者不会互相相乘。
+        rules = self._class_type_rules_for_run(run)[0] if run else None
+        special_classes, headcount_coefficients = normalize_class_rules(rules)
         lines = []
         for item in schedule:
             if item.teacher != group["teacher"]:
@@ -1344,9 +1385,12 @@ class PayrollService(CoreFlow):
             if item.class_type == "1对1":
                 coefficient = GRADE_COEFFICIENTS.get(item.grade)
                 rationale = f"AA：实到 {item.attended} × 2 × 年级系数 {coefficient}" if coefficient is not None and item.attended else "AA：年级或实到缺失，不能计算"
-            elif item.class_type in CLASS_MULTIPLIERS:
-                grade, people = GRADE_COEFFICIENTS.get(item.grade), HEADCOUNT_COEFFICIENTS.get(item.attended)
-                rationale = f"AC：年级系数 {grade} × 实到系数 {people} × 班型系数 {CLASS_MULTIPLIERS[item.class_type]} × 2" if grade is not None and people is not None else "AC：年级或实到超出已确认系数，不能计算"
+            elif item.class_type in special_classes:
+                grade = GRADE_COEFFICIENTS.get(item.grade)
+                rationale = f"AC（特殊班型 {item.class_type}）：年级系数 {grade} × 班型系数 {special_classes[item.class_type]} × {LESSON_HOUR_FACTOR}" if grade is not None else "AC：年级缺失，不能计算"
+            elif item.class_type in SMALL_GROUP_CLASS_TYPES:
+                grade, people = GRADE_COEFFICIENTS.get(item.grade), headcount_coefficients.get(item.attended)
+                rationale = f"AC（普通小班）：年级系数 {grade} × 实到人数系数 {people} × {LESSON_HOUR_FACTOR}" if grade is not None and people is not None else "AC：年级或实到人数超出已确认系数，不能计算"
             if item.lesson_status.strip() != "已上课" or item.attended is None or item.attended <= 0:
                 rationale = "未计入：只计已上课且实到人数大于零的记录。"
             lines.append({"来源": "原始排课", "来源文件": Path(source.source_file).name, "来源工作表": source.sheet, "课程时间": item.lesson_time, "课程状态": item.lesson_status, "班级": item.class_name, "班型": item.class_type, "年级": item.grade or "待确认", "实到": item.attended, "计算依据": rationale, "来源位置": ", ".join(value.coordinate for name, value in item.provenance.items() if name != "student")})
@@ -1446,7 +1490,8 @@ class PayrollService(CoreFlow):
             people = HEADCOUNT_COEFFICIENTS.get(int(people_text))
             if coefficient is None or people is None:
                 return None
-            total += coefficient * people * CLASS_MULTIPLIERS["小班"] * 2 * int(count_text)
+            # 普通小班没有班型系数：只有 年级系数 × 实到人数系数 × 2。
+            total += coefficient * people * LESSON_HOUR_FACTOR * int(count_text)
         return round(total, 6)
 
     def _class_value_comparison(self, records: list[dict], comments: list, run: dict | None = None) -> dict:

@@ -13,18 +13,47 @@ from math import isclose
 from typing import Iterable
 
 from ..excel.reconciliation_bridge import GRADE_COEFFICIENTS
+from ..models.class_type_rules import (
+    DEFAULT_HEADCOUNT_COEFFICIENTS,
+    DEFAULT_SPECIAL_CLASS_COEFFICIENTS,
+    HEADCOUNT_RULES_KEY,
+    LESSON_HOUR_FACTOR,
+    SMALL_GROUP_CLASS_TYPES,
+    SPECIAL_RULES_KEY,
+    UNKNOWN_CLASS_TYPE_RULE,
+)
 from ..models.records import PayrollRecord, ScheduleRecord
 
-HEADCOUNT_COEFFICIENTS = {1: 0.8, 2: 1.0, 3: 1.2, 4: 1.4, 5: 1.7, 6: 1.9, 7: 2.1, 8: 2.3, 9: 2.5, 10: 2.7}
-#: Fallback coefficients, identical to the audited historical values. Callers
-#: normally pass the run's bound ClassTypeRule version instead, so a rule change
-#: is configuration, never a code edit.
-CLASS_MULTIPLIERS = {"小班": 1.0, "1对2": 1.2}
-UNKNOWN_CLASS_TYPE_RULE = "UNKNOWN_CLASS_TYPE_RULE"
+#: 两张表共用同一份定义（见 models.class_type_rules），这里只是重新导出，
+#: 避免第二套常量漂移：
+#:   普通小班 → 只看实到人数系数；特殊班型 → 固定系数，不乘人数系数。
+HEADCOUNT_COEFFICIENTS = dict(DEFAULT_HEADCOUNT_COEFFICIENTS)
+SPECIAL_CLASS_COEFFICIENTS = dict(DEFAULT_SPECIAL_CLASS_COEFFICIENTS)
 
 
-def class_coefficients(rules=None) -> dict[str, float]:
-    return dict(rules) if rules else dict(CLASS_MULTIPLIERS)
+def normalize_class_rules(rules=None) -> tuple[dict[str, float], dict[int, float]]:
+    """Return (特殊班型固定系数, 普通小班实到人数系数).
+
+    A flat ``{class_type: coefficient}`` mapping is still accepted for special
+    class types, so stored historical versions keep working. A fixed coefficient
+    for 普通小班 is rejected outright: 小班 is priced by attendance, and honouring
+    a class coefficient would double-count it.
+    """
+    if not rules:
+        return dict(SPECIAL_CLASS_COEFFICIENTS), dict(HEADCOUNT_COEFFICIENTS)
+    if SPECIAL_RULES_KEY in rules or HEADCOUNT_RULES_KEY in rules:
+        special = {str(name): float(value) for name, value in (rules.get(SPECIAL_RULES_KEY) or SPECIAL_CLASS_COEFFICIENTS).items()}
+        if any(name in SMALL_GROUP_CLASS_TYPES for name in special):
+            raise ValueError("普通小班按实到人数折算，不能配置固定班型系数。")
+        headcounts = {int(key): float(value) for key, value in (rules.get(HEADCOUNT_RULES_KEY) or HEADCOUNT_COEFFICIENTS).items()}
+        return special, headcounts
+    flat = {str(key): float(value) for key, value in rules.items()}
+    # A historical flat version stored 小班: 1.0 as a no-op multiplier; that is
+    # tolerated only while it really was a no-op.
+    if any(name in SMALL_GROUP_CLASS_TYPES and abs(value - 1.0) > 1e-9 for name, value in flat.items()):
+        raise ValueError("普通小班按实到人数折算，不能配置固定班型系数。")
+    special = {name: value for name, value in flat.items() if name not in SMALL_GROUP_CLASS_TYPES}
+    return special or dict(SPECIAL_CLASS_COEFFICIENTS), dict(HEADCOUNT_COEFFICIENTS)
 STAR_BONUS = {1: 0.0, 2: 0.0, 3: 5.0, 4: 10.0, 5: 15.0, 6: 20.0}
 TIER = ((30, 0.0), (60, 30.0), (80, 32.0), (100, 34.0), (130, 36.0), (160, 37.0), (10**9, 38.0))
 
@@ -52,24 +81,29 @@ def class_value_contribution(record: ScheduleRecord, rules: dict[str, float] | N
     """
     if not _valid(record):
         return None, "未计入：只计已上课且实到人数大于零的记录。"
-    coefficients = class_coefficients(rules)
-    if record.class_type not in coefficients:
-        # Never default to 小班, 1.0 or "the closest class type".
-        return None, f"{UNKNOWN_CLASS_TYPE_RULE}：发现新班型“{record.class_type}”，当前没有有效折算规则，请配置后重新计算。"
+    special, headcounts = normalize_class_rules(rules)
     grade = GRADE_COEFFICIENTS.get(record.grade)
-    people = HEADCOUNT_COEFFICIENTS.get(record.attended)
     if grade is None:
         return None, "未计入：原始排课无法确定年级。"
-    if people is None:
-        return None, "未计入：实到人数超出当前已确认班课系数范围。"
-    multiplier = coefficients[record.class_type]
-    value = grade * people * multiplier * 2
-    return value, f"年级系数 {grade:g} × 实到系数 {people:g} × 班型系数 {multiplier:g} × 2 = {value:g}"
+    if record.class_type in special:
+        # 特殊班型：固定系数，不看实到人数。
+        coefficient = special[record.class_type]
+        value = grade * coefficient * LESSON_HOUR_FACTOR
+        return value, f"特殊班型 {record.class_type}：年级系数 {grade:g} × 班型系数 {coefficient:g} × {LESSON_HOUR_FACTOR} = {value:g}"
+    if record.class_type in SMALL_GROUP_CLASS_TYPES:
+        # 普通小班：只有实到人数系数，没有班型系数。
+        people = headcounts.get(record.attended)
+        if people is None:
+            return None, "未计入：实到人数超出当前已确认人数系数范围。"
+        value = grade * people * LESSON_HOUR_FACTOR
+        return value, f"普通小班：年级系数 {grade:g} × 实到人数系数 {people:g}（实到 {record.attended} 人）× {LESSON_HOUR_FACTOR} = {value:g}"
+    # Never default to 小班, 1.0 or "the closest class type".
+    return None, f"{UNKNOWN_CLASS_TYPE_RULE}：发现新班型“{record.class_type}”，当前没有有效折算规则，请配置后重新计算。"
 
 
 def _schedule_totals(records: Iterable[ScheduleRecord], rules: dict[str, float] | None = None) -> tuple[dict[str, dict[str, float]], list[FieldCheck]]:
     """Compute AA and AC per teacher. 一对一 stays in its own AA chain."""
-    coefficients = class_coefficients(rules)
+    special, _headcounts = normalize_class_rules(rules)
     totals: dict[str, dict[str, float]] = defaultdict(lambda: {"one_to_one": 0.0, "class_value": 0.0})
     blockers: list[FieldCheck] = []
     for record in records:
@@ -81,7 +115,7 @@ def _schedule_totals(records: Iterable[ScheduleRecord], rules: dict[str, float] 
                 blockers.append(FieldCheck(record.teacher, "one_to_one", None, None, "NEEDS_MANUAL_REVIEW", "原始排课无法确定年级，不能计算一对一折算。"))
             else:
                 totals[record.teacher]["one_to_one"] += record.attended * 2 * coeff
-        elif record.class_type in coefficients:
+        elif record.class_type in special or record.class_type in SMALL_GROUP_CLASS_TYPES:
             value, reason = class_value_contribution(record, rules)
             if value is None:
                 blockers.append(FieldCheck(record.teacher, "class_value", None, None, "NEEDS_MANUAL_REVIEW", reason.removeprefix("未计入：")))
