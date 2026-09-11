@@ -43,6 +43,42 @@ def test_conflicting_history_needs_input_instead_of_picking_latest_export():
     assert "冲突" in result.reason
 
 
+def test_history_older_than_twelve_months_does_not_participate():
+    result = infer_historical_grade("学生甲", "2026-09", [evidence("学生甲", "2025-08-31", "八年级")])
+    assert result.grade == "" and result.status == "NEEDS_INPUT"
+
+
+def test_old_history_cannot_create_a_conflict_with_recent_evidence():
+    result = infer_historical_grade("学生甲", "2026-09", [
+        evidence("学生甲", "2025-08-31", "高三", source_hash="old"),
+        evidence("学生甲", "2026-07-18", "八年级", source_hash="recent"),
+    ])
+    assert result.grade == "九年级" and len(result.evidence) == 1
+
+
+def test_manual_confirmation_is_not_limited_to_twelve_month_history_window():
+    result = infer_historical_grade(
+        "学生甲", "2026-08", [evidence("学生甲", "2025-07-18", "八年级")], recent_history_only=False,
+    )
+    assert result.grade == "九年级"
+
+
+def test_high_three_does_not_remain_high_three_after_next_september():
+    result = infer_historical_grade("学生甲", "2026-09", [evidence("学生甲", "2026-07-18", "高三")])
+    assert result.grade == "" and result.status == "NEEDS_INPUT"
+    assert "超出" in result.reason
+
+
+def test_high_two_advances_once_to_high_three():
+    result = infer_historical_grade("学生甲", "2026-09", [evidence("学生甲", "2026-07-18", "高二")])
+    assert result.grade == "高三"
+
+
+def test_high_two_advanced_across_two_septembers_becomes_invalid():
+    result = infer_historical_grade("学生甲", "2027-09", [evidence("学生甲", "2026-07-18", "高二")])
+    assert result.grade == "" and result.status == "NEEDS_INPUT"
+
+
 def test_only_ungradable_special_lessons_need_input():
     result = infer_historical_grade("学生甲", "2026-08", [
         evidence("学生甲", "2026-07-18", "领航伴学"),

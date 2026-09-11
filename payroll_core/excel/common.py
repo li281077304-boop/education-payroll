@@ -206,7 +206,7 @@ def resolve_schedule_grade(
         return direct, "DIRECT_SOURCE", "当前课程或源表已明确标注年级。"
 
     name = "" if student is None else str(student).strip()
-    confirmed = infer_historical_grade(name, period, manual_evidence)
+    confirmed = infer_historical_grade(name, period, manual_evidence, recent_history_only=False)
     if confirmed.grade:
         return confirmed.grade, "MANUAL_CONFIRMATION", confirmed.reason
     if confirmed.evidence:

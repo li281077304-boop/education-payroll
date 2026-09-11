@@ -50,6 +50,8 @@ def infer_historical_grade(
     student: str,
     target_period: str,
     evidence: Iterable[StudentGradeEvidence],
+    *,
+    recent_history_only: bool = True,
 ) -> GradeInference:
     """Infer a grade only when every usable historical statement agrees.
 
@@ -60,17 +62,30 @@ def infer_historical_grade(
     if target is None or not student.strip():
         return GradeInference(reason="缺少学生或核算月份，无法从历史课表推断年级。")
 
+    # A monthly payroll decision should not be destabilised by a record from a
+    # long-completed school year.  The window is inclusive: for 2026-09 it is
+    # 2025-09-01 through 2026-09-30.  Human confirmations are deliberately
+    # exempt because they are explicit, dated authority facts rather than an
+    # automatic historical inference.
+    window_start = date(target.year - 1, target.month, 1)
     usable: list[tuple[StudentGradeEvidence, str]] = []
+    expired_grade_count = 0
     for item in evidence:
         if item.student.strip() != student.strip():
             continue
         source_day = _parse_date(item.lesson_date)
         if source_day is None or source_day > target or item.grade not in NATURAL_GRADE_LADDER:
             continue
+        if recent_history_only and source_day < window_start:
+            continue
         advanced = _advance_for_boundaries(item.grade, source_day, target)
-        if advanced:
-            usable.append((item, advanced))
+        if advanced is None:
+            expired_grade_count += 1
+            continue
+        usable.append((item, advanced))
     if not usable:
+        if expired_grade_count:
+            return GradeInference(reason="历史年级跨越后已超出可推断的自然学段，需要人工确认。")
         return GradeInference(reason="没有找到该学生在此前正常课程中的明确年级证据。")
 
     conclusions = {grade for _, grade in usable}
@@ -105,11 +120,16 @@ def _parse_date(value: str) -> date | None:
         return None
 
 
-def _advance_for_boundaries(grade: str, source_day: date, target_day: date) -> str:
+def _advance_for_boundaries(grade: str, source_day: date, target_day: date) -> str | None:
     index = NATURAL_GRADE_LADDER.index(grade)
     boundaries = 0
     for year in range(source_day.year, target_day.year + 1):
         boundary = date(year, 9, 1)
         if source_day < boundary <= target_day:
             boundaries += 1
-    return NATURAL_GRADE_LADDER[min(index + boundaries, len(NATURAL_GRADE_LADDER) - 1)]
+    target_index = index + boundaries
+    # High-three is not a permanent category.  Once a course has crossed a
+    # later academic-year boundary, it provides no K12 conclusion at all.
+    if target_index >= len(NATURAL_GRADE_LADDER):
+        return None
+    return NATURAL_GRADE_LADDER[target_index]
