@@ -712,8 +712,9 @@ async function downloadReport() {
 async function businessInputsPage() {
   try {
     const inputs = await api("/api/business-inputs");
-    const rows = inputs.map((item) => `<tr><td>${escapeHtml(item.period)}</td><td>${escapeHtml(item.teacher_id)}</td><td>${escapeHtml(inputTypeLabel(item.input_type))}</td><td>${escapeHtml(item.status)}</td><td>${escapeHtml(item.payload?.item_type || item.payload?.note || "最终业务结果")}</td><td><button class="quiet" onclick="reviewInput('${item.id}')">审核</button>${current && item.status === "APPROVED" && item.period === current.period ? `<button class="quiet" onclick="bindBusinessInput('${item.id}')">绑定当前核对</button>` : ""}</td></tr>`).join("");
-    shell(`<section class="section-head"><div><p class="eyebrow">业务填报</p><h1>待审核业务输入</h1><p class="muted">教师提交和上游最终结果都先审核；不会直接改工资或排课。</p></div><button class="secondary" onclick="home()">返回工作台</button></section><section class="card"><h2>导入权威结果</h2><div class="decision-form"><label>月份<input id="input-period" type="month"></label><label>类别<select id="input-kind"><option value="RENEWAL_RESULT">续费最终结果</option><option value="REFUND_RESULT">退费最终结果</option><option value="HR_ALLOWANCE">HR 补贴最终表</option><option value="HR_ATTENDANCE">HR 考勤加扣款最终表</option></select></label><label>文件路径<input id="input-path" placeholder="选择后的本机文件路径"></label><label>工资影响金额列（可选）<input id="input-amount-column" placeholder="例如 工资金额；不填只归档，不猜金额"></label><label>导入人<input id="input-person" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">系统只归档权威结果；只有明确指定金额列才会进入外围工资组成。</span><button onclick="importBusinessResult()">导入待审核</button></div></section><section class="card"><h2>创建教师访问码</h2><div class="decision-form"><label>教师标识<input id="teacher-id" placeholder="例如 教师甲"></label><label>显示名称<input id="teacher-name" placeholder="可选"></label></div><div class="action-bar"><span class="muted small">访问码只显示一次，请通过安全方式单独发送给教师。</span><button onclick="createTeacherAccess()">生成访问码</button></div><p id="teacher-token" class="muted"></p></section><section class="card"><div class="section-head"><div><h2>全部业务输入</h2><p class="muted">批准后可在对应月度核对中绑定；未指定权威工资影响金额的结果只显示“资料已就绪”。</p></div><span class="muted">${inputs.length} 条</span></div><div class="table-wrap"><table class="table"><thead><tr><th>月份</th><th>教师</th><th>类别</th><th>状态</th><th>内容</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="muted">暂无业务输入。</td></tr>'}</tbody></table></div></section>`, false);
+    const rows = inputs.map((item) => `<tr><td>${escapeHtml(item.period)}</td><td>${escapeHtml(item.teacher_id)}</td><td>${escapeHtml(inputTypeLabel(item.input_type))}</td><td>${escapeHtml(inputStatusLabel(item.status))}</td><td>${escapeHtml(inputSummary(item))}${item.evidence?.warnings?.length ? `<p class="small warn">${escapeHtml(item.evidence.warnings.join("；"))}</p>` : ""}</td><td><button class="quiet" onclick="reviewInput('${item.id}')">审核</button>${current && item.status === "APPROVED" && item.period === current.period ? `<button class="quiet" onclick="bindBusinessInput('${item.id}')">绑定当前核对</button>` : ""}</td></tr>`).join("");
+    shell(`<section class="section-head"><div><p class="eyebrow">业务填报</p><h1>续费、退费与教师填报</h1><p class="muted">已有业务表可直接上传；模板主要用于新建或整理数据，不要求必须套用模板。</p></div><button class="secondary" onclick="home()">返回工作台</button></section><section class="card"><h2>常用业务模板</h2><div class="template-grid"><div><h3>续费推荐数据</h3><p class="muted">保留教师、1对1、班课、领航伴学及对应合计结构。</p><a class="button-link" href="/static/templates/续费推荐数据模板.xlsx" download>下载续费推荐数据模板</a></div><div><h3>退费绩效确认</h3><p class="muted">一笔退费一行；可向右增加“教师 / 人头 / 绩效”组。</p><a class="button-link" href="/static/templates/退费绩效确认模板.xlsx" download>下载退费绩效确认模板</a></div></div></section><section class="card"><h2>上传权威业务表</h2><div class="decision-form"><label>月份<input id="input-period" type="month"></label><label>类别<select id="input-kind" onchange="updateBusinessInputGuide()"><option value="RENEWAL_RESULT">上传续费推荐数据</option><option value="REFUND_RESULT">上传退费绩效数据</option><option value="HR_ALLOWANCE">HR 补贴最终表（暂不提供模板）</option><option value="HR_ATTENDANCE">HR 考勤加扣款最终表（暂不提供模板）</option></select></label><label>文件路径<input id="input-path" placeholder="选择后的本机文件路径"></label><label>导入人<input id="input-person" placeholder="填写姓名"></label><label id="amount-column-group" class="wide">工资影响金额列<input id="input-amount-column" placeholder="只适用于 HR 最终表；请填写已确认的金额列名"></label></div><div class="action-bar"><span id="input-guide" class="muted small"></span><button onclick="importBusinessResult()">上传并进入审核</button></div></section><section class="card"><h2>创建教师访问码</h2><div class="decision-form"><label>教师标识<input id="teacher-id" placeholder="例如 教师甲"></label><label>显示名称<input id="teacher-name" placeholder="可选"></label></div><div class="action-bar"><span class="muted small">访问码只显示一次，请通过安全方式单独发送给教师。</span><button onclick="createTeacherAccess()">生成访问码</button></div><p id="teacher-token" class="muted"></p></section><section class="card"><div class="section-head"><div><h2>全部业务输入</h2><p class="muted">上游结果和教师填报都需审核；审核通过后才可绑定到对应月份。</p></div><span class="muted">${inputs.length} 条</span></div><div class="table-wrap"><table class="table"><thead><tr><th>月份</th><th>教师</th><th>类别</th><th>状态</th><th>内容</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="muted">暂无业务输入。</td></tr>'}</tbody></table></div></section>`, false);
+    updateBusinessInputGuide();
   } catch (error) { showMessage(error.message); }
 }
 
@@ -721,9 +722,33 @@ function inputTypeLabel(value) {
   return { TEACHER_SUBMISSION: "教师填报", RENEWAL_RESULT: "续费最终结果", REFUND_RESULT: "退费最终结果", HR_ALLOWANCE: "HR 补贴", HR_ATTENDANCE: "HR 考勤加扣款" }[value] || value;
 }
 
+function inputStatusLabel(value) {
+  return { DRAFT: "草稿", SUBMITTED: "待审核", REVIEW: "审核中", REQUEST_MORE_INFO: "待补充说明", APPROVED: "已审核通过", REJECTED: "未通过", APPLIED: "已应用", SUPERSEDED: "已被新版本替代" }[value] || "状态待确认";
+}
+
+function inputSummary(item) {
+  const payload = item.payload || {};
+  if (item.input_type === "RENEWAL_RESULT") return `1对1 ${payload.renewal_one_to_one ?? 0}；班课 ${payload.renewal_class ?? 0}；领航伴学 ${payload.renewal_mentor ?? 0}`;
+  if (item.input_type === "REFUND_RESULT") return `退费事实第 ${item.source_row || "—"} 行；教师组 ${payload.refund_group_index || "—"}`;
+  return payload.item_type || payload.note || "已导入的权威业务结果";
+}
+
+function updateBusinessInputGuide() {
+  const kind = $("#input-kind")?.value;
+  const amount = $("#amount-column-group");
+  const guide = $("#input-guide");
+  if (!amount || !guide) return;
+  const hr = ["HR_ALLOWANCE", "HR_ATTENDANCE"].includes(kind);
+  amount.hidden = !hr;
+  if (kind === "RENEWAL_RESULT") guide.textContent = "系统按中文表头识别教师、1对1合计、班课合计和领航伴学合计，并对应工资表 AH、AI、AJ；推荐续费奖按既有规则计算。";
+  else if (kind === "REFUND_RESULT") guide.textContent = "一笔退费保持一行；系统会读取每组“教师 / 人头 / 绩效”。它不会把退费金额、课时或人头直接当作工资扣款。";
+  else guide.textContent = "目前尚无真实 HR 最终表样本。此入口仅保存已确认金额列，不会猜测字段含义或生成正式 HR 模板。";
+}
+
 async function importBusinessResult() {
   try {
-    await api("/api/business-inputs/import", { method: "POST", body: JSON.stringify({ input_type: $("#input-kind").value, period: $("#input-period").value, path: $("#input-path").value, submitted_by: $("#input-person").value, amount_column: $("#input-amount-column").value }) });
+    const kind = $("#input-kind").value;
+    await api("/api/business-inputs/import", { method: "POST", body: JSON.stringify({ input_type: kind, period: $("#input-period").value, path: $("#input-path").value, submitted_by: $("#input-person").value, amount_column: ["HR_ALLOWANCE", "HR_ATTENDANCE"].includes(kind) ? $("#input-amount-column").value : "" }) });
     showMessage("已导入为待审核业务结果。", "success"); await businessInputsPage();
   } catch (error) { showMessage(error.message); }
 }

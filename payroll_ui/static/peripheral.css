@@ -1,0 +1,6 @@
+.template-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin:12px 0 18px; }
+.template-card { border:1px solid var(--line,#d9dfe8); border-radius:10px; padding:14px; background:var(--panel,#fff); }
+.template-card h3 { margin:0 0 8px; font-size:16px; }
+.template-card p { margin:0 0 12px; color:var(--muted,#5b6573); line-height:1.5; }
+.button-link { display:inline-block; padding:8px 12px; border-radius:7px; background:#1f6feb; color:#fff; text-decoration:none; font-weight:600; }
+.button-link:hover { background:#1859bd; }

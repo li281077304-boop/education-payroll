@@ -21,6 +21,10 @@ outputs/
 !tests/fixtures/excel/
 !tests/fixtures/excel/*.xlsx
 
+# Approved, deidentified business-format templates shipped with the local UI.
+!payroll_ui/static/templates/
+!payroll_ui/static/templates/*.xlsx
+
 # Local/runtime files
 .DS_Store
 __pycache__/

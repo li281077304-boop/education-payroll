@@ -115,7 +115,7 @@ class BusinessInputService:
         if not source.is_file():
             raise ValueError("找不到要导入的最终结果表。")
         before = file_version(source)
-        records = read_business_result(source)
+        records = read_business_result(source, input_type=input_type, period=period)
         try:
             after = file_version(source)
         except OSError as exc:
@@ -143,12 +143,35 @@ class BusinessInputService:
                 self.store.save_business_input(prior)
                 self._event(prior, "SUPERSEDED", submitted_by, f"由批次 {batch_id} 明确替代")
         created: list[dict] = []
+        duplicate_headcounts: dict[str, list[str]] = {}
         for row in records:
+            if input_type == "REFUND_RESULT":
+                headcount = row.payload.get("refund_headcount")
+                student = str(row.payload.get("student", "")).strip()
+                try:
+                    nonzero = float(headcount) != 0
+                except (TypeError, ValueError):
+                    nonzero = False
+                if student and nonzero:
+                    duplicate_headcounts.setdefault(student, []).append(row.teacher_id)
+        duplicates = {student for student, teachers in duplicate_headcounts.items() if len(set(teachers)) > 1}
+        for row in records:
+            payload = {**row.payload}
+            if input_type == "RENEWAL_RESULT" and isinstance(row.payload.get("payroll_fields"), dict):
+                # The confirmed workbook semantics determine AH/AI/AJ/AK.
+                # A free-text amount-column is deliberately ignored for this
+                # real monthly workbook layout only.
+                amount_payload: dict[str, Any] = {}
+            else:
+                amount_payload = {"payroll_amount": row.payload.get(amount_column), "payroll_amount_column": amount_column} if amount_column else {}
+            warnings = []
+            if input_type == "REFUND_RESULT" and str(row.payload.get("student", "")).strip() in duplicates:
+                warnings.append("同一学生存在多名教师的非零退费人头，请人工确认是否重复计算。")
             item = {
                 "id": uuid.uuid4().hex[:16], "period": resolved_period, "teacher_id": row.teacher_id,
                 "input_type": input_type, "component_code": input_type, "source_type": "UPSTREAM_FINAL_RESULT", "source_ref": str(source),
                 "source_file_hash": after["sha256"], "source_row": row.row, "submitted_by": submitted_by.strip(), "submitted_at": now(),
-                "status": "SUBMITTED", "payload": {**row.payload, **({"payroll_amount": row.payload.get(amount_column), "payroll_amount_column": amount_column} if amount_column else {})}, "evidence": {**row.evidence, **after, "batch_id": batch_id, "activation_scope": activation_scope},
+                "status": "SUBMITTED", "payload": {**payload, **amount_payload}, "evidence": {**row.evidence, **after, "batch_id": batch_id, "activation_scope": activation_scope, **({"warnings": warnings} if warnings else {})},
                 "reviewed_by": "", "reviewed_at": "", "review_note": "", "linked_run_id": "", "created_at": now(), "updated_at": now(),
             }
             self.store.save_business_input(item); created.append(item)

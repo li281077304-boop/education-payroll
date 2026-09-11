@@ -45,13 +45,27 @@ def _row_payload(row: dict[str, Any], mapping: dict[str, str]) -> tuple[str, dic
     return teacher, payload
 
 
-def read_business_result(path: str | Path) -> list[ImportedBusinessResult]:
+def read_business_result(path: str | Path, *, input_type: str = "", period: str = "") -> list[ImportedBusinessResult]:
     """Read a CSV or simple Excel final-result table with row-level provenance.
 
     The importer preserves all supplied columns in payload. It only identifies
     the teacher needed to bind a result; it does not decide eligibility.
     """
     source = Path(path)
+    # The established CSV import remains a supported generic authority-input
+    # path.  The specialised readers below are for the real monthly Excel
+    # layouts, not a replacement for existing CSV imports.
+    excel_suffixes = {".xls", ".xlsx", ".xlsm"}
+    if input_type == "RENEWAL_RESULT" and source.suffix.lower() in excel_suffixes:
+        if not period:
+            raise ValueError("导入续费推荐数据必须指定月份。")
+        from .authority_tables import read_renewal_2026
+        return read_renewal_2026(source, period)
+    if input_type == "REFUND_RESULT" and source.suffix.lower() in excel_suffixes:
+        if not period:
+            raise ValueError("导入退费绩效数据必须指定月份。")
+        from .authority_tables import read_refund_2026
+        return read_refund_2026(source, period)
     suffix = source.suffix.lower()
     if suffix == ".csv":
         with source.open(encoding="utf-8-sig", newline="") as handle:

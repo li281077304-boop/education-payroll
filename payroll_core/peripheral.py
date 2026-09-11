@@ -46,7 +46,20 @@ def summarize_authority_components(records: Iterable[Mapping[str, object]]) -> d
         if not code:
             continue
         row = rows.setdefault(teacher, {"teacher": teacher, "components": [], "total": Decimal("0"), "status": "DETERMINED"})
-        amount = _amount((record.get("payload") or {}).get("payroll_amount"))
+        payload = record.get("payload") or {}
+        if str(record.get("input_type", "")) == "RENEWAL_RESULT" and isinstance(payload.get("payroll_fields"), Mapping):
+            fields = payload["payroll_fields"]
+            award = _amount(fields.get("AK"))
+            if award is None:
+                raise ValueError("续费推荐数据缺少推荐续费奖计算结果。")
+            row["components"].append({
+                "code": "RENEWAL_AWARD", "input_id": record.get("id", ""), "amount": str(award),
+                "source_hash": record.get("source_file_hash", ""), "source_row": record.get("source_row", ""),
+                "status": "DETERMINED", "payroll_fields": {key: str(value) for key, value in fields.items()},
+            })
+            row["total"] += award
+            continue
+        amount = _amount(payload.get("payroll_amount"))
         component = {"code": code, "input_id": record.get("id", ""), "amount": None if amount is None else str(amount), "source_hash": record.get("source_file_hash", ""), "source_row": record.get("source_row", ""), "status": "DETERMINED" if amount is not None else "SOURCE_READY"}
         row["components"].append(component)
         if amount is None:
