@@ -2,7 +2,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from payroll_core.grade_inference import StudentGradeEvidence, infer_historical_grade
+from payroll_core.grade_inference import CourseExportSnapshot, StudentGradeEvidence, course_export_grade_override, infer_historical_grade
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_ui.service import PayrollService
 
@@ -377,3 +377,64 @@ def test_legacy_student_grade_lookup_remains_compatible(tmp_path):
     result = read_schedule_excel(path, "2026-08", student_grades={"学生甲": "初二"})
     assert result.records[0].grade == "八年级"
     assert result.records[0].grade_origin == "MANUAL_LOOKUP"
+
+
+def _snapshot(*, path: str, grade: str, status: str = "已上课", subject: str = "物理", start: str = "17:30") -> CourseExportSnapshot:
+    return CourseExportSnapshot(
+        lesson_date="2026-08-14", lesson_start_time=start, teacher="教师甲", subject=subject,
+        class_name=f"{grade}小班", parsed_grade=grade, lesson_status=status,
+        attended=0 if status == "未上课" else 1, source_file=path,
+        source_hash=path, exported_at="", sheet="排课记录", coordinate="E2",
+    )
+
+
+def test_course_export_snapshot_restores_older_grade_without_student_fact(tmp_path):
+    service = PayrollService(tmp_path / "local")
+    old = _gift_workbook(tmp_path / "排课列表_202608261058.xlsx", "高二小班物理", "学生甲", "2026-08-14 17:30")
+    old_sheet = old
+    # The historical import stores the course snapshot even when it is not an
+    # attended lesson, while the student-fact table remains empty.
+    old_book = old_sheet
+    from openpyxl import load_workbook
+    workbook = load_workbook(old_book)
+    workbook.active["D2"] = "未上课"
+    workbook.active["E2"] = 0
+    workbook.save(old_book)
+    service.import_grade_history(str(old_book), "2026-08")
+    assert service.store.list_student_grade_evidence() == []
+    assert len(service.store.list_course_export_snapshots()) == 1
+
+    current = _gift_workbook(tmp_path / "排课列表_202609011519.xlsx", "高三小班物理", "学生甲", "2026-08-14 17:30")
+    result = read_schedule_excel(current, "2026-08", course_export_snapshots=service._stored_course_export_snapshots())
+    assert result.records[0].grade == "高二"
+    assert result.records[0].grade_origin == "COURSE_EXPORT_SNAPSHOT"
+    assert "2026-08-14" in result.records[0].grade_reason
+
+
+def test_course_export_snapshot_matches_teacher_subject_date_and_start_time_only():
+    old = _snapshot(path="schedule_202608261058.xlsx", grade="高二")
+    assert course_export_grade_override(
+        teacher="教师甲", subject="物理", lesson_date="2026-08-14", lesson_time="2026-08-14 17:30~19:30",
+        current_grade="高三", current_source_file="schedule_202609011519.xlsx", snapshots=[old],
+    )[0] == "高二"
+    assert course_export_grade_override(
+        teacher="教师甲", subject="化学", lesson_date="2026-08-14", lesson_time="2026-08-14 17:30~19:30",
+        current_grade="高三", current_source_file="schedule_202609011519.xlsx", snapshots=[old],
+    ) is None
+    assert course_export_grade_override(
+        teacher="教师甲", subject="物理", lesson_date="2026-08-14", lesson_time="2026-08-14 18:30~19:30",
+        current_grade="高三", current_source_file="schedule_202609011519.xlsx", snapshots=[old],
+    ) is None
+
+
+def test_course_export_snapshot_requires_exact_one_step_and_pre_boundary_date():
+    old = _snapshot(path="schedule_202608261058.xlsx", grade="高一")
+    assert course_export_grade_override(
+        teacher="教师甲", subject="物理", lesson_date="2026-08-14", lesson_time="2026-08-14 17:30",
+        current_grade="高三", current_source_file="schedule_202609011519.xlsx", snapshots=[old],
+    ) is None
+    after_boundary = CourseExportSnapshot(**{**old.__dict__, "lesson_date": "2026-09-25"})
+    assert course_export_grade_override(
+        teacher="教师甲", subject="物理", lesson_date="2026-09-25", lesson_time="2026-09-25 17:30",
+        current_grade="高三", current_source_file="schedule_202609011519.xlsx", snapshots=[after_boundary],
+    ) is None

@@ -13,6 +13,7 @@ from ..excel.common import (
     as_float,
     cell_evidence,
     date_from_time,
+    grade_from_class_name,
     resolve_schedule_grade,
     normalize_schedule_class_type,
     subject_from_source,
@@ -21,7 +22,7 @@ from ..excel.inspect import load_workbook_pair
 from ..excel.schedule import read_schedule_excel
 from ..models.evidence import AdapterIssue, AdapterResult
 from ..models.records import ScheduleRecord
-from ..grade_inference import StudentGradeEvidence
+from ..grade_inference import CourseExportSnapshot, StudentGradeEvidence, course_export_grade_override, course_export_snapshot_index
 from .requirements import SCHEDULE_AC_REQUIREMENT, ImportRequirement
 from .semantic import MappingAnalysis, analyze_mapping
 
@@ -37,6 +38,7 @@ def read_schedule_with_mapping(
     student_grades: Mapping[str, str] | None = None,
     manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
     historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
+    course_export_snapshots: Sequence[CourseExportSnapshot] = (),
 ) -> AdapterResult[ScheduleRecord]:
     """Parse a schedule sheet using an explicit field-to-column mapping."""
     result: AdapterResult[ScheduleRecord] = AdapterResult()
@@ -71,6 +73,7 @@ def read_schedule_with_mapping(
         return str(evidence.normalized_value or "").strip() if evidence is not None else ""
 
     unknown_grades = missing_attendance = out_of_period = 0
+    snapshot_index = course_export_snapshot_index(course_export_snapshots)
     for row in range(header_row + 1, sheet.max_row + 1):
         if not str(sheet.cell(row, mapping["teacher"]).value or "").strip():
             continue
@@ -91,12 +94,21 @@ def read_schedule_with_mapping(
         if _is_period(period) and lesson_date and not lesson_date.startswith(period):
             out_of_period += 1
             continue
+        subject = subject_from_source(text("subject"))
+        direct_grade = grade_from_class_name(class_name) or text("grade")
+        snapshot_override = course_export_grade_override(
+            teacher=text("teacher"), subject=subject, lesson_date=lesson_date,
+            lesson_time=lesson_time, current_grade=direct_grade,
+            current_source_file=str(path), snapshots=snapshot_index,
+        )
         # 年级 may have its own column; otherwise it is derived from the class
         # name and, for explicit authority data only, the student-grade table.
         grade, grade_origin, grade_reason = resolve_schedule_grade(
             class_name, text("student"), period=period, student_grades=student_grades,
             manual_evidence=manual_grade_evidence, historical_evidence=historical_grade_evidence,
-            direct_grade=text("grade"), course_date=lesson_date,
+            direct_grade=direct_grade, course_date=lesson_date,
+            course_export_grade=snapshot_override[0] if snapshot_override else "",
+            course_export_reason=snapshot_override[1] if snapshot_override else "",
         )
         if not grade:
             unknown_grades += 1
@@ -104,7 +116,7 @@ def read_schedule_with_mapping(
             period=period,
             teacher=text("teacher"),
             grade=grade,
-            subject=subject_from_source(text("subject")),
+            subject=subject,
             class_type=normalize_schedule_class_type(text("class_type"), class_name, text("course_name")),
             attended=attended,
             lesson_status=text("lesson_status"),
@@ -139,26 +151,27 @@ def resolve_schedule_import(
     student_grades: Mapping[str, str] | None = None,
     manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
     historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
+    course_export_snapshots: Sequence[CourseExportSnapshot] = (),
 ) -> tuple[AdapterResult[ScheduleRecord], MappingAnalysis | None]:
     """Try the known adapter; only fall back to semantic mapping when it fails.
 
     ``confirmed`` carries a mapping the user has already approved, in which
     case parsing happens directly and no question is asked again.
     """
-    known = read_schedule_excel(path, period, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence)
+    known = read_schedule_excel(path, period, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots)
     if known.ok and known.records:
         return known, None
     if confirmed:
         result = read_schedule_with_mapping(
             path, period, mapping=confirmed.get("mapping", {}), requirement=requirement,
-            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0), student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence,
+            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0), student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots,
         )
         return result, None
     analysis = analyze_mapping(path, requirement, profiles=profiles)
     if analysis.ready:
         result = read_schedule_with_mapping(
             path, period, mapping=analysis.mapping, requirement=requirement,
-            sheet_name=analysis.sheet, header_row=analysis.header_row, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence,
+            sheet_name=analysis.sheet, header_row=analysis.header_row, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots,
         )
         return result, analysis
     return known, analysis

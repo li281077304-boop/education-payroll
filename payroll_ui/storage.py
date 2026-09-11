@@ -33,6 +33,10 @@ class RunStore:
             # Only the minimum dated fact needed for grade inference is kept.
             # The original schedule workbook is never copied into local storage.
             db.execute("CREATE TABLE IF NOT EXISTS student_grade_evidence (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            # Export snapshots are a separate evidence type: they describe a
+            # course label in one workbook version and never become student
+            # grade facts by themselves.
+            db.execute("CREATE TABLE IF NOT EXISTS course_export_snapshots (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -213,6 +217,12 @@ class RunStore:
 
     def list_student_grade_evidence(self) -> list[dict]:
         return self._list_entities("student_grade_evidence")
+
+    def save_course_export_snapshot(self, item: dict) -> None:
+        self._upsert("course_export_snapshots", item)
+
+    def list_course_export_snapshots(self) -> list[dict]:
+        return self._list_entities("course_export_snapshots")
 
     def list_import_profiles(self, requirement: str = "") -> list[dict]:
         items = self._list_entities("import_profiles")

@@ -7,11 +7,11 @@ returns either a reproducible conclusion or an explicit request for input.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 import calendar
 from functools import lru_cache
 import re
-from typing import Iterable
+from typing import Iterable, Mapping, Sequence
 
 
 NATURAL_GRADE_LADDER = (
@@ -58,6 +58,33 @@ class StudentGradeEvidence:
 
 
 @dataclass(frozen=True)
+class CourseExportSnapshot:
+    """One export's view of one scheduled lesson.
+
+    This is deliberately separate from :class:`StudentGradeEvidence`.
+    A snapshot describes how a source export named a lesson; it does not claim
+    that a student actually attended that lesson or establish a student's
+    dated grade fact.
+    """
+
+    lesson_date: str
+    lesson_start_time: str
+    teacher: str
+    subject: str
+    class_name: str
+    parsed_grade: str
+    lesson_status: str = ""
+    attended: int | None = None
+    teaching_form: str = ""
+    source_file: str = ""
+    source_hash: str = ""
+    exported_at: str = ""
+    sheet: str = ""
+    coordinate: str = ""
+    student: str = ""
+
+
+@dataclass(frozen=True)
 class GradeInference:
     grade: str = ""
     status: str = "NEEDS_INPUT"
@@ -66,6 +93,113 @@ class GradeInference:
     ignored_evidence: tuple[StudentGradeEvidence, ...] = ()
     coverage: str = "NONE"
     grades: frozenset[str] = frozenset()
+
+
+def normalize_lesson_start_time(value: object) -> str:
+    """Normalize the actual lesson start clock for stable export matching."""
+    match = re.search(r"(?:^|\s)([0-2]?\d):([0-5]\d)", "" if value is None else str(value))
+    if not match:
+        return ""
+    return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+
+def stable_lesson_key(teacher: object, subject: object, lesson_date: object, lesson_time: object = "") -> tuple[str, str, str, str]:
+    """Return the minimum identity shared by two exports of one lesson."""
+    def clean(value: object) -> str:
+        return re.sub(r"\s+", " ", "" if value is None else str(value).strip()).casefold()
+
+    day = str(lesson_date or "").strip()[:10]
+    start = normalize_lesson_start_time(lesson_time)
+    return clean(teacher), clean(subject), day, start
+
+
+def export_timestamp_from_source(value: object) -> str:
+    """Extract an export timestamp from a dated source name/path.
+
+    Source timestamps are evidence, not a configured rollover date.  A file
+    without a traceable timestamp is intentionally unusable for automatic
+    export-pollution resolution.
+    """
+    match = EXPORT_TIMESTAMP_PATTERN.search("" if value is None else str(value))
+    if not match or not match.group("hour") or not match.group("minute"):
+        return ""
+    try:
+        return datetime(
+            int(match.group("year")), int(match.group("month")), int(match.group("day")),
+            int(match.group("hour")), int(match.group("minute")),
+        ).isoformat(timespec="minutes")
+    except ValueError:
+        return ""
+
+
+def course_export_snapshot_index(snapshots: Iterable[CourseExportSnapshot]) -> dict[tuple[str, str, str, str], tuple[CourseExportSnapshot, ...]]:
+    indexed: dict[tuple[str, str, str, str], list[CourseExportSnapshot]] = {}
+    for snapshot in snapshots:
+        key = stable_lesson_key(snapshot.teacher, snapshot.subject, snapshot.lesson_date, snapshot.lesson_start_time)
+        if not all(key):
+            continue
+        indexed.setdefault(key, []).append(snapshot)
+    return {key: tuple(values) for key, values in indexed.items()}
+
+
+def course_export_grade_override(
+    *,
+    teacher: str,
+    subject: str,
+    lesson_date: str,
+    lesson_time: str,
+    current_grade: str,
+    current_source_file: str,
+    snapshots: Mapping[tuple[str, str, str, str], Sequence[CourseExportSnapshot]] | Sequence[CourseExportSnapshot],
+) -> tuple[str, str, tuple[CourseExportSnapshot, ...]] | None:
+    """Find a safe old-export grade for the current course.
+
+    The function compares the current export with the immediately preceding
+    export version for the same stable lesson key.  It only accepts an exact
+    one-step natural grade upgrade before 20 September; it never relies on a
+    hard-coded source-system switch date and never uses student attendance to
+    manufacture a student fact.
+    """
+    current_grade = str(current_grade or "").strip()
+    current_time = export_timestamp_from_source(current_source_file)
+    current_dt = _parse_export_datetime(current_time)
+    lesson_day = _parse_date(lesson_date)
+    key = stable_lesson_key(teacher, subject, lesson_date, lesson_time)
+    if not current_grade or not current_dt or lesson_day is None or not all(key):
+        return None
+    if isinstance(snapshots, Mapping):
+        candidates = tuple(snapshots.get(key, ()))
+    else:
+        candidates = tuple(snapshot for snapshot in snapshots if stable_lesson_key(snapshot.teacher, snapshot.subject, snapshot.lesson_date, snapshot.lesson_start_time) == key)
+    candidates = tuple(
+        snapshot for snapshot in candidates
+        if snapshot.source_file != current_source_file
+        and (snapshot.exported_at or export_timestamp_from_source(snapshot.source_file))
+        and _parse_export_datetime(snapshot.exported_at or export_timestamp_from_source(snapshot.source_file)) is not None
+        and _parse_export_datetime(snapshot.exported_at or export_timestamp_from_source(snapshot.source_file)) < current_dt
+        and snapshot.parsed_grade in NATURAL_GRADE_LADDER
+    )
+    if lesson_day >= date(lesson_day.year, ACADEMIC_ADVANCEMENT_MONTH, ACADEMIC_ADVANCEMENT_DAY) or not candidates:
+        return None
+    def snapshot_datetime(snapshot: CourseExportSnapshot) -> datetime | None:
+        return _parse_export_datetime(snapshot.exported_at or export_timestamp_from_source(snapshot.source_file))
+
+    latest_dt = max(snapshot_datetime(snapshot) for snapshot in candidates if snapshot_datetime(snapshot) is not None)
+    latest = tuple(snapshot for snapshot in candidates if snapshot_datetime(snapshot) == latest_dt)
+    old_grades = {snapshot.parsed_grade for snapshot in latest}
+    if len(old_grades) != 1:
+        return None
+    old_grade = next(iter(old_grades))
+    old_index = NATURAL_GRADE_LADDER.index(old_grade)
+    if old_index + 1 >= len(NATURAL_GRADE_LADDER) or NATURAL_GRADE_LADDER[old_index + 1] != current_grade:
+        return None
+    export_day = latest_dt.date().isoformat()
+    reason = (
+        f"同一课次在 {export_day} 的较早导出中为{old_grade}，"
+        f"后续导出班名更新为{current_grade}；课程实际发生于 {lesson_day.isoformat()}，"
+        f"早于 {lesson_day.year}-09-20 工资年级生效日，因此按{old_grade}计算。"
+    )
+    return old_grade, reason, latest
 
 
 def infer_historical_grade(
@@ -211,6 +345,13 @@ def _period_end(period: str) -> date | None:
 def _parse_date(value: str) -> date | None:
     try:
         return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _parse_export_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
     except ValueError:
         return None
 

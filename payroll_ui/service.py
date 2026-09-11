@@ -24,9 +24,17 @@ from payroll_core.payroll_generation import build_legacy_generated_payroll, gene
 from payroll_core.excel.standard_payroll_render import render_generated_payroll
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
-from payroll_core.excel.common import load_student_grade_lookup
+from payroll_core.excel.common import grade_from_class_name, load_student_grade_lookup
 from payroll_core.excel.schedule import read_schedule_excel
-from payroll_core.grade_inference import StudentGradeEvidence, evidence_identity, remove_export_pollution, split_student_names
+from payroll_core.grade_inference import (
+    CourseExportSnapshot,
+    StudentGradeEvidence,
+    evidence_identity,
+    export_timestamp_from_source,
+    normalize_lesson_start_time,
+    remove_export_pollution,
+    split_student_names,
+)
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
 from payroll_core.reconcile.payroll_scope import HEADCOUNT_COEFFICIENTS, LESSON_HOUR_FACTOR, SMALL_GROUP_CLASS_TYPES, FieldCheck, class_value_contribution, normalize_class_rules, schedule_field_checks, total_salary_read_checks
@@ -754,7 +762,10 @@ class PayrollService(CoreFlow):
         try:
             if role == "schedule" and mapping_capable:
                 profiles = self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name)
-                result, analysis = resolve_schedule_import(source, run["period"], profiles=profiles, confirmed=mapping)
+                result, analysis = resolve_schedule_import(
+                    source, run["period"], profiles=profiles, confirmed=mapping,
+                    course_export_snapshots=self._stored_course_export_snapshots(),
+                )
                 if analysis is not None and not analysis.ready:
                     raise ValueError(self._mapping_error(analysis))
                 if not result.errors and not result.records:
@@ -775,6 +786,7 @@ class PayrollService(CoreFlow):
             # Persist only direct, dated facts after the stable read check.  A
             # later gift/exchange course can use these facts without needing a
             # user-maintained student-grade workbook.
+            self._save_course_export_snapshots(result.records, before)
             self._save_direct_grade_evidence(result.records, before)
         if mapping and profile_name:
             # Remember the confirmed layout so next month's identical file imports
@@ -1588,6 +1600,7 @@ class PayrollService(CoreFlow):
             result, analysis = resolve_schedule_import(
                 path, period, profiles=self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name), student_grades=lookup,
                 manual_grade_evidence=manual, historical_grade_evidence=history,
+                course_export_snapshots=self._stored_course_export_snapshots(),
             )
             if analysis is not None and not analysis.ready:
                 result.errors.append(AdapterIssue("NEEDS_FIELD_CONFIRMATION", self._mapping_error(analysis)))
@@ -1595,10 +1608,11 @@ class PayrollService(CoreFlow):
         return {"math": read_payroll_excel, "science": read_payroll_excel, "baseline": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
 
     def import_grade_history(self, path: str, period: str = "0000-00", expected_hash: str | None = None) -> dict:
-        """Store direct grade facts from a prior schedule without retaining it.
+        """Store minimum grade facts and course-export snapshots only.
 
-        This is the one-time migration path for a school that starts using the
-        product after the academic year has already begun.
+        The one-time migration path keeps attended student facts separate from
+        all course-version snapshots, including unstarted rows, and never
+        retains a copy of the workbook.
         """
         source = Path(path).expanduser().resolve()
         if not source.is_file():
@@ -1615,8 +1629,9 @@ class PayrollService(CoreFlow):
             raise ValueError("历史课表缺少必要字段：" + "；".join(issue.message for issue in result.errors))
         if version(source) != before:
             raise ValueError("历史课表在读取期间发生变化，请关闭 Excel/WPS 后重试。")
+        snapshots = self._save_course_export_snapshots(result.records, before)
         stored = self._save_direct_grade_evidence(result.records, before)
-        return {"source": source.name, "period": period, "direct_grade_evidence": stored, "ignored_export_pollution": getattr(self, "_last_grade_pollution_count", 0), "records": len(result.records)}
+        return {"source": source.name, "period": period, "direct_grade_evidence": stored, "course_export_snapshots": snapshots, "ignored_export_pollution": getattr(self, "_last_grade_pollution_count", 0), "records": len(result.records)}
 
     def import_grade_history_for_run(self, run_id: str, path: str, expected_hash: str | None = None) -> dict:
         """Add one more past schedule and report its practical effect."""
@@ -1726,6 +1741,72 @@ class PayrollService(CoreFlow):
                 continue
             (manual if evidence.origin == "MANUAL_CONFIRMATION" else history).append(evidence)
         return manual, history
+
+    def _stored_course_export_snapshots(self) -> list[CourseExportSnapshot]:
+        snapshots: list[CourseExportSnapshot] = []
+        for item in self.store.list_course_export_snapshots():
+            try:
+                snapshots.append(CourseExportSnapshot(
+                    lesson_date=str(item.get("lesson_date", "")),
+                    lesson_start_time=str(item.get("lesson_start_time", "")),
+                    teacher=str(item.get("teacher", "")),
+                    subject=str(item.get("subject", "")),
+                    class_name=str(item.get("class_name", "")),
+                    parsed_grade=str(item.get("parsed_grade", "")),
+                    lesson_status=str(item.get("lesson_status", "")),
+                    attended=item.get("attended"),
+                    teaching_form=str(item.get("teaching_form", "")),
+                    source_file=str(item.get("source_file", "")),
+                    source_hash=str(item.get("source_hash", "")),
+                    exported_at=str(item.get("exported_at", "")),
+                    sheet=str(item.get("sheet", "")),
+                    coordinate=str(item.get("coordinate", "")),
+                    student=str(item.get("student", "")),
+                ))
+            except (TypeError, ValueError):
+                continue
+        return snapshots
+
+    def _save_course_export_snapshots(self, records: list, source: dict[str, Any]) -> int:
+        """Persist only course-version evidence, including unstarted rows.
+
+        An unstarted row is deliberately excluded from student-grade facts but
+        remains useful for comparing two exports of the same scheduled lesson.
+        """
+        saved = 0
+        for record in records:
+            class_cell = record.provenance.get("class_name") or record.provenance.get("grade")
+            parsed_grade = grade_from_class_name(record.class_name)
+            if not parsed_grade and record.grade_origin == "DIRECT_SOURCE":
+                parsed_grade = record.grade
+            lesson_start_time = normalize_lesson_start_time(record.lesson_time)
+            if not (record.lesson_date and lesson_start_time and record.teacher and record.subject and parsed_grade):
+                continue
+            coordinate = getattr(class_cell, "coordinate", "")
+            sheet = getattr(class_cell, "sheet", "")
+            source_file = str(record.source or source.get("path", ""))
+            snapshot = {
+                "id": hashlib.sha256(f"course-snapshot|{source['sha256']}|{coordinate}|{record.lesson_date}|{lesson_start_time}|{record.teacher}|{record.subject}".encode()).hexdigest()[:32],
+                "lesson_date": record.lesson_date,
+                "lesson_start_time": lesson_start_time,
+                "teacher": record.teacher,
+                "subject": record.subject,
+                "class_name": record.class_name,
+                "parsed_grade": parsed_grade,
+                "lesson_status": record.lesson_status,
+                "attended": record.attended,
+                "teaching_form": str(getattr(record.provenance.get("class_type"), "normalized_value", "") or ""),
+                "source_file": source_file,
+                "source_hash": source["sha256"],
+                "exported_at": export_timestamp_from_source(source_file),
+                "sheet": sheet,
+                "coordinate": coordinate,
+                "student": record.student,
+                "origin": "COURSE_EXPORT_SNAPSHOT",
+            }
+            self.store.save_course_export_snapshot(snapshot)
+            saved += 1
+        return saved
 
     def _save_direct_grade_evidence(self, records: list, source: dict[str, Any]) -> int:
         candidates = []

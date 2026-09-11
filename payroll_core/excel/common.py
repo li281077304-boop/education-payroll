@@ -194,6 +194,8 @@ def resolve_schedule_grade(
     historical_evidence: Sequence[StudentGradeEvidence] = (),
     direct_grade: Any = "",
     course_date: str = "",
+    course_export_grade: str = "",
+    course_export_reason: str = "",
 ) -> tuple[str, str, str]:
     """Resolve one grade with an auditable authority order.
 
@@ -220,6 +222,13 @@ def resolve_schedule_grade(
         if legacy_grade:
             return legacy_grade, "MANUAL_LOOKUP", "历史课表年级存在冲突；使用已保存的本地学生年级确认（兼容来源）。"
         return "", "NEEDS_INPUT", confirmed.reason
+
+    # A directly matched older export is stronger than a current class name
+    # or an incomplete student-history conclusion, but weaker than an explicit
+    # manual confirmation handled above.  The adapter supplies this only after
+    # validating the stable lesson key and export timestamps.
+    if course_export_grade:
+        return course_export_grade, "COURSE_EXPORT_SNAPSHOT", course_export_reason
 
     inferred = _infer_roster_grade(names, period, historical_evidence, course_date=course_date)
     if inferred.grade:

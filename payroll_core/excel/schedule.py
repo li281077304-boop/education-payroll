@@ -10,13 +10,19 @@ from .common import (
     cell_evidence,
     date_from_time,
     find_header_row,
+    grade_from_class_name,
     resolve_schedule_grade,
     header_map,
     normalize_schedule_class_type,
     subject_from_source,
 )
 from .inspect import detect_fingerprint, load_workbook_pair
-from ..grade_inference import StudentGradeEvidence
+from ..grade_inference import (
+    CourseExportSnapshot,
+    StudentGradeEvidence,
+    course_export_grade_override,
+    course_export_snapshot_index,
+)
 
 
 REQUIRED_SCHEDULE_HEADERS = {"上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"}
@@ -29,6 +35,7 @@ def read_schedule_excel(
     student_grades: Mapping[str, str] | None = None,
     manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
     historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
+    course_export_snapshots: Sequence[CourseExportSnapshot] = (),
 ) -> AdapterResult[ScheduleRecord]:
     result: AdapterResult[ScheduleRecord] = AdapterResult()
     try:
@@ -48,6 +55,7 @@ def read_schedule_excel(
         return result
     columns = header_map(sheet, [header_row])
     source_file = str(path)
+    snapshot_index = course_export_snapshot_index(course_export_snapshots)
     unknown_grades = 0
     missing_attendance = out_of_period = 0
     for row in range(header_row + 1, sheet.max_row + 1):
@@ -78,6 +86,17 @@ def read_schedule_excel(
         if _is_period(period) and lesson_date and not lesson_date.startswith(period):
             out_of_period += 1
             continue
+        subject = subject_from_source(evidence["subject"].normalized_value)
+        direct_grade = grade_from_class_name(evidence["class_name"].normalized_value)
+        snapshot_override = course_export_grade_override(
+            teacher=str(evidence["teacher"].normalized_value or "").strip(),
+            subject=subject,
+            lesson_date=lesson_date,
+            lesson_time=str(evidence["lesson_time"].normalized_value or "").strip(),
+            current_grade=direct_grade,
+            current_source_file=source_file,
+            snapshots=snapshot_index,
+        )
         grade, grade_origin, grade_reason = resolve_schedule_grade(
             evidence["class_name"].normalized_value,
             evidence["student"].normalized_value,
@@ -86,6 +105,8 @@ def read_schedule_excel(
             manual_evidence=manual_grade_evidence,
             historical_evidence=historical_grade_evidence,
             course_date=lesson_date,
+            course_export_grade=snapshot_override[0] if snapshot_override else "",
+            course_export_reason=snapshot_override[1] if snapshot_override else "",
         )
         if not grade:
             unknown_grades += 1
@@ -94,7 +115,7 @@ def read_schedule_excel(
                 period=period,
                 teacher=str(evidence["teacher"].normalized_value).strip(),
                 grade=grade,
-                subject=subject_from_source(evidence["subject"].normalized_value),
+                subject=subject,
                 class_type=normalize_schedule_class_type(
                     evidence["class_type"].normalized_value,
                     evidence["class_name"].normalized_value,
