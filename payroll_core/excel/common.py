@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..models.evidence import CellValueState, SourceEvidence
-from ..grade_inference import GradeInference, StudentGradeEvidence, infer_historical_grade, split_student_names
+from ..grade_inference import GradeInference, StudentGradeEvidence, infer_historical_grade, remove_export_pollution, split_student_names
 
 
 # “一对多” does not tell us whether the approved special treatment is 1对2
@@ -213,7 +213,9 @@ def resolve_schedule_grade(
         if direct and direct != confirmed.grade:
             reason += f" 已保存的学生年级事实覆盖当前班名年级“{direct}”。"
         return confirmed.grade, "MANUAL_CONFIRMATION", reason
-    if confirmed.evidence:
+    if confirmed.coverage == "PARTIAL" and direct and confirmed.grades == {direct}:
+        return direct, "DIRECT_SOURCE", f"已有学生历史证据与当前班名年级“{direct}”一致，但仍有部分学生没有历史证据。"
+    if confirmed.coverage == "CONFLICT" or confirmed.evidence:
         legacy_grade = _lookup_roster_grade(names, student_grades)
         if legacy_grade:
             return legacy_grade, "MANUAL_LOOKUP", "历史课表年级存在冲突；使用已保存的本地学生年级确认（兼容来源）。"
@@ -225,7 +227,9 @@ def resolve_schedule_grade(
         if direct and direct != inferred.grade:
             reason += f" 学生年级历史覆盖当前班名年级“{direct}”。"
         return inferred.grade, "HISTORICAL_SCHEDULE", reason
-    if inferred.evidence:
+    if inferred.coverage == "PARTIAL" and direct and inferred.grades == {direct}:
+        return direct, "DIRECT_SOURCE", f"已有学生历史证据与当前班名年级“{direct}”一致，但仍有部分学生没有历史证据。"
+    if inferred.coverage == "CONFLICT" or inferred.evidence:
         legacy_grade = _lookup_roster_grade(names, student_grades)
         if legacy_grade:
             return legacy_grade, "MANUAL_LOOKUP", "历史课表年级存在冲突；使用已保存的本地学生年级确认（兼容来源）。"
@@ -272,16 +276,18 @@ def _infer_roster_grade(
     """
     if not students:
         return infer_historical_grade("", period, evidence, recent_history_only=recent_history_only, target_date=course_date)
+    cleaned_evidence, ignored_evidence = remove_export_pollution(evidence)
     results = [
-        infer_historical_grade(item, period, evidence, recent_history_only=recent_history_only, target_date=course_date)
+        infer_historical_grade(item, period, cleaned_evidence, recent_history_only=recent_history_only, target_date=course_date, pollution_checked=True, ignored_evidence=ignored_evidence)
         for item in students
     ]
-    conflicted = [result for result in results if result.evidence and not result.grade]
+    conflicted = [result for result in results if result.coverage == "CONFLICT" or (result.evidence and not result.grade)]
     if conflicted:
-        return conflicted[0]
+        return GradeInference(reason=conflicted[0].reason, evidence=tuple(item for result in results for item in result.evidence), coverage="CONFLICT")
     known = [result for result in results if result.grade]
     if len(known) != len(students):
-        return infer_historical_grade("", period, (), recent_history_only=recent_history_only, target_date=course_date)
+        facts = tuple(item for result in known for item in result.evidence)
+        return GradeInference(reason="部分学生已有历史年级证据，但仍有学生缺少历史证据，需要人工确认。", evidence=facts, coverage="PARTIAL", grades=frozenset(result.grade for result in known))
     grades = {result.grade for result in known}
     if len(grades) != 1:
         # This is a roster-level disagreement, not contradictory history for
@@ -291,7 +297,9 @@ def _infer_roster_grade(
         # as a request for human input.
         return GradeInference(
             reason="同一课程中学生的历史年级推断互相冲突，需要人工确认。",
-            evidence=(),
+            evidence=tuple(item for result in known for item in result.evidence),
+            coverage="CONFLICT",
+            grades=frozenset(grades),
         )
     grade = grades.pop()
     facts = tuple(item for result in known for item in result.evidence)
@@ -300,6 +308,8 @@ def _infer_roster_grade(
         status="DETERMINED",
         reason=f"依据 {len(students)} 名学生的历史年级证据自动推断。",
         evidence=facts,
+        coverage="COMPLETE",
+        grades=frozenset({grade}),
     )
 
 

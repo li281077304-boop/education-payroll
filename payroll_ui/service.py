@@ -6,7 +6,7 @@ import io
 import re
 import uuid
 from dataclasses import asdict, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.common import load_student_grade_lookup
 from payroll_core.excel.schedule import read_schedule_excel
-from payroll_core.grade_inference import StudentGradeEvidence, split_student_names
+from payroll_core.grade_inference import StudentGradeEvidence, evidence_identity, remove_export_pollution, split_student_names
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
 from payroll_core.reconcile.payroll_scope import HEADCOUNT_COEFFICIENTS, LESSON_HOUR_FACTOR, SMALL_GROUP_CLASS_TYPES, FieldCheck, class_value_contribution, normalize_class_rules, schedule_field_checks, total_salary_read_checks
@@ -1616,7 +1616,7 @@ class PayrollService(CoreFlow):
         if version(source) != before:
             raise ValueError("历史课表在读取期间发生变化，请关闭 Excel/WPS 后重试。")
         stored = self._save_direct_grade_evidence(result.records, before)
-        return {"source": source.name, "period": period, "direct_grade_evidence": stored, "records": len(result.records)}
+        return {"source": source.name, "period": period, "direct_grade_evidence": stored, "ignored_export_pollution": getattr(self, "_last_grade_pollution_count", 0), "records": len(result.records)}
 
     def import_grade_history_for_run(self, run_id: str, path: str, expected_hash: str | None = None) -> dict:
         """Add one more past schedule and report its practical effect."""
@@ -1700,6 +1700,10 @@ class PayrollService(CoreFlow):
             dates = sorted(set(item.pop("course_dates")))
             item["first_course_date"] = dates[0] if dates else f"{run['period']}-01"
             item["course_dates"] = dates
+            item["crosses_grade_boundary"] = any(
+                date(year, 9, 20).isoformat() > item["first_course_date"][:10] <= max(dates, default=item["first_course_date"])[:10]
+                for year in range(int(item["first_course_date"][:4]), int(max(dates, default=item["first_course_date"])[:4]) + 1)
+            ) if dates else False
             item["teachers"] = sorted(item["teachers"])
             students.append(item)
         students.sort(key=lambda item: item["student"])
@@ -1709,12 +1713,14 @@ class PayrollService(CoreFlow):
         manual: list[StudentGradeEvidence] = []
         history: list[StudentGradeEvidence] = []
         for item in self.store.list_student_grade_evidence():
+            if item.get("status") == "EXPORT_POLLUTION":
+                continue
             try:
                 evidence = StudentGradeEvidence(
                     student=str(item.get("student", "")), lesson_date=str(item.get("lesson_date", "")), grade=str(item.get("grade", "")),
                     source_file=str(item.get("source_file", "")), source_hash=str(item.get("source_hash", "")),
                     sheet=str(item.get("sheet", "")), coordinate=str(item.get("coordinate", "")), origin=str(item.get("origin", "")),
-                    confirmed_by=str(item.get("confirmed_by", "")), note=str(item.get("note", "")),
+                    confirmed_by=str(item.get("confirmed_by", "")), note=str(item.get("note", "")), exported_at=str(item.get("exported_at", "")),
                 )
             except (TypeError, ValueError):
                 continue
@@ -1722,7 +1728,7 @@ class PayrollService(CoreFlow):
         return manual, history
 
     def _save_direct_grade_evidence(self, records: list, source: dict[str, Any]) -> int:
-        saved = 0
+        candidates = []
         for record in records:
             if (
                 record.grade_origin != "DIRECT_SOURCE" or not record.student or not record.lesson_date or not record.grade
@@ -1734,12 +1740,49 @@ class PayrollService(CoreFlow):
             sheet = getattr(class_cell, "sheet", "")
             for student in split_student_names(record.student):
                 identifier = hashlib.sha256(f"schedule-grade|{source['sha256']}|{coordinate}|{student}|{record.lesson_date}|{record.grade}".encode()).hexdigest()[:24]
-                self.store.save_student_grade_evidence({
+                item = {
                     "id": identifier, "student": student, "lesson_date": record.lesson_date, "grade": record.grade,
                     "origin": "HISTORICAL_SCHEDULE", "source_file": record.source, "source_hash": source["sha256"],
                     "sheet": sheet, "coordinate": coordinate, "confirmed_by": "", "note": "源课表直接年级。",
-                })
+                }
+                candidates.append((item, StudentGradeEvidence(
+                    student=student, lesson_date=record.lesson_date, grade=record.grade,
+                    source_file=record.source, source_hash=source["sha256"], sheet=sheet, coordinate=coordinate,
+                )))
+        existing_rows = self.store.list_student_grade_evidence()
+        existing = []
+        for raw in existing_rows:
+            if raw.get("status") == "EXPORT_POLLUTION" or raw.get("origin") != "HISTORICAL_SCHEDULE":
+                continue
+            existing.append(StudentGradeEvidence(
+                student=str(raw.get("student", "")), lesson_date=str(raw.get("lesson_date", "")), grade=str(raw.get("grade", "")),
+                source_file=str(raw.get("source_file", "")), source_hash=str(raw.get("source_hash", "")),
+                sheet=str(raw.get("sheet", "")), coordinate=str(raw.get("coordinate", "")),
+                origin=str(raw.get("origin", "HISTORICAL_SCHEDULE")), exported_at=str(raw.get("exported_at", "")),
+            ))
+        _kept, ignored = remove_export_pollution([*existing, *(evidence for _item, evidence in candidates)])
+        ignored_keys = {evidence_identity(item) for item in ignored}
+        for raw in existing_rows:
+            if raw.get("status") == "EXPORT_POLLUTION":
+                continue
+            evidence = StudentGradeEvidence(
+                student=str(raw.get("student", "")), lesson_date=str(raw.get("lesson_date", "")), grade=str(raw.get("grade", "")),
+                source_file=str(raw.get("source_file", "")), source_hash=str(raw.get("source_hash", "")),
+                sheet=str(raw.get("sheet", "")), coordinate=str(raw.get("coordinate", "")),
+            )
+            if evidence_identity(evidence) in ignored_keys:
+                self.store.save_student_grade_evidence({**raw, "status": "EXPORT_POLLUTION", "note": "后续导出导致班名提前升级，未作为学生历史年级事实使用。"})
+        saved = 0
+        ignored_count = 0
+        for item, evidence in candidates:
+            if evidence_identity(evidence) in ignored_keys:
+                item["status"] = "EXPORT_POLLUTION"
+                item["note"] = "后续导出导致班名提前升级，未作为学生历史年级事实使用。"
+                ignored_count += 1
+            else:
                 saved += 1
+            self.store.save_student_grade_evidence(item)
+        self._last_grade_pollution_count = ignored_count
         return saved
 
     def _student_grade_lookup(self) -> dict[str, str]:
