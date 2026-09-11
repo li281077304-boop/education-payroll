@@ -157,9 +157,11 @@ def test_generate_mode_does_not_require_a_submitted_payroll_sheet(tmp_path):
 
     produced = service.generate_payroll(run["id"], str(tmp_path / "out.xlsx"))
     assert produced["rows"][0]["one_to_one"] > 0
-    assert produced["rows"][0]["status"] == "NEEDS_CONFIRMATION"
-    assert "AD_MISSING_SOURCE" in produced["rows"][0]["blockers"]
-    assert produced["status"] == "NEEDS_CONFIRMATION", "缺 AD 时不得宣称最终工资正确"
+    row = produced["rows"][0]
+    assert row["teaching_hours"] == row["one_to_one"] + row["class_value"]
+    assert row["fields"]["AD"]["state"] == "DETERMINED"
+    assert "AD_MISSING_SOURCE" not in row["blockers"]
+    assert row["ae"] == row["af"] == 0, "已确定AD不超过门槛，课时费为0不需要猜星级"
 
 
 def test_audit_mode_still_requires_a_submitted_payroll_sheet(tmp_path):
@@ -183,7 +185,7 @@ def test_generate_mode_marks_draft_and_never_overwrites(tmp_path):
 
     service.generate_payroll(run["id"], str(output))
     text = load_workbook(output)["标准工资表"]["A2"].value
-    assert "待确认" in text and "不得作为最终工资" in text
+    assert "不等于最终全项工资" in text
     with pytest.raises(ValueError, match="不能覆盖"):
         service.generate_payroll(run["id"], str(output))
 
@@ -196,4 +198,5 @@ def test_unknown_class_type_blocks_the_generated_payroll(tmp_path):
     produced = service.generate_payroll(run["id"], str(tmp_path / "out.xlsx"))
 
     assert produced["status"] == "NEEDS_CONFIRMATION"
-    assert any(blocker == "UNKNOWN_CLASS_TYPE_RULE" for blocker in produced["blockers"])
+    assert produced["rows"][0]["fields"]["AC"]["state"] == "NEEDS_INPUT"
+    assert produced["rows"][0]["fields"]["AC"]["value"] is None

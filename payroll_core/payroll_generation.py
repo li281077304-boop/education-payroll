@@ -42,6 +42,8 @@ class CorePayrollRow:
     av: float | None = None               # AV, only when a reliable source exists
     status: str = STATUS_NEEDS_CONFIRMATION
     blockers: tuple[str, ...] = ()
+    fields: Mapping[str, dict] = field(default_factory=dict)
+    part_time_amount: float | None = None
 
     @property
     def final(self) -> bool:
@@ -64,7 +66,7 @@ class GeneratedPayroll:
         return next((row for row in self.rows if row.teacher == teacher), None)
 
 
-def build_generated_payroll(
+def build_legacy_generated_payroll(
     *,
     period: str,
     schedule_records: Iterable[ScheduleRecord],
@@ -125,3 +127,28 @@ def build_generated_payroll(
         period=period, rows=tuple(rows), status=status,
         blockers=tuple(sorted(set(overall))), rule_versions=dict(rule_versions or {}),
     )
+
+
+def generated_from_calculation(result: dict) -> GeneratedPayroll:
+    """Pure presentation adapter. No payroll inputs or second set of formulae."""
+    rows = []
+    reasons = set()
+    for row in result["rows"]:
+        fields = row["fields"]
+        blockers = tuple(sorted({str(v.get("reason") or v["state"]) for v in fields.values() if v["state"] not in {"DETERMINED", "NOT_APPLICABLE"}}))
+        reasons.update(blockers)
+        def value(key: str):
+            return fields.get(key, {}).get("value")
+        rows.append(CorePayrollRow(teacher=row["teacher"], one_to_one=value("AA"), class_value=value("AC"), teaching_hours=value("AD"), ae=value("AE"), af=value("AF"), part_time_amount=value("PART_TIME"), fields=fields, status=STATUS_NEEDS_CONFIRMATION if blockers else STATUS_FINAL, blockers=blockers))
+    return GeneratedPayroll(period=result["period"], rows=tuple(rows), status=STATUS_FINAL if rows and not reasons else STATUS_NEEDS_CONFIRMATION, blockers=tuple(sorted(reasons)), rule_versions=result.get("rule_versions", {}))
+
+
+def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleRecord], rules=None, ratings: Iterable = (), profiles: Iterable = (), teacher_contexts: Iterable = (), part_time_rates: Iterable = (), reference_ratings: Mapping | None = None) -> GeneratedPayroll:
+    """Public generation entry: exactly the same calculation as audit mode."""
+    from .calculation import calculate_payroll
+    from .config.core_rules import load_core_rules
+    result = calculate_payroll(period=period, schedule=schedule_records, rules=rules or load_core_rules(), ratings=ratings, profiles=profiles, teacher_contexts=teacher_contexts, part_time_rates=part_time_rates, reference_ratings=reference_ratings or {})
+    raw = result.as_dict()
+    names = {"aa": "AA", "ac": "AC", "ad": "AD", "ae": "AE", "af": "AF", "part_time_fee": "PART_TIME"}
+    rows = [{"teacher": row["teacher"], "fields": {code: {**row[key], "value": None if row[key]["value"] is None else float(row[key]["value"])} for key, code in names.items()}} for row in raw["rows"]]
+    return generated_from_calculation({"period": period, "rows": rows, "rule_versions": {"core": result.rule_version_id}})

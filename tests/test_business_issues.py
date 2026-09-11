@@ -280,12 +280,11 @@ def test_grouped_ae_af_service_decision_survives_actual_rerun_and_restart(tmp_pa
     stored["status"] = "FILES_READY"
     service.store.save(stored)
 
-    schedule = [
-        ScheduleRecord("2026-08", "教师甲", "高一", "数学", "1对1", 1, lesson_status="已上课"),
-        ScheduleRecord("2026-08", "教师甲", "高一", "数学", "小班", 2, lesson_status="已上课"),
-    ]
+    # AD now comes from the schedule, not the submitted 70.  Supply actual
+    # synthetic 35 × 2 teaching hours to retain this grouping regression.
+    schedule = [ScheduleRecord("2026-08", "教师甲", "九年级", "数学", "1对1", 1, lesson_status="已上课", lesson_time=str(i)) for i in range(35)]
     payroll = [PayrollRecord(
-        "2026-08", "教师甲", one_to_one=2.2, class_value=2.2,
+        "2026-08", "教师甲", one_to_one=70, class_value=0,
         teaching_hours=70, teacher_level="四星", ae=32, af=1280, av=1280,
     )]
 

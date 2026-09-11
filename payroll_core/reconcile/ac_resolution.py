@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from math import isclose, isfinite
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from ..models.records import ScheduleRecord
 from .payroll_scope import class_value_contribution
@@ -221,7 +221,7 @@ class CauseAssessment:
 @dataclass(frozen=True)
 class ContributionStructureComparison:
     status: str
-    system_total: float
+    system_total: float | None
     reference_total: float
     mismatched_record_ids: tuple[str, ...]
 
@@ -295,8 +295,13 @@ def resolve_ac(
     corrections: Iterable[SourceDataCorrection] = (),
     overrides: Iterable[ApprovedPayrollOverride] = (),
     source_hashes: Mapping[str, str] | None = None,
+    contribution_calculator: Callable[[ScheduleRecord], tuple[float | None, str]] = class_value_contribution,
 ) -> ACResolutionResult:
-    """Recompute AC from effective facts and run-scoped approved treatments."""
+    """Recompute AC from effective facts and run-scoped approved treatments.
+
+    Callers with a version-bound rule set may inject its calculator.  Omitting
+    it preserves the historical ``class_value_contribution`` behaviour.
+    """
     source_records = tuple(records)
     facts = effective_schedule_facts(source_records, corrections, run_id=run_id, period=period, source_hashes=source_hashes)
     indexed_original = _index_records(source_records)
@@ -322,8 +327,8 @@ def resolve_ac(
     effective_total = 0.0
     blockers: list[str] = []
     for fact in facts:
-        original_value, _ = class_value_contribution(fact.original)
-        corrected_value, calculation = class_value_contribution(fact.effective)
+        original_value, _ = contribution_calculator(fact.original)
+        corrected_value, calculation = contribution_calculator(fact.effective)
         override = overrides_by_id.get(fact.source_record_id)
         if override is not None and corrected_value is None:
             raise ValueError("Cannot apply an override to a course without a deterministic default contribution")
@@ -389,13 +394,22 @@ def compare_contribution_structure(
     explicitly parseable payroll comment).  A payroll total by itself cannot
     prove per-course structure.
     """
-    system = {item.source_record_id: item.effective_contribution or 0.0 for item in contributions}
+    system = {item.source_record_id: item.effective_contribution for item in contributions}
     all_ids = set(system) | set(reference_by_record_id)
     mismatched = tuple(sorted(
         record_id for record_id in all_ids
-        if not isclose(system.get(record_id, 0.0), reference_by_record_id.get(record_id, 0.0), abs_tol=tolerance)
+        if record_id not in system
+        or record_id not in reference_by_record_id
+        or system[record_id] is None
+        or not isclose(system[record_id], reference_by_record_id[record_id], abs_tol=tolerance)
     ))
-    system_total = sum(system.values())
+    has_unknown = any(value is None for value in system.values())
+    system_total = None if has_unknown else sum(value for value in system.values() if value is not None)
     reference_total = sum(reference_by_record_id.values())
-    status = "STRUCTURE_MATCH" if not mismatched else "CONTRIBUTION_STRUCTURE_MISMATCH"
+    if has_unknown:
+        status = "NEEDS_INPUT"
+    elif not all_ids or mismatched:
+        status = "CONTRIBUTION_STRUCTURE_MISMATCH"
+    else:
+        status = "STRUCTURE_MATCH"
     return ContributionStructureComparison(status, system_total, reference_total, mismatched)

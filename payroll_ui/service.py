@@ -14,7 +14,7 @@ from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.models.evidence import AdapterIssue
 from payroll_core.models.class_type_rules import default_rule_versions, rule_version_for_period
-from payroll_core.payroll_generation import build_generated_payroll
+from payroll_core.payroll_generation import build_legacy_generated_payroll, generated_from_calculation
 from payroll_core.excel.standard_payroll_render import render_generated_payroll
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
@@ -38,6 +38,7 @@ from payroll_ui.submissions import PayrollSubmissionService
 from .storage import RunStore
 from .business import build_groups, invalidate as invalidate_business_decisions
 from .business_inputs import BusinessInputService
+from .core_flow import CoreFlow
 
 REQUIRED = ("schedule",)
 SCOPE_ROLES = ("math", "science")
@@ -96,7 +97,7 @@ def safe_csv(value: Any) -> Any:
     return "'" + value if value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")) else value
 
 
-class PayrollService:
+class PayrollService(CoreFlow):
     def __init__(self, root: Path):
         self.store = RunStore(root)
         self.inputs = BusinessInputService(self.store)
@@ -328,6 +329,7 @@ class PayrollService:
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
         run = {"id": uuid.uuid4().hex[:12], "period": period, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "field_status": self._field_status([]), "summary": self._summary([])}
+        self._bind_new_calculation(run)
         self.store.save(run)
         return self.render(run)
 
@@ -368,6 +370,10 @@ class PayrollService:
         return self._version_views("policy")
 
     def save_policy_version(self, effective_from: str, effective_to: str, source: str, profiles: list[dict], supersedes_version_id: str | None = None, source_hash: str = "") -> list[dict]:
+        from math import isfinite
+        from .core_flow import valid_period
+        if not valid_period(effective_from) or not valid_period(effective_to):
+            raise ValueError("请填写有效政策月份。")
         if len(effective_from) != 7 or len(effective_to) != 7 or effective_from > effective_to or not source.strip() or not profiles:
             raise ValueError("请填写生效期、来源和至少一位教师的工资政策。")
         cleaned = []
@@ -375,7 +381,21 @@ class PayrollService:
             teacher, role = str(item.get("teacher", "")).strip(), str(item.get("role", "")).strip()
             if not teacher or not role:
                 raise ValueError("每条工资政策必须包含教师和身份。")
+            if any(p["teacher"] == teacher for p in cleaned):
+                raise ValueError("同一政策版本不能重复配置教师。")
+            if "obligation_hours" not in item or not isinstance(item.get("obligation_hours_deduction_enabled"), bool):
+                raise ValueError("必须明确填写义务小时及是否扣除，缺少政策不能默认免扣。")
+            try:
+                obligation = float(item["obligation_hours"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("义务课时必须是非负有限数值。") from exc
+            if not isfinite(obligation) or obligation < 0:
+                raise ValueError("义务课时必须是非负有限数值。")
+            employment = item.get("employment_type", "FULL_TIME")
+            if employment not in {"FULL_TIME", "PART_TIME"} or not isinstance(item.get("allow_no_teaching", False), bool):
+                raise ValueError("请明确选择全职/兼职及是否允许当月无课。")
             cleaned.append({"teacher": teacher, "role": role, "rating": item.get("rating"), "rating_override": item.get("rating_override"), "special_approval": str(item.get("special_approval", "")).strip(), "obligation_hours": float(item.get("obligation_hours", 0)), "obligation_hours_deduction_enabled": bool(item.get("obligation_hours_deduction_enabled", False)), "note": str(item.get("note", "")).strip()})
+            cleaned[-1].update(employment_type=employment, allow_no_teaching=item.get("allow_no_teaching", False))
         if supersedes_version_id:
             prior = self.store.get_policy_version(supersedes_version_id)
             if prior["effective_from"] != effective_from or prior["effective_to"] != effective_to:
@@ -512,6 +532,8 @@ class PayrollService:
 
     def rebind_class_type_rules(self, run_id: str, version_id: str) -> dict:
         run = self._load(run_id)
+        if run.get("calculation_engine") == "CONFIGURED_V1":
+            raise ValueError("本记录使用完整核心规则，请从核心规则面板创建并绑定新版本。")
         version = next((item for item in self.class_type_rule_versions() if item["id"] == version_id), None)
         if version is None:
             raise ValueError("未找到该班型折算规则版本。")
@@ -525,6 +547,16 @@ class PayrollService:
     def generate_payroll(self, run_id: str, output_path: str, *, confirmed_hours: dict | None = None) -> dict:
         """生成模式：同一套 Core 结果直接渲染成标准工资表。"""
         run = self._load(run_id)
+        if run.get("calculation_engine") == "CONFIGURED_V1":
+            if confirmed_hours:
+                raise ValueError("AD 已由 AA + AC 独立计算，不接受手工或工资表 AD 覆盖。")
+            checked = self.check(run_id)
+            payroll = generated_from_calculation(checked["core_calculation"])
+            path = render_generated_payroll(payroll, output_path)
+            run = self.store.get(run_id)
+            run["generated_payroll"] = {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(), "rows": [asdict(row) for row in payroll.rows]}
+            self.store.save(run)
+            return run["generated_payroll"]
         missing = self._missing_materials(run)
         if missing:
             raise ValueError("请先导入：" + "、".join(missing))
@@ -539,7 +571,7 @@ class PayrollService:
         hours = dict(confirmed_hours if confirmed_hours is not None else run.get("confirmed_hours", {}))
         if confirmed_hours is not None:
             run["confirmed_hours"] = {key: float(value) for key, value in confirmed_hours.items()}
-        payroll = build_generated_payroll(
+        payroll = build_legacy_generated_payroll(
             period=run["period"], schedule_records=schedule, coefficients=coefficients,
             ratings_by_teacher=ratings, confirmed_hours=hours,
             rule_versions={"class_type_rules": rule_version_id, "rating": (rating_version or {}).get("id", "")},
@@ -772,7 +804,7 @@ class PayrollService:
             )
             item = {**asdict(correction), "id": uuid.uuid4().hex[:16], "kind": kind, "issue_id": group["id"], "issue_fingerprint": group["fingerprint"], "created_at": timestamp, "outcome": "PENDING_RECOMPUTE"}
         else:
-            default_value, calculation = class_value_contribution(record)
+            default_value, calculation = self._configured_contribution(run)(record)
             if default_value is None:
                 raise ValueError("该课程没有可确定的默认班课折算，不能创建特殊核算口径。")
             override = ApprovedPayrollOverride(
@@ -842,8 +874,30 @@ class PayrollService:
         # Same Core function both modes use; only the coefficients come from the
         # run's bound ClassTypeRule version instead of code constants.
         coefficients, _rule_version_id = self._class_type_rules_for_run(run)
-        checks = schedule_field_checks(scoped_schedule, payroll, rules=coefficients)
+        configured = run.get("calculation_engine") == "CONFIGURED_V1"
+        if configured:
+            core_result = self._configured_calculation(run, scoped_schedule, payroll)
+            checks = self._core_checks(core_result, payroll, run.get("mode", MODE_AUDIT))
+        else:
+            checks = schedule_field_checks(scoped_schedule, payroll, rules=coefficients)
         checks = self._apply_ac_resolutions(run, scoped_schedule, payroll, checks)
+        if configured:
+            from payroll_core.calculation import course_record_key
+            keys = {schedule_record_id(row): course_record_key(row) for row in scoped_schedule}
+            effective = {}
+            for resolution in run.get("resolutions", []):
+                if resolution.get("status") != "ACTIVE":
+                    continue
+                for entry in resolution.get("recomputation", {}).get("contributions", []):
+                    if entry.get("effective_contribution") is not None and entry["source_record_id"] in keys:
+                        effective[keys[entry["source_record_id"]]] = entry["effective_contribution"]
+            if effective:
+                core_result = self._configured_calculation(run, scoped_schedule, payroll, effective)
+                recalculated = self._core_checks(core_result, payroll, run.get("mode", MODE_AUDIT))
+                ac_checks = [c for c in checks if c.field == "class_value"]
+                checks = [c for c in recalculated if c.field != "class_value"] + ac_checks
+            run["core_calculation"] = core_result
+            run["calculation_context"] = self._calculation_context(run)
         for teacher in sorted(scope_teachers - {row.teacher for row in payroll}):
             checks.extend((
                 FieldCheck(teacher, "one_to_one", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
@@ -852,12 +906,20 @@ class PayrollService:
         checks += total_salary_read_checks(payroll)
         rating_version = self._rating_version_for_run(run)
         ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"], allow_blank_payroll_rating=item.get("allow_blank_payroll_rating", False)) for item in rating_version.get("ratings", [])] if rating_version else []
-        checks += rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
+        rating_checks = rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
+        if configured:
+            exempt = {row["teacher"] for row in core_result["rows"] if row["fields"]["AE"]["state"] == "NOT_APPLICABLE"}
+            checks += [c for c in rating_checks if c.field == "rating" and c.teacher not in exempt]
+        else:
+            checks += rating_checks
         policy_version = self._policy_version_for_run(run)
         profiles = [TeacherCompensationProfile(item["teacher"], item["role"], item.get("rating"), item.get("rating_override"), item.get("special_approval", ""), item.get("obligation_hours", 0), item.get("obligation_hours_deduction_enabled", False), policy_version["effective_from"], policy_version["effective_to"], policy_version["source"], item.get("note", "")) for item in policy_version.get("profiles", [])] if policy_version else []
-        checks += policy_fee_checks(payroll, profiles, default_compensation_bands(), run["period"])
+        if not configured:
+            checks += policy_fee_checks(payroll, profiles, default_compensation_bands(), run["period"])
         for role in (("baseline",) if "baseline" in reads else tuple(role for role in SCOPE_ROLES if role in reads)):
             audit_rows = payroll if role == "baseline" else reads[role].records
+            if configured:
+                audit_rows = [row for row in audit_rows if row.teacher not in exempt]
             for item in self._formula_audit_for_scope(run["files"][role]["path"], audit_rows):
                 status, evidence = self._formula_status_with_policy(item, audit_rows, profiles)
                 checks.append(FieldCheck("工作簿", "formula", None, None, status, f"{Path(item.workbook).name} / {item.sheet} / {item.cell}：{evidence} 正常模式：{item.expected_pattern or '待确认'}；当前公式：{item.formula or '空白/固定值'}。"))
@@ -865,7 +927,7 @@ class PayrollService:
         # Only historical, field-level actions retain their old display
         # behaviour.  Business decisions never alter a payroll audit status.
         checks = self._apply_decisions(checks, run["decisions"])
-        visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY"}]
+        visible_checks = [check for check in checks if check.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY", "NOT_APPLICABLE", "DETERMINED"}]
         run["field_records"] = self._annotate_decisions([self._issue(check) for check in raw_checks], run["decisions"])
         run["issues"] = self._annotate_decisions([self._issue(check) for check in visible_checks], run["decisions"])
         run["issues"].sort(key=lambda item: (item["severity_rank"], item["title"], item["teacher"]))
@@ -874,6 +936,10 @@ class PayrollService:
         run["issue_groups"] = self._business_groups(run)
         run["field_status"] = self._field_status(checks)
         run["summary"] = self._summary(checks)
+        if configured:
+            run["field_status"] = self._core_field_status(core_result, checks) + [f for f in run["field_status"] if f["field"] in {"rating", "formula", "av"}]
+            run["summary"]["core_calculation_complete"] = bool(core_result["rows"]) and all(v["state"] in {"DETERMINED", "NOT_APPLICABLE"} for row in core_result["rows"] for v in row["fields"].values())
+            run["summary"]["scope_note"] = "AA/AC/AD 来自独立排课；AE/AF 按版本规则与个人政策逐层计算。估算不算已核对；总工资外围项目不在本轮计算范围。"
         run["status"] = "PASS" if run["summary"]["full_scope_complete"] else "REVIEW_REQUIRED"
         run.pop("last_error", None)
         self.store.save(run)
@@ -1000,6 +1066,7 @@ class PayrollService:
             result = resolve_ac(
                 teacher_schedule, run_id=run["id"], period=run["period"], corrections=corrections, overrides=overrides,
                 source_hashes={row.source: run["files"]["schedule"]["sha256"] for row in teacher_schedule},
+                contribution_calculator=self._configured_contribution(run),
             )
             target = payroll_by_teacher.get(teacher)
             actual = target.class_value if target else None
@@ -1105,9 +1172,29 @@ class PayrollService:
         lines = self._course_evidence(schedule, group, target)
         ac_calculation = self._class_value_calculation(schedule, group["teacher"]) if "class_value" in group["affected_fields"] else None
         sections = self._evidence_sections(run, group, records, target)
+        if run.get("calculation_engine") == "CONFIGURED_V1":
+            for line in lines:
+                if "计算依据" in line:
+                    line["计算依据"] = "见本页版本化逐课计算；历史常量公式不参与当前结果。"
+            core_row = next((row for row in run.get("core_calculation", {}).get("rows", []) if row["teacher"] == group["teacher"]), None)
+            if core_row:
+                sections = [{"title": "独立工资核心计算链", "items": [{"字段": key, "系统值": value["value"], "确定性": value["state"], "计算依据": value["reason"], "规则证据": value.get("evidence", [])} for key, value in core_row["fields"].items()]}, {"title": "工资表只作为对照目标", "items": [{"项目": r["field_label"], "系统值": r["expected"], "工资表值": r["actual"], "差额": r["difference"]} for r in records]}, {"title": "独立性边界", "items": [{"AD": "由独立排课 AA + AC 得到，不读取提交表 AD", "AE/AF": "仅 DETERMINED 为确定结果；参考星级或默认候选为估算，不冒充权威", "版本": run["core_calculation"]["rule_versions"]}]}]
+            if ac_calculation is not None:
+                from payroll_core.calculation import course_record_key
+                by_key = {course_record_key(row): row for row in schedule}
+                lessons = []
+                for c in run.get("core_calculation", {}).get("course_contributions", []):
+                    if c["teacher"] != group["teacher"] or c.get("field") not in {"ac", ""}:
+                        continue
+                    source_row = by_key.get(c["record_key"])
+                    if source_row is None:
+                        continue
+                    locations = [v for name, v in source_row.provenance.items() if name != "student"]
+                    lessons.append({"日期": source_row.lesson_date, "班级": source_row.class_name, "课程": source_row.course_name, "班型": source_row.class_type, "年级": source_row.grade, "实到人数": source_row.attended, "折算规则": c["reason"], "本条折算值": c["value"], "状态": c["state"], "来源文件": Path(source_row.source).name, "来源工作表": locations[0].sheet if locations else "未提供", "来源位置": ", ".join(v.coordinate for v in locations)})
+                ac_calculation = {"records": lessons, "system_total": core_row["fields"]["AC"]["value"] if core_row else None, "formula": "系统 AC 合计 = Σ 有效课程贡献；未知不计为0"}
         comments = [c for read in reads.values() for c in read.comments if c.target == group["teacher"] and c.field in set(group["affected_fields"]) | {"ae", "af"}]
         if "class_value" in group["affected_fields"]:
-            sections.append(self._class_value_comparison(records, comments))
+            sections.append(self._class_value_comparison(records, comments, run))
         elif set(group["affected_fields"]) & {"one_to_one"}:
             sections.append({"title": "特殊处理线索（不代表已获批准）", "items": [{"工资表批注": c.text, "来源文件": Path(c.source_file).name, "工作表": c.sheet, "单元格": c.coordinate} for c in comments] or [{"线索状态": "当前文件没有可读取的相关批注。历史特殊班型须由负责人核实，不自动改变折算规则。"}]})
         if not self._fresh(run):
@@ -1206,6 +1293,7 @@ class PayrollService:
             "default_compensation_bands": bands,
             "schedule_grade_resolutions": run.get("schedule_grade_resolutions", []),
             "business_input_bindings": run.get("business_input_bindings", []),
+            **({"calculation_versions": self._calculation_context(run)} if run.get("calculation_engine") == "CONFIGURED_V1" else {}),
         }
 
     @staticmethod
@@ -1310,7 +1398,7 @@ class PayrollService:
         }
 
     @staticmethod
-    def _structured_class_comment(text: str) -> float | None:
+    def _structured_class_comment(text: str, configured_rules: dict | None = None) -> float | None:
         """Parse only an explicit AC/班课 assertion; prose is never guessed."""
         normalized = " ".join(str(text).replace("\n", " ").split())
         matches = re.findall(
@@ -1345,6 +1433,15 @@ class PayrollService:
             return None
         total = 0.0
         for grade, people_text, count_text in tally:
+            if configured_rules is not None:
+                from payroll_core.calculation import calculate_course
+                from payroll_core.models.records import ScheduleRecord
+                record = ScheduleRecord(configured_rules["effective_from"], "批注结构化对照", grade, "", "小班", int(people_text), lesson_status="已上课")
+                result = calculate_course(record, configured_rules)
+                if result.value is None or result.state != "DETERMINED":
+                    return None
+                total += float(result.value) * int(count_text)
+                continue
             coefficient = GRADE_COEFFICIENTS.get(grade)
             people = HEADCOUNT_COEFFICIENTS.get(int(people_text))
             if coefficient is None or people is None:
@@ -1352,7 +1449,7 @@ class PayrollService:
             total += coefficient * people * CLASS_MULTIPLIERS["小班"] * 2 * int(count_text)
         return round(total, 6)
 
-    def _class_value_comparison(self, records: list[dict], comments: list) -> dict:
+    def _class_value_comparison(self, records: list[dict], comments: list, run: dict | None = None) -> dict:
         fact = next((item for item in records if item["field"] == "class_value"), None)
         system_value = fact["expected"] if fact else None
         payroll_value = fact["actual"] if fact else None
@@ -1364,7 +1461,8 @@ class PayrollService:
         if not comments:
             items.append({"人工批注": "当前工资表没有可读取的 AC 批注。", "批注状态": "NO_COMMENT"})
         for comment in comments:
-            claimed = self._structured_class_comment(comment.text)
+            configured = self._calculation_version(run, "core") if run and run.get("calculation_engine") == "CONFIGURED_V1" else None
+            claimed = self._structured_class_comment(comment.text, configured["rules"] if configured else None)
             item = {
                 "人工批注原文": comment.text,
                 "批注来源文件": Path(comment.source_file).name,
@@ -1472,7 +1570,7 @@ class PayrollService:
             "id": hashlib.sha256(f"{item.teacher}|{item.field}|{item.reason}".encode()).hexdigest()[:16],
             "teacher": item.teacher,
             "field": item.field,
-            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "ae": "AE 课时单价", "af": "AF 总课时费", "af_policy": "AF 课时费政策", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
+            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "teaching_hours": "AD 授课小时合计", "part_time": "兼职按节课时费", "ae": "AE 课时单价", "af": "AF 总课时费", "af_policy": "AF 课时费政策", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
             "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "af_policy": "AF 课时费政策不一致", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
             "difference": difference,
             "status_label": ISSUE_LABELS.get(item.status, "需要处理"),
@@ -1636,6 +1734,8 @@ class PayrollService:
                 "rating": self._authority_reference(rating, "教师星级"),
                 "policy": self._authority_reference(policy, "教师工资政策"),
                 "class_type_rules": {"label": "班型折算规则", "version_id": class_rule_version_id, "coefficients": class_rules},
+                "core_rules": self._calculation_version(run, "core"),
+                "part_time_rates": self._calculation_version(run, "part_time"),
                 "rules": {"label": "工资规则", "name": "现行档位金额规则", "source": "skill/payroll/references/ae_tier_rules.md", "source_version": "2025-10", "effective_period": "2025-10 起持续维护"},
             },
             "business_input_bindings": run.get("business_input_bindings", []),

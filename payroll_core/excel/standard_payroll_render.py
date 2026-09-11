@@ -17,7 +17,7 @@ from ..payroll_generation import GeneratedPayroll, STATUS_FINAL
 
 HEADERS = (
     "教师", "AA 一对一折算小时", "AC 班课折算小时", "AD 最终授课小时",
-    "AE 该档每小时金额", "AF 总课时费", "AV 总工资", "状态", "待确认原因",
+    "AE 该档每小时金额", "AF 总课时费", "AV 总工资", "状态", "待确认原因", "兼职按节课时费", "逐项确定性",
 )
 
 
@@ -33,7 +33,7 @@ def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path) -> s
     headline = f"{payroll.period} 标准工资表（由 Core 计算结果生成，非复制任何提交表）"
     sheet.append([headline])
     sheet["A1"].font = Font(bold=True)
-    sheet.append([f"状态：{'已可直接采用' if payroll.final else '草稿 / 待确认——不得作为最终工资'}"])
+    sheet.append([f"状态：{'核心课时费已计算；不等于最终全项工资' if payroll.final else '草稿 / 待确认——不得作为最终工资'}"])
     sheet.append(list(HEADERS))
     for column in range(1, len(HEADERS) + 1):
         sheet.cell(3, column).font = Font(bold=True)
@@ -45,6 +45,8 @@ def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path) -> s
             _value(row.ae), _value(row.af), _value(row.av),
             "待确认" if not row.final else "已计算",
             "、".join(row.blockers),
+            _value(row.part_time_amount),
+            "；".join(f"{key}: {item['state']}" for key, item in row.fields.items()),
         ])
     book.save(target)
     return str(target.resolve())

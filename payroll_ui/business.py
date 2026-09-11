@@ -67,13 +67,14 @@ def fingerprint(run: dict, records: list[dict], rating_version: dict | None, pol
         "rating_version": rating_version,
         "policy_version": policy_version,
         "default_compensation_bands": bands,
+        **({"calculation_versions": run.get("calculation_context")} if run.get("calculation_engine") == "CONFIGURED_V1" else {}),
     }
     return hashlib.sha256(canonical(payload).encode()).hexdigest()
 
 
 def build_groups(run: dict, records: list[dict], rating_version: dict | None, policy_version: dict | None, bands: list[dict], status_labels: dict[str, str]) -> list[dict]:
     """Build stable cards without discarding individual audit records."""
-    actionable = [row for row in records if row.get("status") not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY"}]
+    actionable = [row for row in records if row.get("status") not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY", "NOT_APPLICABLE", "DETERMINED"}]
     buckets: dict[tuple[str, str], list[dict]] = {}
     # Group a rate and total-fee discrepancy only when both audit facts show
     # the same billable hours. Unrelated policy discrepancies stay separate.

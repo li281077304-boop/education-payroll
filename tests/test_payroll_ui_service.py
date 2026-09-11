@@ -72,8 +72,9 @@ def test_ui_run_never_passes_when_ae_af_av_have_no_independent_authority(tmp_pat
 
     assert result["status"] == "REVIEW_REQUIRED"
     states = {row["field"]: row["state"] for row in result["field_status"]}
-    assert states["ae"] == "公式复算 / 待权威确认"
-    assert states["af"] == "公式复算 / 待权威确认"
+    assert "rate" in states and "af_policy" in states
+    assert "待AD独立来源" not in states["rate"]
+    assert all(row["fields"]["AD"]["state"] == "DETERMINED" for row in result["core_calculation"]["rows"])
     assert states["av"] == "仅读取 / 待人工确认"
 
 

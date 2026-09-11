@@ -25,6 +25,8 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS submission_events (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS import_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS class_type_rules (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS core_rule_versions (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS part_time_rate_versions (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_records (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_results (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS assessment_events (id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
@@ -209,6 +211,17 @@ class RunStore:
 
     def save_class_type_rule_version(self, item: dict) -> None:
         self._upsert("class_type_rules", item)
+
+    def append_calculation_version(self, kind: str, item: dict) -> None:
+        """Calculation authorities are immutable snapshots, never upserted."""
+        table = {"core": "core_rule_versions", "part_time": "part_time_rate_versions"}[kind]
+        payload = json.dumps(item, ensure_ascii=False, allow_nan=False)
+        with sqlite3.connect(self.path) as db:
+            db.execute(f"INSERT INTO {table}(id,created_at,payload) VALUES(?,?,?)", (item["id"], item["created_at"], payload))
+
+    def calculation_versions(self, kind: str) -> list[dict]:
+        table = {"core": "core_rule_versions", "part_time": "part_time_rate_versions"}[kind]
+        return self._list_entities(table)
 
     def list_class_type_rule_versions(self) -> list[dict]:
         return self._list_entities("class_type_rules")

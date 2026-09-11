@@ -6,6 +6,16 @@ let filters = { field: "all", state: "all", decision: "all", teacher: "" };
 let evidenceResolutionCourses = [];
 let evidenceIssueId = "";
 let detailBasisToken = null;
+let partTimeRateRows = [];
+let policyProfileRows = [];
+let coreRuleEditingBase = {};
+
+const coreStateLabels = {
+  DETERMINED: "已确定",
+  ESTIMATED: "估算",
+  NEEDS_INPUT: "缺资料",
+  NOT_APPLICABLE: "不适用",
+};
 
 const roleCopy = {
   schedule: ["原始排课数据", "选择原始排课表", "用于重新计算一对一和班课"],
@@ -17,6 +27,79 @@ const roleCopy = {
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
 const fmtDate = (value) => value ? new Date(value).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+
+function versionList(payload) {
+  return Array.isArray(payload) ? payload : (payload?.versions || []);
+}
+
+function splitNames(value) {
+  return String(value || "").split(/[，,、；;]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function option(value, selectedValue, label) {
+  return `<option value="${escapeHtml(value)}" ${value === selectedValue ? "selected" : ""}>${escapeHtml(label)}</option>`;
+}
+
+function coreVersionRows(versions, returnRunId = "") {
+  return (versions || []).map((version) => {
+    const rules = version.rules || {};
+    const summary = `${rules.course_rules?.length || 0} 条班型 · ${Object.keys(rules.grade_coefficients || {}).length} 个年级 · ${rules.ae?.tiers?.length || 0} 档 AD`;
+    const audit = [version.actor || "—", version.created_at ? fmtDate(version.created_at) : "—", version.sha256 ? `sha ${String(version.sha256).slice(0, 10)}` : ""].filter(Boolean).join(" · ");
+    return `<tr><td>${escapeHtml(version.id)}</td><td>${escapeHtml(version.effective_from || "—")} ～ ${escapeHtml(version.effective_to || "持续")}</td><td>${escapeHtml(version.source || "—")}</td><td>${escapeHtml(summary)}</td><td>${escapeHtml(audit)}</td><td><button class="quiet" onclick="coreRulesDashboard('${escapeHtml(returnRunId)}', '${escapeHtml(version.id)}')">复制为新版本</button></td></tr>`;
+  }).join("");
+}
+
+function applicableVersions(versions, runId) {
+  const period = current?.id === runId ? current.period : "";
+  return period ? versions.filter((version) => version.effective_from <= period && period <= version.effective_to) : versions;
+}
+
+function coreBindingControls(runId, versions, rateVersions) {
+  if (!runId) return "";
+  const coreVersions = applicableVersions(versions || [], runId);
+  const partTimeVersions = applicableVersions(rateVersions || [], runId);
+  const coreOptions = coreVersions.map((version) => option(version.id, current?.core_rule_version_id, `${version.id} · ${version.effective_from}～${version.effective_to} · ${version.source || "无来源"}`)).join("");
+  const rateOptions = partTimeVersions.map((version) => option(version.id, current?.part_time_rate_version_id, `${version.id} · ${version.effective_from}～${version.effective_to} · ${version.source || "无来源"}`)).join("");
+  const corePlaceholder = coreVersions.length > 1 && !current?.core_rule_version_id ? '<option value="" selected>同月多个版本，请先选择</option>' : "";
+  const ratePlaceholder = partTimeVersions.length > 1 && !current?.part_time_rate_version_id ? '<option value="" selected>同月多个版本，请先选择</option>' : "";
+  const coreReady = coreOptions && !(coreVersions.length > 1 && !current?.core_rule_version_id);
+  const rateReady = rateOptions && !(partTimeVersions.length > 1 && !current?.part_time_rate_version_id);
+  return `<section class="card rebind-card"><h2>当前核算显式绑定版本</h2><p class="muted">只列出适用于 ${escapeHtml(current?.period || "当前月份")} 的版本。同一月份有多个版本时不会默认替你选；绑定后系统立即重新核算，并保留原版本历史。</p><div class="binding-grid"><label>核心规则版本<select id="core-version-bind">${corePlaceholder}${coreOptions || '<option value="">当前月份没有可用版本</option>'}</select></label><button class="secondary" ${coreReady ? "" : "disabled"} onclick="bindCoreRules('${escapeHtml(runId)}')">绑定并重新核算</button><label>兼职单价版本<select id="part-time-version-bind">${ratePlaceholder}${rateOptions || '<option value="">当前月份没有可用版本</option>'}</select></label><button class="secondary" ${rateReady ? "" : "disabled"} onclick="bindPartTimeRates('${escapeHtml(runId)}')">绑定并重新核算</button></div></section>`;
+}
+
+function coreCourseRuleRow(rule = {}) {
+  return `<tr><td><input class="core-course-id" value="${escapeHtml(rule.id || "")}" placeholder="例如 special_one_to_two"></td><td><select class="core-course-treatment">${option("ONE_TO_ONE", rule.treatment, "一对一 → AA")}${option("SPECIAL_FIXED", rule.treatment, "特殊班型固定系数 → AC")}${option("SMALL_GROUP", rule.treatment, "普通小班按实到人数 → AC")}</select></td><td><input class="core-course-types" value="${escapeHtml((rule.class_types || []).join("、"))}" placeholder="多个名称用顿号分隔"></td><td><input class="core-course-coefficient" type="number" step="0.01" min="0" value="${escapeHtml(rule.coefficient ?? "")}" placeholder="仅特殊班型填写"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+}
+
+function coreGradeRuleRow(name = "", coefficient = "", excluded = false) {
+  return `<tr><td><input class="core-grade-name" value="${escapeHtml(name)}" placeholder="年级名称"></td><td><select class="core-grade-kind">${option("COEFFICIENT", excluded ? "EXCLUDED" : "COEFFICIENT", "参与计算")}${option("EXCLUDED", excluded ? "EXCLUDED" : "COEFFICIENT", "明确排除")}</select></td><td><input class="core-grade-coefficient" type="number" step="0.01" min="0" value="${escapeHtml(coefficient)}" placeholder="排除时留空"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+}
+
+function coreHeadcountRow(count = "", coefficient = "") {
+  return `<tr><td><input class="core-headcount-count" type="number" step="1" min="1" value="${escapeHtml(count)}"></td><td><input class="core-headcount-coefficient" type="number" step="0.01" min="0" value="${escapeHtml(coefficient)}"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+}
+
+function coreTierRow(tier = {}) {
+  return `<tr><td><input class="core-tier-id" value="${escapeHtml(tier.id || "")}" placeholder="档位名称"></td><td><input class="core-tier-min" type="number" step="0.01" min="0" value="${escapeHtml(tier.minimum ?? "")}"></td><td><label class="inline-check"><input class="core-tier-exclusive" type="checkbox" ${tier.minimum_exclusive ? "checked" : ""}>不含下限</label></td><td><input class="core-tier-max" type="number" step="0.01" min="0" value="${escapeHtml(tier.maximum ?? "")}" placeholder="最高档留空"></td><td><input class="core-tier-base" type="number" step="0.01" min="0" value="${escapeHtml(tier.base ?? "")}"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+}
+
+function coreStarRow(star = "", bonus = "") {
+  return `<tr><td><input class="core-star-level" type="number" step="1" min="1" max="6" value="${escapeHtml(star)}"></td><td><input class="core-star-bonus" type="number" step="0.01" min="0" value="${escapeHtml(bonus)}"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+}
+
+function coreRulesEditor(rules) {
+  const grades = Object.entries(rules.grade_coefficients || {}).map(([name, value]) => coreGradeRuleRow(name, value, false)).join("") + (rules.excluded_grades || []).map((name) => coreGradeRuleRow(name, "", true)).join("");
+  const headcounts = Object.entries(rules.small_group_headcount_coefficients || {}).map(([count, value]) => coreHeadcountRow(count, value)).join("");
+  const stars = Object.entries(rules.ae?.star_bonuses || {}).map(([star, value]) => coreStarRow(star, value)).join("");
+  const candidate = rules.af?.default_policy_candidate;
+  return `<div class="decision-form core-meta"><label>生效开始<input id="core-effective-from" type="month" value="${escapeHtml(rules.effective_from || "")}"></label><label>生效结束<input id="core-effective-to" type="month" value="${escapeHtml(rules.effective_to || "")}"></label><label>每节小时系数<input id="core-hour-factor" type="number" step="0.01" min="0" value="${escapeHtml(rules.lesson_hour_factor ?? "")}"></label></div>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>班型与计算方式</h3><p class="muted small">特殊 1 对 2/1 对 3 使用固定系数；普通小班另按实到人数系数计算。</p></div><button type="button" class="quiet" onclick="addCoreCourseRule()">新增班型规则</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>规则标识</th><th>计算方式</th><th>班型名称</th><th>固定系数</th><th></th></tr></thead><tbody id="core-course-editor">${(rules.course_rules || []).map(coreCourseRuleRow).join("")}</tbody></table></div></section>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>年级系数与明确排除</h3><p class="muted small">没有配置且未明确排除的年级会显示“缺资料”。</p></div><button type="button" class="quiet" onclick="addCoreGradeRule()">新增年级</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>年级</th><th>处理方式</th><th>系数</th><th></th></tr></thead><tbody id="core-grade-editor">${grades}</tbody></table></div></section>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>普通小班实到人数系数</h3><p class="muted small">这里只作用于“普通小班”，不会覆盖特殊班型的固定系数。</p></div><button type="button" class="quiet" onclick="addCoreHeadcountRule()">新增人数</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>实到人数</th><th>人数系数</th><th></th></tr></thead><tbody id="core-headcount-editor">${headcounts}</tbody></table></div></section>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>AE 课时档位（按 AD 小时数）</h3><p class="muted small">AD 档位驱动 AE 课时单价；边界连续且每个小时数只能命中一个档位，最高档上限留空。</p></div><button type="button" class="quiet" onclick="addCoreTierRule()">新增档位</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>档位</th><th>下限</th><th>边界</th><th>上限</th><th>基础金额</th><th></th></tr></thead><tbody id="core-tier-editor">${(rules.ae?.tiers || []).map(coreTierRow).join("")}</tbody></table></div></section>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>星级加成</h3><p class="muted small">这是星级对应的金额加成；教师本人星级仍由独立星级资料确定。</p></div><button type="button" class="quiet" onclick="addCoreStarRule()">新增星级</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>星级</th><th>加成金额</th><th></th></tr></thead><tbody id="core-star-editor">${stars}</tbody></table></div></section>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>AF 默认政策候选</h3><p class="muted small">仅在缺少个人有效期政策时作为“估算”；不会标成已确定。</p></div><label class="inline-check"><input id="core-af-default-enabled" type="checkbox" ${candidate ? "checked" : ""}>启用候选</label></div><div class="decision-form"><label>义务课时<input id="core-af-obligation" type="number" step="0.01" min="0" value="${escapeHtml(candidate?.obligation_hours ?? "")}"></label><label>候选名称<input id="core-af-label" value="${escapeHtml(candidate?.label || "")}"></label><label class="wide">候选来源<input id="core-af-source" value="${escapeHtml(candidate?.source || "")}"></label></div></section>`;
+}
 
 async function api(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", "X-Payroll-Token": token, ...options.headers } });
@@ -66,7 +149,126 @@ async function authorityDashboard(runId = null, focus = "") {
     const section = (title, versions, kind, click) => `<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>${title}</h2><p class="muted">版本会保留来源、生效期与被哪些核算记录使用；修正时请创建新版本，不要删除旧版本。</p></div><button class="secondary" onclick="${click}">查看与修正</button></div>${versions.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>来源</th><th>已用于</th></tr></thead><tbody>${versions.map(v => `<tr><td>${escapeHtml(v.source_version || v.id)}</td><td>${escapeHtml(v.effective_from)} ～ ${escapeHtml(v.effective_to)}</td><td>${escapeHtml(v.status || "ACTIVE")}</td><td>${escapeHtml(v.source)}</td><td>${v.used_by_runs?.length || 0} 个 Run</td></tr>`).join("")}</tbody></table></div>` : '<p class="muted">尚未保存版本。</p>'}</section>`;
     const rebind = runId ? `<section class="card"><h2>让当前核算改用修正版</h2><p class="muted">这是明确的人工操作。切换后会要求重新全盘核对，相关人工意见会变为“需重新确认”。</p>${authorityRebindControl("rating", catalog.ratings, runId)}${authorityRebindControl("policy", catalog.policies, runId)}</section>` : "";
     const rules = catalog.rules.map(r => `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.effective_from)} ～ ${escapeHtml(r.effective_to)}</td><td>${escapeHtml(r.source_version)}</td><td>${escapeHtml(r.source)}</td></tr>`).join("");
-    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>核对依据</h1><p class="muted">修正基础资料会新建版本；历史版本和已使用记录都不会被覆盖。</p></div><button class="secondary" onclick="${runId ? `openRun('${runId}')` : "home()"}">返回</button></div>${rebind}${section("教师星级", catalog.ratings, "rating", `ratingDashboard('${runId || ""}')`)}${section("教师工资政策", catalog.policies, "policy", `policyDashboard('${runId || ""}')`)}<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>班型折算规则</h2><p class="muted">班型系数来自配置而不是代码。以后出现新班型（例如四人精品班），在这里配置即可。</p></div><button class="secondary" onclick="classTypeRulesPage('${runId || ""}')">查看与配置</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">工资规则</p><h2>现行档位金额规则</h2><p class="muted">本版只读展示当前代码化的规则来源，不在这里修改业务规则。</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>规则</th><th>生效期</th><th>版本</th><th>来源</th></tr></thead><tbody>${rules}</tbody></table></div></section>`, false);
+    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>核对依据</h1><p class="muted">修正基础资料会新建版本；历史版本和已使用记录都不会被覆盖。</p></div><button class="secondary" onclick="${runId ? `openRun('${runId}')` : "home()"}">返回</button></div>${rebind}<section class="card core-entry-card"><div class="section-head"><div><p class="eyebrow">核心规则链</p><h2>核心规则配置（7 类）</h2><p class="muted">班型、人数、年级、AD、星级加成、个人政策和兼职单价统一从版本化资料读取；同一月份有多个版本时必须由你显式选择。</p></div><button onclick="coreRulesDashboard('${runId || ""}')">打开核心规则面板</button></div></section>${section("教师星级", catalog.ratings, "rating", `ratingDashboard('${runId || ""}')`)}${section("教师工资政策", catalog.policies, "policy", `policyDashboard('${runId || ""}')`)}<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>班型折算规则（旧入口）</h2><p class="muted">保留现有入口，历史版本继续可查；新的核心规则链请从上方七类面板维护。</p></div><button class="secondary" onclick="classTypeRulesPage('${runId || ""}')">查看与配置</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史兼容</p><h2>历史兼容规则（只读）</h2><p class="muted">仅供旧核算记录继续解释原结果；配置化核算请以上方“核心规则配置”为准。</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>规则</th><th>生效期</th><th>版本</th><th>来源</th></tr></thead><tbody>${rules}</tbody></table></div></section>`, false);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function coreRulesDashboard(returnRunId = "", correctionId = "") {
+  try {
+    const [core, ratePayload] = await Promise.all([api("/api/core-rules"), api("/api/part-time-rates")]);
+    const versions = core.versions || [];
+    const correction = versions.find((version) => version.id === correctionId);
+    const selectedRules = correction?.rules || core.seed || {};
+    coreRuleEditingBase = JSON.parse(JSON.stringify(selectedRules));
+    const rateVersions = versionList(ratePayload);
+    const sourceDefault = correction?.source || "";
+    const actorDefault = correction?.actor || "";
+    const bind = coreBindingControls(returnRunId, versions, rateVersions);
+    shell(`<section class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>核心规则面板（7 类）</h1><p class="muted">按真实字段逐项编辑；保存会创建不可变的新版本，不会覆盖历史 Run。</p></div><button class="secondary" onclick="${returnRunId ? `authorityDashboard('${returnRunId}')` : "authorityDashboard()"}">返回基础资料</button></section>${bind}<section class="card"><div class="section-head"><div><h2>已有核心规则版本</h2><p class="muted">点击“复制为新版本”后，在下方表格中修改。</p></div><span class="muted">${versions.length} 个版本</span></div><div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>来源</th><th>内容</th><th>审计信息</th><th></th></tr></thead><tbody>${coreVersionRows(versions, returnRunId) || '<tr><td colspan="6" class="muted">尚未保存核心规则版本。</td></tr>'}</tbody></table></div></section><section class="card"><h2>${correction ? "创建核心规则修正版" : "创建核心规则版本"}</h2><p class="muted">${correction ? `当前复制自 ${escapeHtml(correction.id)}；保存后旧版本仍保留。` : "请直接填写表格，不需要接触配置文件或代码。"}</p><div class="decision-form"><label>来源说明<input id="core-source" value="${escapeHtml(sourceDefault)}" placeholder="例如：2026 秋季规则确认"></label><label>操作人<input id="core-actor" value="${escapeHtml(actorDefault)}" placeholder="填写姓名"></label></div>${coreRulesEditor(selectedRules)}<div class="action-bar"><span class="muted small">保存只创建新版本；要用于某个 Run，需在上方显式绑定。</span><button onclick="saveCoreRules('${returnRunId}')">保存新核心规则版本</button></div></section><section class="core-rule-block core-rule-readonly"><div class="core-rule-block-head"><div><h3>个人政策</h3><p class="muted small">复用已有政策字段表单，明确填写 FULL_TIME/PART_TIME 和允许无课。</p></div><button class="secondary" onclick="policyDashboard('${returnRunId}')">管理个人政策</button></div><p class="core-rule-summary">个人政策单独版本化，保存时不会混入核心规则版本。</p></section><section class="core-rule-block core-rule-readonly"><div class="core-rule-block-head"><div><h3>兼职课次单价</h3><p class="muted small">复用独立单价版本，按教师 + 年级范围匹配，缺单价显示“缺资料”。</p></div><button class="secondary" onclick="partTimeRatesDashboard('${returnRunId}')">管理兼职单价</button></div><p class="core-rule-summary">兼职单价单独版本化，保存时不会混入核心规则版本。</p></section>`, false);
+  } catch (error) { showMessage(error.message); }
+}
+
+function addCoreCourseRule() { $("#core-course-editor")?.insertAdjacentHTML("beforeend", coreCourseRuleRow()); }
+function addCoreGradeRule() { $("#core-grade-editor")?.insertAdjacentHTML("beforeend", coreGradeRuleRow()); }
+function addCoreHeadcountRule() { $("#core-headcount-editor")?.insertAdjacentHTML("beforeend", coreHeadcountRow()); }
+function addCoreTierRule() { $("#core-tier-editor")?.insertAdjacentHTML("beforeend", coreTierRow()); }
+function addCoreStarRule() { $("#core-star-editor")?.insertAdjacentHTML("beforeend", coreStarRow()); }
+
+function editorRows(selector) { return [...document.querySelectorAll(`${selector} tr`)]; }
+function inputValue(row, selector) { return row.querySelector(selector)?.value.trim() || ""; }
+
+function collectCoreRules() {
+  const rules = JSON.parse(JSON.stringify(coreRuleEditingBase || {}));
+  const grade_coefficients = {};
+  const excluded_grades = [];
+  editorRows("#core-grade-editor").forEach((row) => {
+    const name = inputValue(row, ".core-grade-name");
+    if (!name) return;
+    if (inputValue(row, ".core-grade-kind") === "EXCLUDED") excluded_grades.push(name);
+    else grade_coefficients[name] = inputValue(row, ".core-grade-coefficient");
+  });
+  const course_rules = editorRows("#core-course-editor").map((row) => {
+    const treatment = inputValue(row, ".core-course-treatment");
+    const rule = { id: inputValue(row, ".core-course-id"), treatment, class_types: splitNames(inputValue(row, ".core-course-types")) };
+    if (treatment === "SPECIAL_FIXED") rule.coefficient = inputValue(row, ".core-course-coefficient");
+    return rule;
+  }).filter((rule) => rule.id || rule.class_types.length);
+  const small_group_headcount_coefficients = {};
+  editorRows("#core-headcount-editor").forEach((row) => {
+    const count = inputValue(row, ".core-headcount-count");
+    if (count) small_group_headcount_coefficients[count] = inputValue(row, ".core-headcount-coefficient");
+  });
+  const tiers = editorRows("#core-tier-editor").map((row) => ({
+    id: inputValue(row, ".core-tier-id"),
+    minimum: inputValue(row, ".core-tier-min"),
+    maximum: inputValue(row, ".core-tier-max") || null,
+    minimum_exclusive: Boolean(row.querySelector(".core-tier-exclusive")?.checked),
+    base: inputValue(row, ".core-tier-base"),
+  })).filter((tier) => tier.id);
+  const star_bonuses = {};
+  editorRows("#core-star-editor").forEach((row) => {
+    const star = inputValue(row, ".core-star-level");
+    if (star) star_bonuses[star] = inputValue(row, ".core-star-bonus");
+  });
+  const candidate = $("#core-af-default-enabled")?.checked ? {
+    obligation_hours: $("#core-af-obligation")?.value.trim() || "",
+    label: $("#core-af-label")?.value.trim() || "",
+    source: $("#core-af-source")?.value.trim() || "",
+  } : null;
+  rules.schema_version = coreRuleEditingBase.schema_version || "payroll-core-rules/v1";
+  rules.rule_version_id = coreRuleEditingBase.rule_version_id || "ui-new-version";
+  rules.effective_from = $("#core-effective-from")?.value || rules.effective_from || "";
+  rules.effective_to = $("#core-effective-to")?.value || rules.effective_to || "";
+  rules.source = $("#core-source")?.value.trim() || rules.source || "";
+  rules.lesson_hour_factor = $("#core-hour-factor")?.value.trim() || rules.lesson_hour_factor || "";
+  rules.grade_coefficients = grade_coefficients;
+  rules.excluded_grades = excluded_grades;
+  rules.course_rules = course_rules;
+  rules.small_group_headcount_coefficients = small_group_headcount_coefficients;
+  rules.ae = { ...(rules.ae || {}), tiers, star_bonuses };
+  rules.af = { ...(rules.af || {}) };
+  if (candidate) rules.af.default_policy_candidate = candidate;
+  else delete rules.af.default_policy_candidate;
+  return rules;
+}
+
+async function saveCoreRules(returnRunId = "") {
+  try {
+    const rules = collectCoreRules();
+    const payload = { rules, source: $("#core-source")?.value.trim() || "", actor: $("#core-actor")?.value.trim() || "" };
+    if (!payload.source || !payload.actor) throw new Error("请填写规则来源和操作人。");
+    const saved = await api("/api/core-rules", { method: "POST", body: JSON.stringify(payload) });
+    const savedId = versionList(saved)[0]?.id;
+    showMessage(`核心规则已保存为新版本${savedId ? `：${savedId}` : ""}。历史 Run 不会自动改变。`, "success");
+    await coreRulesDashboard(returnRunId);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function bindCoreRules(runId) {
+  const versionId = $("#core-version-bind")?.value;
+  if (!versionId) return showMessage("请选择核心规则版本。");
+  if (!window.confirm("确认将此核心规则版本绑定到当前 Run，并重新核算吗？历史结果不会被静默改写。")) return;
+  try {
+    const result = await api(`/api/runs/${runId}/core-rules`, { method: "POST", body: JSON.stringify({ version_id: versionId }) });
+    current = result.run || result;
+    if (!current.id) current = await api(`/api/runs/${runId}`);
+    tab = ["REVIEW_REQUIRED", "PASS"].includes(current.status) ? "overview" : "materials";
+    renderRun();
+    showMessage(`已显式绑定核心规则版本 ${versionId}，并完成重新核算。`, "success");
+  } catch (error) { showMessage(error.message); }
+}
+
+async function bindPartTimeRates(runId) {
+  const versionId = $("#part-time-version-bind")?.value;
+  if (!versionId) return showMessage("请选择兼职单价版本。");
+  if (!window.confirm("确认将此兼职单价版本绑定到当前 Run，并重新核算吗？历史结果不会被静默改写。")) return;
+  try {
+    const result = await api(`/api/runs/${runId}/part-time-rates`, { method: "POST", body: JSON.stringify({ version_id: versionId }) });
+    current = result.run || result;
+    if (!current.id) current = await api(`/api/runs/${runId}`);
+    tab = ["REVIEW_REQUIRED", "PASS"].includes(current.status) ? "overview" : "materials";
+    renderRun();
+    showMessage(`已显式绑定兼职单价版本 ${versionId}，并完成重新核算。`, "success");
   } catch (error) { showMessage(error.message); }
 }
 
@@ -104,17 +306,81 @@ async function policyDashboard(returnRunId = "", correctionId = "") {
   try {
     const versions = await api("/api/policies");
     const correction = versions.find(v => v.id === correctionId);
-    const rows = versions.flatMap((version) => version.profiles.map((profile) => `<tr><td>${escapeHtml(profile.teacher)}</td><td>${escapeHtml(profile.role)}</td><td>${profile.rating_override || profile.rating || "待确认"} 星</td><td>${profile.obligation_hours_deduction_enabled ? `${profile.obligation_hours} 小时，扣除` : "不扣除"}</td><td>${escapeHtml(profile.special_approval || "无")}</td><td>${escapeHtml(version.effective_from)} ～ ${escapeHtml(version.effective_to)}</td><td>${escapeHtml(version.status || "ACTIVE")}</td><td><button class="quiet" onclick="policyDashboard('${returnRunId}', '${version.id}')">创建修正版</button></td></tr>`));
-    const list = correction ? correction.profiles.map(x => `${x.teacher}，${x.role}，${x.rating || ""}，${x.rating_override || ""}，${x.obligation_hours || 0}，${x.obligation_hours_deduction_enabled ? "是" : "否"}，${x.special_approval || ""}`).join("\n") : "";
-    shell(`<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h1>教师工资政策档案</h1><p class="muted">身份、星级和义务课时待遇分别保存。相同身份可以有不同的有效政策。</p></div><button class="secondary" onclick="${returnRunId ? `authorityDashboard('${returnRunId}')` : "authorityDashboard()"}">返回基础资料</button></div><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>身份</th><th>星级</th><th>义务课时</th><th>特殊审批</th><th>生效期</th><th>状态</th><th></th></tr></thead><tbody>${rows.join("") || '<tr><td colspan="8" class="muted">尚未保存工资政策档案。</td></tr>'}</tbody></table></div></section><section class="card"><h2>${correction ? "创建政策修正版" : "保存政策版本"}</h2><p class="muted">每行填写：教师，身份，基础星级，特批星级，义务小时，是否扣除，特殊审批。特批星级留空即可。修正版不会覆盖旧版本。</p><input id="policy-supersedes" type="hidden" value="${escapeHtml(correction?.id || "")}"><div class="decision-form"><label>生效开始<input id="policy-from" type="month" value="${escapeHtml(correction?.effective_from || "")}"></label><label>生效结束<input id="policy-to" type="month" value="${escapeHtml(correction?.effective_to || "")}"></label><label class="wide">数据来源<input id="policy-source" value="${escapeHtml(correction?.source || "")}" placeholder="例如：年度工资政策确认"></label><label class="wide">政策档案<textarea id="policy-list" placeholder="教师甲，TRMT，4，4，30，是，保留四星待遇">${escapeHtml(list)}</textarea></label></div><div class="action-bar"><span class="muted small">保存不会修改工资表，也不会自动改变历史 Run。</span><button onclick="savePolicies('${returnRunId}')">保存政策版本</button></div></section>`, false);
+    const rows = versions.flatMap((version) => version.profiles.map((profile) => `<tr><td>${escapeHtml(profile.teacher)}</td><td>${escapeHtml(profile.role)}</td><td>${escapeHtml(profile.employment_type || "FULL_TIME")}</td><td>${profile.allow_no_teaching ? "是" : "否"}</td><td>${profile.rating_override || profile.rating || "待确认"} 星</td><td>${profile.obligation_hours_deduction_enabled ? `${profile.obligation_hours} 小时，扣除` : "不扣除"}</td><td>${escapeHtml(profile.special_approval || "无")}</td><td>${escapeHtml(version.effective_from)} ～ ${escapeHtml(version.effective_to)}</td><td>${escapeHtml(version.status || "ACTIVE")}</td><td><button class="quiet" onclick="policyDashboard('${returnRunId}', '${version.id}')">创建修正版</button></td></tr>`));
+    policyProfileRows = correction?.profiles ? JSON.parse(JSON.stringify(correction.profiles)) : [{}];
+    shell(`<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h1>教师工资政策档案</h1><p class="muted">逐人明确全职/兼职、个人义务课时和是否允许管理岗当月无课；不会根据岗位文字自动猜测。</p></div><button class="secondary" onclick="${returnRunId ? `authorityDashboard('${returnRunId}')` : "authorityDashboard()"}">返回基础资料</button></div><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>身份</th><th>用工类型</th><th>允许无课</th><th>星级</th><th>义务课时</th><th>特殊审批</th><th>生效期</th><th>状态</th><th></th></tr></thead><tbody>${rows.join("") || '<tr><td colspan="10" class="muted">尚未保存工资政策档案。</td></tr>'}</tbody></table></div></section><section class="card"><h2>${correction ? "创建政策修正版" : "保存政策版本"}</h2><p class="muted">每位教师一行。允许无课必须显式勾选；旧档案未填写时仍按“全职 / 不允许”显示。</p><input id="policy-supersedes" type="hidden" value="${escapeHtml(correction?.id || "")}"><div class="decision-form"><label>生效开始<input id="policy-from" type="month" value="${escapeHtml(correction?.effective_from || "")}"></label><label>生效结束<input id="policy-to" type="month" value="${escapeHtml(correction?.effective_to || "")}"></label><label class="wide">数据来源<input id="policy-source" value="${escapeHtml(correction?.source || "")}" placeholder="例如：年度工资政策确认"></label></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>教师</th><th>身份</th><th>用工类型</th><th>允许无课</th><th>基础星级</th><th>特批星级</th><th>义务小时</th><th>扣除义务小时</th><th>特殊审批</th><th></th></tr></thead><tbody id="policy-profile-editor">${policyProfileRows.map(policyProfileEditorRow).join("")}</tbody></table></div><div class="action-bar"><button type="button" class="secondary" onclick="addPolicyProfileRow()">新增教师</button><span class="muted small">保存不会修改工资表，也不会自动改变历史 Run。</span><button onclick="savePolicies('${returnRunId}')">保存政策版本</button></div></section>`, false);
   } catch (error) { showMessage(error.message); }
+}
+
+function policyProfileEditorRow(profile = {}) {
+  const employment = profile.employment_type || "FULL_TIME";
+  return `<tr><td><input class="policy-teacher" value="${escapeHtml(profile.teacher || "")}" placeholder="教师姓名"></td><td><input class="policy-role" value="${escapeHtml(profile.role || "")}" placeholder="例如 教师/管理岗"></td><td><select class="policy-employment">${option("FULL_TIME", employment, "全职")}${option("PART_TIME", employment, "兼职")}</select></td><td><label class="inline-check"><input class="policy-no-teaching" type="checkbox" ${profile.allow_no_teaching ? "checked" : ""}>允许</label></td><td><input class="policy-rating" type="number" min="1" max="6" step="1" value="${escapeHtml(profile.rating ?? "")}"></td><td><input class="policy-rating-override" type="number" min="1" max="6" step="1" value="${escapeHtml(profile.rating_override ?? "")}" placeholder="可空"></td><td><input class="policy-obligation" type="number" min="0" step="0.01" value="${escapeHtml(profile.obligation_hours ?? 0)}"></td><td><label class="inline-check"><input class="policy-deduct" type="checkbox" ${profile.obligation_hours_deduction_enabled ? "checked" : ""}>扣除</label></td><td><input class="policy-approval" value="${escapeHtml(profile.special_approval || "")}" placeholder="可空"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+}
+
+function addPolicyProfileRow() { $("#policy-profile-editor")?.insertAdjacentHTML("beforeend", policyProfileEditorRow()); }
+
+function collectPolicyProfiles() {
+  return editorRows("#policy-profile-editor").map((row) => ({
+    teacher: inputValue(row, ".policy-teacher"),
+    role: inputValue(row, ".policy-role"),
+    employment_type: inputValue(row, ".policy-employment") || "FULL_TIME",
+    allow_no_teaching: Boolean(row.querySelector(".policy-no-teaching")?.checked),
+    rating: inputValue(row, ".policy-rating") ? Number(inputValue(row, ".policy-rating")) : null,
+    rating_override: inputValue(row, ".policy-rating-override") ? Number(inputValue(row, ".policy-rating-override")) : null,
+    obligation_hours: Number(inputValue(row, ".policy-obligation") || 0),
+    obligation_hours_deduction_enabled: Boolean(row.querySelector(".policy-deduct")?.checked),
+    special_approval: inputValue(row, ".policy-approval"),
+  })).filter((profile) => profile.teacher || profile.role);
 }
 
 async function savePolicies(returnRunId = "") {
   try {
-    const profiles = $("#policy-list").value.split(/\n+/).filter(Boolean).map((line) => { const values = line.split(/[，,]/).map((item) => item.trim()); const [teacher, role, rating, fourth, fifth, sixth, seventh] = values; const modern = values.length >= 7; return { teacher, role, rating: Number(rating) || null, rating_override: modern ? (Number(fourth) || null) : null, obligation_hours: Number(modern ? fifth : fourth) || 0, obligation_hours_deduction_enabled: ["是", "true", "1"].includes(String(modern ? sixth : fifth).toLowerCase()), special_approval: (modern ? seventh : sixth) || "" }; });
+    const profiles = collectPolicyProfiles();
+    if (!profiles.length) throw new Error("请至少填写一位教师的政策。");
     await api("/api/policies", { method: "POST", body: JSON.stringify({ effective_from: $("#policy-from").value, effective_to: $("#policy-to").value, source: $("#policy-source").value, profiles, supersedes_version_id: $("#policy-supersedes").value || null }) });
     showMessage("工资政策版本已保存。若要用于当前核算，请在“当前核对依据”中主动切换。", "success"); await policyDashboard(returnRunId);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function partTimeRatesDashboard(returnRunId = "", correctionId = "") {
+  try {
+    const payload = await api("/api/part-time-rates");
+    const versions = versionList(payload);
+    const correction = versions.find((version) => version.id === correctionId);
+    partTimeRateRows = correction?.profiles ? JSON.parse(JSON.stringify(correction.profiles)) : [{ teacher: "", grade_scope: "", rate_per_session: "" }];
+    const rows = versions.flatMap((version) => (version.profiles || []).map((profile) => `<tr><td>${escapeHtml(profile.teacher)}</td><td>${escapeHtml(profile.grade_scope || "全部年级")}</td><td>${escapeHtml(profile.rate_per_session)}</td><td>${escapeHtml(version.effective_from || "—")} ～ ${escapeHtml(version.effective_to || "持续")}</td><td>${escapeHtml(version.source || "—")}</td><td>${escapeHtml(version.actor || "—")}</td><td><button class="quiet" onclick="partTimeRatesDashboard('${returnRunId}', '${escapeHtml(version.id)}')">创建修正版</button></td></tr>`));
+    shell(`<section class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>兼职课次单价</h1><p class="muted">兼职不走 AA/AC/AD/AE/AF 全职链路；按教师、年级范围和每课次单价计算“兼职按节课时费”，缺单价时显示“缺资料”。</p></div><button class="secondary" onclick="coreRulesDashboard('${returnRunId}')">返回核心规则面板</button></section>${returnRunId ? `<section class="card rebind-card"><h2>当前核算的兼职版本</h2><p class="muted">需要切换时请返回核心规则面板并显式选择版本。</p></section>` : ""}<section class="card"><div class="section-head"><div><h2>已有单价版本</h2><p class="muted">旧版本保留；同一核算月份有多个版本时由你显式选择。</p></div><span class="muted">${versions.length} 个版本</span></div><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>年级范围</th><th>每课次单价</th><th>生效期</th><th>来源</th><th>操作人</th><th></th></tr></thead><tbody>${rows.join("") || '<tr><td colspan="7" class="muted">尚未保存兼职单价版本。</td></tr>'}</tbody></table></div></section><section class="card"><h2>${correction ? "创建兼职单价修正版" : "保存兼职单价版本"}</h2><p class="muted">${correction ? `当前复制自 ${escapeHtml(correction.id)}；保存会新建版本，不会覆盖旧版本。` : "每位教师和年级范围各填一行。"}</p><div class="decision-form"><label>生效开始<input id="part-time-from" type="month" value="${escapeHtml(correction?.effective_from || "")}"></label><label>生效结束<input id="part-time-to" type="month" value="${escapeHtml(correction?.effective_to || "")}"></label><label>数据来源<input id="part-time-source" value="${escapeHtml(correction?.source || "")}" placeholder="例如：2026-09 兼职确认表"></label><label>操作人<input id="part-time-actor" value="${escapeHtml(correction?.actor || "")}" placeholder="填写姓名"></label></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>教师</th><th>年级范围</th><th>每课次单价</th><th></th></tr></thead><tbody id="part-time-rate-editor">${partTimeRateRows.map(partTimeRateEditorRow).join("")}</tbody></table></div><div class="action-bar"><button type="button" class="secondary" onclick="addPartTimeRateRow()">新增一行</button><span class="muted small">保存不会修改工资表，也不会自动改变历史 Run。</span><button onclick="savePartTimeRates('${returnRunId}')">保存兼职单价版本</button></div></section>`, false);
+  } catch (error) { showMessage(error.message); }
+}
+
+function partTimeRateEditorRow(profile = {}) {
+  return `<tr><td><input class="part-time-teacher" value="${escapeHtml(profile.teacher || "")}" placeholder="教师姓名"></td><td><input class="part-time-grade" value="${escapeHtml(profile.grade_scope || "*")}" placeholder="例如 七年级；全部年级填 *"></td><td><input class="part-time-rate" type="number" min="0" step="0.01" value="${escapeHtml(profile.rate_per_session ?? "")}" placeholder="元/课次"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+}
+
+function addPartTimeRateRow() {
+  $("#part-time-rate-editor")?.insertAdjacentHTML("beforeend", partTimeRateEditorRow());
+}
+
+function collectPartTimeProfiles() {
+  return [...document.querySelectorAll("#part-time-rate-editor tr")].map((row) => {
+    const teacher = inputValue(row, ".part-time-teacher");
+    const grade_scope = inputValue(row, ".part-time-grade");
+    const rateText = inputValue(row, ".part-time-rate");
+    if (!teacher && !grade_scope && !rateText) return null;
+    if (!teacher || !grade_scope || rateText === "") throw new Error("兼职单价每行都要填写教师、年级范围和单价。");
+    return { teacher, grade_scope, rate_per_session: Number(rateText) };
+  }).filter(Boolean);
+}
+
+async function savePartTimeRates(returnRunId = "") {
+  try {
+    const profiles = collectPartTimeProfiles();
+    const payload = { profiles, source: $("#part-time-source")?.value.trim() || "", effective_from: $("#part-time-from")?.value || "", effective_to: $("#part-time-to")?.value || "", actor: $("#part-time-actor")?.value.trim() || "" };
+    if (!profiles.length || !payload.source || !payload.effective_from || !payload.effective_to || !payload.actor) throw new Error("请填写兼职单价、来源、生效月份和操作人。");
+    const saved = await api("/api/part-time-rates", { method: "POST", body: JSON.stringify(payload) });
+    const savedId = versionList(saved)[0]?.id;
+    showMessage(`兼职单价已保存为新版本${savedId ? `：${savedId}` : ""}。历史 Run 不会自动改变。`, "success");
+    await partTimeRatesDashboard(returnRunId);
   } catch (error) { showMessage(error.message); }
 }
 
@@ -185,7 +451,9 @@ function authoritySummary() {
     const detail = [item.source, item.effective_period, item.name && item.name !== "尚未绑定" ? `版本：${item.name}` : ""].filter(Boolean).join(" · ");
     return `<div><strong>${title}</strong><span>${escapeHtml(detail || item.name || "尚未绑定")}</span></div>`;
   };
-  return `<details class="authority-summary"><summary>当前核对依据</summary><div class="facts">${fact("schedule", "排课权威源")}${fact("rating", "星级权威版本")}${fact("policy", "教师政策版本")}${fact("rules", "工资规则版本")}</div><div class="action-bar"><span class="muted small">发现基础资料录入错误时，请创建修正版；旧版本与历史 Run 会继续保留。</span><button class="secondary" onclick="authorityDashboard('${current.id}')">查看、修正或改用版本</button></div></details>`;
+  const extra = context.core_rules || context.part_time_rates ? `${context.core_rules ? fact("core_rules", "核心规则版本") : ""}${context.part_time_rates ? fact("part_time_rates", "兼职单价版本") : ""}` : "";
+  const legacyRuleLabel = current.calculation_engine === "CONFIGURED_V1" ? "历史兼容规则" : "工资规则版本";
+  return `<details class="authority-summary"><summary>当前核对依据</summary><div class="facts">${fact("schedule", "排课权威源")}${fact("rating", "星级权威版本")}${fact("policy", "教师政策版本")}${fact("rules", legacyRuleLabel)}${extra}</div><div class="action-bar"><span class="muted small">发现基础资料录入错误时，请创建修正版；旧版本与历史 Run 会继续保留。</span><button class="secondary" onclick="authorityDashboard('${current.id}')">查看、修正或改用版本</button></div></details>`;
 }
 
 function setTab(next) { tab = next; renderRun(); }
@@ -211,10 +479,30 @@ function materialCard(material) {
   return `<article class="material-card ${material.state === "失效" ? "stale" : ""}"><div class="material-top"><strong>${escapeHtml(copy[0])}</strong><span class="${stateClass}">${stateText}</span></div><p class="small muted">${escapeHtml(copy[2])}</p>${file ? `<div class="file-name">${escapeHtml(file.name)}</div><div class="facts"><span>${file.records} 条记录</span><span>${file.teachers} 名教师</span></div>${risk.length ? `<p class="small warn">⚠ ${risk.join("；")}</p>` : ""}<details><summary>查看文件信息</summary><p class="small muted">工作表：${file.sheets.map(escapeHtml).join("、")}<br>文件标识：${file.sha256.slice(0, 10)}</p></details>` : '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" onclick="choose('${material.role}')">${escapeHtml(copy[1])}</button></article>`;
 }
 
+function coreCalculationCell(field) {
+  if (!field || typeof field !== "object") return `<div class="core-result-cell"><strong>${escapeHtml(field ?? "—")}</strong></div>`;
+  const state = String(field.state || "NEEDS_INPUT").toUpperCase();
+  const label = coreStateLabels[state] || escapeHtml(field.state || "缺资料");
+  const className = state === "DETERMINED" ? "determined" : state === "ESTIMATED" ? "estimated" : state === "NOT_APPLICABLE" ? "not-applicable" : "needs-input";
+  const evidence = Array.isArray(field.evidence) && field.evidence.length ? `<details><summary>依据</summary><div class="small muted">${field.evidence.map((item) => escapeHtml(typeof item === "object" ? Object.values(item).join(" · ") : item)).join("<br>")}</div></details>` : "";
+  return `<div class="core-result-cell ${className}"><strong>${escapeHtml(field.value ?? "—")}</strong><span>${label}</span><small>${escapeHtml(field.reason || "")}</small>${evidence}</div>`;
+}
+
+function coreCalculationSection() {
+  const calculation = current.core_calculation;
+  const rows = calculation?.rows || [];
+  if (!rows.length) return "";
+  const fieldKey = (row, key) => row.fields?.[key] || row.fields?.[key.toLowerCase()] || row[key] || null;
+  const rendered = rows.map((row) => `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong></td><td>${coreCalculationCell(fieldKey(row, "AA"))}</td><td>${coreCalculationCell(fieldKey(row, "AC"))}</td><td>${coreCalculationCell(fieldKey(row, "AD"))}</td><td>${coreCalculationCell(fieldKey(row, "AE"))}</td><td>${coreCalculationCell(fieldKey(row, "AF"))}</td><td>${coreCalculationCell(fieldKey(row, "PART_TIME"))}</td></tr>`).join("");
+  const versionNote = [current.core_rule_version_id ? `核心规则 ${current.core_rule_version_id}` : "", current.part_time_rate_version_id ? `兼职单价 ${current.part_time_rate_version_id}` : ""].filter(Boolean).join(" · ");
+  return `<section class="card core-calculation-card"><div class="section-head"><div><p class="eyebrow">核心计算结果</p><h2>每位教师的核心字段</h2><p class="muted">状态为“估算”“缺资料”或“不适用”的项目不会冒充全薪通过。${escapeHtml(versionNote)}</p></div></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>兼职按节课时费</th></tr></thead><tbody>${rendered}</tbody></table></div></section>`;
+}
+
 function overviewPage() {
   const summary = current.summary || {};
   const headline = summary.automatic_pass ? "排课项目核对完成" : "排课项目仍有问题";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">核对结果</p><h2>${headline}</h2><p class="muted">整份工资仍包含需要上游数据或人工确认的项目。</p></div><button class="secondary" onclick="downloadReport()">导出核对报告</button></div><div class="metric-grid"><div class="metric"><span>排课项目完成度</span><strong>${summary.automatic_coverage ?? 0}%</strong><small>${summary.automatic_completed ?? 0} / ${summary.automatic_required ?? 0} 项</small></div><div class="metric"><span>未说明的差异</span><strong>${summary.unexplained ?? 0}</strong><small>必须处理</small></div><div class="metric"><span>需要人工确认</span><strong>${summary.manual_review ?? 0}</strong><small>不能自动判断</small></div></div><h3>每个项目实际检查到哪一步</h3><div class="table-wrap"><table class="table scope"><thead><tr><th>项目</th><th>读取工资表</th><th>可靠原始依据</th><th>重新计算</th><th>与工资表比较</th><th>当前结论</th></tr></thead><tbody>${current.field_status.map(fieldRow).join("")}</tbody></table></div><div class="banner info"><strong>检查范围说明</strong><span>星级、档位和课时费政策会按已有资料核对；AD 仍来自工资表目标自身，尚未形成独立闭环。</span></div><div class="action-bar"><div>${summary.automatic_pass ? "AA、AC 没有待处理项。" : "请先处理异常中心中的问题。"}</div><div><button class="secondary" onclick="setTab('issues')">查看待处理问题</button><button onclick="recheck()">重新核对全部材料</button></div></div></section>`;
+  const scopeNote = current.calculation_engine === "CONFIGURED_V1" ? (summary.scope_note || "配置化核心结果按当前 Run 绑定版本计算。") : "星级、档位和课时费政策会按已有资料核对；AD 仍来自工资表目标自身，尚未形成独立闭环。";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">核对结果</p><h2>${headline}</h2><p class="muted">整份工资仍包含需要上游数据或人工确认的项目。</p></div><button class="secondary" onclick="downloadReport()">导出核对报告</button></div><div class="metric-grid"><div class="metric"><span>排课项目完成度</span><strong>${summary.automatic_coverage ?? 0}%</strong><small>${summary.automatic_completed ?? 0} / ${summary.automatic_required ?? 0} 项</small></div><div class="metric"><span>未说明的差异</span><strong>${summary.unexplained ?? 0}</strong><small>必须处理</small></div><div class="metric"><span>需要人工确认</span><strong>${summary.manual_review ?? 0}</strong><small>不能自动判断</small></div></div><h3>每个项目实际检查到哪一步</h3><div class="table-wrap"><table class="table scope"><thead><tr><th>项目</th><th>读取工资表</th><th>可靠原始依据</th><th>重新计算</th><th>与工资表比较</th><th>当前结论</th></tr></thead><tbody>${current.field_status.map(fieldRow).join("")}</tbody></table></div><div class="banner info"><strong>检查范围说明</strong><span>${escapeHtml(scopeNote)}</span></div><div class="action-bar"><div>${summary.automatic_pass ? "AA、AC 没有待处理项。" : "请先处理异常中心中的问题。"}</div><div><button class="secondary" onclick="setTab('issues')">查看待处理问题</button><button onclick="recheck()">重新核对全部材料</button></div></div></section>${coreCalculationSection()}`;
 }
 
 function fieldRow(field) {

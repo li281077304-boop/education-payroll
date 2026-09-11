@@ -108,6 +108,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.authority_catalog())
             if parsed.path == "/api/class-type-rules":
                 return self._json(self.server.service.class_type_rule_versions())
+            if parsed.path == "/api/core-rules":
+                return self._json(self.server.service.core_rule_catalog())
+            if parsed.path == "/api/part-time-rates":
+                return self._json(self.server.service.part_time_rate_versions())
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/export.csv"):
                 run_id = parsed.path.split("/")[3]
                 body = self.server.service.export_csv(run_id).encode("utf-8-sig")
@@ -152,6 +156,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             payload = self._payload(); path = urlparse(self.path).path
             if path == "/api/runs":
                 return self._json(self.server.service.create(str(payload.get("period", "")), str(payload.get("mode", "AUDIT"))), HTTPStatus.CREATED)
+            if path == "/api/core-rules":
+                return self._json(self.server.service.save_core_rule_version(payload.get("rules", {}), str(payload.get("source", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)
+            if path == "/api/part-time-rates":
+                return self._json(self.server.service.save_part_time_rate_version(payload.get("profiles", []), str(payload.get("source", "")), str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)
             if path == "/api/class-type-rules":
                 return self._json(self.server.service.save_class_type_rule_version(
                     effective_from=str(payload.get("effective_from", "")), effective_to=str(payload.get("effective_to", "")),
@@ -188,6 +196,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             bits = path.strip("/").split("/")
             if len(bits) >= 4 and bits[:2] == ["api", "runs"]:
                 run_id, action = bits[2], bits[3]
+                if action in {"core-rules", "part-time-rates"}:
+                    return self._json(self.server.service.rebind_calculation(run_id, "core" if action == "core-rules" else "part_time", str(payload.get("version_id", ""))))
                 if action == "files":
                     return self._json(self.server.service.import_file(run_id, str(payload.get("role", "")), str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
                 if action == "check":
