@@ -2,7 +2,14 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from payroll_core.grade_inference import CourseExportSnapshot, StudentGradeEvidence, course_export_grade_override, infer_historical_grade, remove_export_pollution
+from payroll_core.grade_inference import (
+    CourseExportSnapshot,
+    StudentGradeEvidence,
+    course_export_grade_override,
+    detect_same_name_ambiguous_students,
+    infer_historical_grade,
+    remove_export_pollution,
+)
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_ui.service import PayrollService
 
@@ -539,3 +546,75 @@ def test_course_export_snapshot_requires_exact_one_step_and_pre_boundary_date():
         teacher="教师甲", subject="物理", lesson_date="2026-09-25", lesson_time="2026-09-25 17:30",
         current_grade="高三", current_source_file="schedule_202609011519.xlsx", snapshots=[after_boundary],
     ) is None
+
+
+def _ambiguous_track_evidence() -> list[StudentGradeEvidence]:
+    return [
+        StudentGradeEvidence(
+            "重名学生", "2026-08-15", "八年级", "pan.xlsx", "pan", "课表", "A2",
+            teacher="教师甲", subject="物理", lesson_start_time="13:20", class_type="1对1",
+        ),
+        StudentGradeEvidence(
+            "重名学生", "2026-08-15", "高二", "zhang.xlsx", "zhang", "课表", "A3",
+            teacher="教师乙", subject="物理", lesson_start_time="13:20", class_type="小班",
+        ),
+    ]
+
+
+def test_same_name_overlapping_attended_courses_is_ambiguous():
+    evidence = _ambiguous_track_evidence()
+    assert detect_same_name_ambiguous_students(evidence) == frozenset({"重名学生"})
+
+
+def test_same_name_at_different_times_is_not_ambiguous():
+    first, second = _ambiguous_track_evidence()
+    second = StudentGradeEvidence(**{**second.__dict__, "lesson_start_time": "15:20"})
+    assert detect_same_name_ambiguous_students([first, second]) == frozenset()
+
+
+def test_same_course_different_exports_are_not_ambiguous():
+    first = CourseExportSnapshot(
+        lesson_date="2026-08-15", lesson_start_time="13:20", teacher="教师甲", subject="物理",
+        class_name="八年级小班", parsed_grade="八年级", lesson_status="已上课", attended=1,
+        teaching_form="小班", source_file="schedule-a.xlsx", student="重名学生",
+    )
+    second = CourseExportSnapshot(**{**first.__dict__, "source_file": "schedule-b.xlsx", "parsed_grade": "九年级"})
+    assert detect_same_name_ambiguous_students([first, second]) == frozenset()
+
+
+def test_ambiguous_name_grade_evidence_is_scoped_to_current_course_context():
+    history = _ambiguous_track_evidence()
+    ambiguous = detect_same_name_ambiguous_students(history)
+    from payroll_core.excel.common import resolve_schedule_grade
+    pan = resolve_schedule_grade(
+        "赠送课程", "重名学生", period="2026-08", class_type="1对1", course_subject="物理",
+        course_teacher="教师甲", historical_evidence=history, ambiguous_students=ambiguous,
+    )
+    zhang = resolve_schedule_grade(
+        "赠送课程", "重名学生", period="2026-08", class_type="小班", course_subject="物理",
+        course_teacher="教师乙", historical_evidence=history, ambiguous_students=ambiguous,
+    )
+    assert pan[0] == "八年级"
+    assert zhang[0] == "高二"
+
+
+def test_current_schedule_context_separates_ambiguous_name_tracks(tmp_path):
+    schedule = _schedule_workbook(tmp_path / "current.xlsx", [
+        {"上课班级": "赠送课程", "教学形式": "一对一", "上课时间": "2026-08-15 13:20", "上课状态": "已上课", "实到": 1, "上课学员": "重名学生", "上课科目": "物理", "任课老师": "教师甲"},
+        {"上课班级": "赠送课程", "教学形式": "集体班", "上课时间": "2026-08-15 13:20", "上课状态": "已上课", "实到": 2, "上课学员": "重名学生,同班学生", "上课科目": "物理", "任课老师": "教师乙"},
+    ])
+    history = _ambiguous_track_evidence() + [StudentGradeEvidence(
+        "同班学生", "2026-08-10", "高二", "zhang-history.xlsx", "zhang-history", "课表", "A4",
+        teacher="教师乙", subject="物理", lesson_start_time="13:20", class_type="小班",
+    )]
+    result = read_schedule_excel(schedule, "2026-08", historical_grade_evidence=history)
+    assert [row.grade for row in result.records] == ["八年级", "高二"]
+
+
+def test_current_payroll_import_saves_snapshot_but_not_student_grade_fact(tmp_path):
+    service = PayrollService(tmp_path / "local")
+    run = service.create("2026-08", "GENERATE")
+    schedule = _gift_workbook(tmp_path / "current.xlsx", "八年级数学", "重名学生")
+    service.import_file(run["id"], "schedule", str(schedule))
+    assert service.store.list_student_grade_evidence() == []
+    assert service.store.list_course_export_snapshots()

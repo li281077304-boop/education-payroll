@@ -6,7 +6,16 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..models.evidence import CellValueState, SourceEvidence
-from ..grade_inference import NATURAL_GRADE_LADDER, GradeInference, StudentGradeEvidence, infer_historical_grade, remove_export_pollution, split_student_names
+from ..grade_inference import (
+    NATURAL_GRADE_LADDER,
+    GradeInference,
+    StudentGradeEvidence,
+    detect_same_name_ambiguous_students,
+    infer_historical_grade,
+    remove_export_pollution,
+    scope_grade_evidence_for_course,
+    split_student_names,
+)
 
 
 # “一对多” does not tell us whether the approved special treatment is 1对2
@@ -198,6 +207,8 @@ def resolve_schedule_grade(
     course_export_reason: str = "",
     class_type: str = "",
     course_subject: str = "",
+    course_teacher: str = "",
+    ambiguous_students: Iterable[str] = (),
 ) -> tuple[str, str, str]:
     """Resolve one grade with an auditable authority order.
 
@@ -211,9 +222,18 @@ def resolve_schedule_grade(
     direct = normalize_grade(direct_grade) or grade_from_class_name(class_name)
 
     names = split_student_names(student)
+    ambiguous = frozenset(ambiguous_students) or detect_same_name_ambiguous_students((*manual_evidence, *historical_evidence))
+    scoped_manual = scope_grade_evidence_for_course(
+        manual_evidence, teacher=course_teacher, subject=course_subject,
+        class_type=class_type, ambiguous_students=ambiguous,
+    )
+    scoped_history = scope_grade_evidence_for_course(
+        historical_evidence, teacher=course_teacher, subject=course_subject,
+        class_type=class_type, ambiguous_students=ambiguous,
+    )
     allow_partial_roster = _is_ordinary_single_grade_k12(class_name, direct, class_type)
     name = "" if student is None else str(student).strip()
-    confirmed = _infer_roster_grade(names, period, manual_evidence, recent_history_only=False, course_date=course_date, allow_partial=allow_partial_roster)
+    confirmed = _infer_roster_grade(names, period, scoped_manual, recent_history_only=False, course_date=course_date, allow_partial=allow_partial_roster)
     if confirmed.grade:
         reason = confirmed.reason
         if direct and direct != confirmed.grade:
@@ -234,7 +254,7 @@ def resolve_schedule_grade(
     if course_export_grade:
         return course_export_grade, "COURSE_EXPORT_SNAPSHOT", course_export_reason
 
-    relevant_history = _course_relevant_grade_evidence(historical_evidence, course_subject)
+    relevant_history = _course_relevant_grade_evidence(scoped_history, course_subject)
     inferred = _infer_roster_grade(names, period, relevant_history, course_date=course_date, allow_partial=allow_partial_roster)
     if inferred.grade:
         reason = inferred.reason

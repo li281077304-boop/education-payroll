@@ -19,9 +19,12 @@ from .common import (
 from .inspect import detect_fingerprint, load_workbook_pair
 from ..grade_inference import (
     CourseExportSnapshot,
+    StudentCourseContext,
     StudentGradeEvidence,
     course_export_grade_override,
     course_export_snapshot_index,
+    detect_same_name_ambiguous_students,
+    split_student_names,
 )
 
 
@@ -56,6 +59,39 @@ def read_schedule_excel(
     columns = header_map(sheet, [header_row])
     source_file = str(path)
     snapshot_index = course_export_snapshot_index(course_export_snapshots)
+    current_contexts: list[StudentCourseContext] = []
+    # Detect strong same-name collisions from the whole current workbook
+    # before resolving any individual row.  This is ephemeral context only;
+    # the current payroll source is never persisted as student history.
+    for row in range(header_row + 1, sheet.max_row + 1):
+        teacher_value = sheet.cell(row, columns["任课老师"]).value
+        if teacher_value is None or not str(teacher_value).strip():
+            continue
+        status = str(sheet.cell(row, columns["上课状态"]).value or "").strip()
+        attended_value = as_float(sheet.cell(row, columns["实到"]).value)
+        if status != "已上课" or attended_value is None or attended_value <= 0:
+            continue
+        lesson_time = sheet.cell(row, columns["上课时间"]).value
+        lesson_date = date_from_time(lesson_time)
+        if _is_period(period) and lesson_date and not lesson_date.startswith(period):
+            continue
+        class_name = sheet.cell(row, columns["上课班级"]).value
+        course_name = sheet.cell(row, columns.get("上课课程", columns["上课班级"])).value
+        subject = subject_from_source(sheet.cell(row, columns["上课科目"]).value)
+        class_type = normalize_schedule_class_type(
+            sheet.cell(row, columns["教学形式"]).value, class_name, course_name,
+        )
+        for student in split_student_names(sheet.cell(row, columns["上课学员"]).value):
+            current_contexts.append(StudentCourseContext(
+                student=student, lesson_date=lesson_date,
+                lesson_start_time=str(lesson_time or ""),
+                teacher=str(teacher_value).strip(), subject=subject,
+                class_type=class_type, attended=int(attended_value),
+                lesson_status=status, source_file=source_file,
+            ))
+    ambiguous_students = detect_same_name_ambiguous_students(
+        (*course_export_snapshots, *manual_grade_evidence, *historical_grade_evidence, *current_contexts)
+    )
     unknown_grades = 0
     missing_attendance = out_of_period = 0
     for row in range(header_row + 1, sheet.max_row + 1):
@@ -114,6 +150,8 @@ def read_schedule_excel(
             course_export_reason=snapshot_override[1] if snapshot_override else "",
             class_type=class_type,
             course_subject=subject,
+            course_teacher=str(evidence["teacher"].normalized_value or "").strip(),
+            ambiguous_students=ambiguous_students,
         )
         if not grade:
             unknown_grades += 1

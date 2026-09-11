@@ -784,11 +784,9 @@ class PayrollService(CoreFlow):
         if not unchanged:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
         if role == "schedule":
-            # Persist only direct, dated facts after the stable read check.  A
-            # later gift/exchange course can use these facts without needing a
-            # user-maintained student-grade workbook.
+            # Persist only course-version snapshots here.  The current payroll
+            # source must not become student history used to justify itself.
             self._save_course_export_snapshots(result.records, before)
-            self._save_direct_grade_evidence(result.records, before)
         if mapping and profile_name:
             # Remember the confirmed layout so next month's identical file imports
             # without asking again. Drift is still re-checked on every import.
@@ -1737,7 +1735,7 @@ class PayrollService(CoreFlow):
                     source_file=str(item.get("source_file", "")), source_hash=str(item.get("source_hash", "")),
                     sheet=str(item.get("sheet", "")), coordinate=str(item.get("coordinate", "")), origin=str(item.get("origin", "")),
                     confirmed_by=str(item.get("confirmed_by", "")), note=str(item.get("note", "")), exported_at=str(item.get("exported_at", "")),
-                    teacher=str(item.get("teacher", "")), subject=str(item.get("subject", "")), lesson_start_time=str(item.get("lesson_start_time", "")),
+                    teacher=str(item.get("teacher", "")), subject=str(item.get("subject", "")), lesson_start_time=str(item.get("lesson_start_time", "")), class_type=str(item.get("class_type", "")),
                 )
             except (TypeError, ValueError):
                 continue
@@ -1846,12 +1844,12 @@ class PayrollService(CoreFlow):
                     "id": identifier, "student": student, "lesson_date": record.lesson_date, "grade": record.grade,
                     "origin": "HISTORICAL_SCHEDULE", "source_file": record.source, "source_hash": source["sha256"],
                     "sheet": sheet, "coordinate": coordinate, "confirmed_by": "", "note": "源课表直接年级。",
-                    "teacher": record.teacher, "subject": record.subject, "lesson_start_time": normalize_lesson_start_time(record.lesson_time),
+                    "teacher": record.teacher, "subject": record.subject, "lesson_start_time": normalize_lesson_start_time(record.lesson_time), "class_type": record.class_type,
                 }
                 candidates.append((item, StudentGradeEvidence(
                     student=student, lesson_date=record.lesson_date, grade=record.grade,
                     source_file=record.source, source_hash=source["sha256"], sheet=sheet, coordinate=coordinate,
-                    teacher=record.teacher, subject=record.subject, lesson_start_time=normalize_lesson_start_time(record.lesson_time),
+                    teacher=record.teacher, subject=record.subject, lesson_start_time=normalize_lesson_start_time(record.lesson_time), class_type=record.class_type,
                 )))
         existing_rows = self.store.list_student_grade_evidence()
         existing = []
@@ -1863,7 +1861,7 @@ class PayrollService(CoreFlow):
                 source_file=str(raw.get("source_file", "")), source_hash=str(raw.get("source_hash", "")),
                 sheet=str(raw.get("sheet", "")), coordinate=str(raw.get("coordinate", "")),
                 origin=str(raw.get("origin", "HISTORICAL_SCHEDULE")), exported_at=str(raw.get("exported_at", "")),
-                teacher=str(raw.get("teacher", "")), subject=str(raw.get("subject", "")), lesson_start_time=str(raw.get("lesson_start_time", "")),
+                teacher=str(raw.get("teacher", "")), subject=str(raw.get("subject", "")), lesson_start_time=str(raw.get("lesson_start_time", "")), class_type=str(raw.get("class_type", "")),
             ))
         _kept, ignored = remove_export_pollution([*existing, *(evidence for _item, evidence in candidates)])
         ignored_keys = {evidence_identity(item) for item in ignored}
@@ -1874,7 +1872,7 @@ class PayrollService(CoreFlow):
                 student=str(raw.get("student", "")), lesson_date=str(raw.get("lesson_date", "")), grade=str(raw.get("grade", "")),
                 source_file=str(raw.get("source_file", "")), source_hash=str(raw.get("source_hash", "")),
                 sheet=str(raw.get("sheet", "")), coordinate=str(raw.get("coordinate", "")),
-                teacher=str(raw.get("teacher", "")), subject=str(raw.get("subject", "")), lesson_start_time=str(raw.get("lesson_start_time", "")),
+                teacher=str(raw.get("teacher", "")), subject=str(raw.get("subject", "")), lesson_start_time=str(raw.get("lesson_start_time", "")), class_type=str(raw.get("class_type", "")),
             )
             if evidence_identity(evidence) in ignored_keys:
                 self.store.save_student_grade_evidence({**raw, "status": "EXPORT_POLLUTION", "note": "后续导出导致班名提前升级，未作为学生历史年级事实使用。"})

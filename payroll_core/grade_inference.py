@@ -59,6 +59,27 @@ class StudentGradeEvidence:
     teacher: str = ""
     subject: str = ""
     lesson_start_time: str = ""
+    class_type: str = ""
+
+
+@dataclass(frozen=True)
+class StudentCourseContext:
+    """Ephemeral course context used to detect same-name collisions.
+
+    This is intentionally not a student master record.  It only describes a
+    student occurrence in an attended course so a clearly overlapping,
+    different lesson can be kept out of another occurrence's grade evidence.
+    """
+
+    student: str
+    lesson_date: str
+    lesson_start_time: str
+    teacher: str
+    subject: str
+    class_type: str = ""
+    attended: int | None = None
+    lesson_status: str = ""
+    source_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +136,96 @@ def stable_lesson_key(teacher: object, subject: object, lesson_date: object, les
     day = str(lesson_date or "").strip()[:10]
     start = normalize_lesson_start_time(lesson_time)
     return clean(teacher), clean(subject), day, start
+
+
+def detect_same_name_ambiguous_students(items: Iterable[object]) -> frozenset[str]:
+    """Find names that demonstrably refer to overlapping course entities.
+
+    A name is ambiguous only when it occurs in attended courses on the same
+    date and start time, and those occurrences have different stable lesson
+    keys.  Different exports of the same lesson therefore do not trigger the
+    flag, and a grade disagreement by itself is never enough.
+    """
+    grouped: dict[tuple[str, str, str], set[tuple[str, str, str, str]]] = {}
+    for item in items:
+        contexts = _student_course_contexts(item)
+        for context in contexts:
+            student = context.student.strip()
+            day = str(context.lesson_date or "").strip()[:10]
+            start = normalize_lesson_start_time(context.lesson_start_time)
+            lesson_key = stable_lesson_key(context.teacher, context.subject, day, start)
+            if not student or not day or not start or not all(lesson_key):
+                continue
+            grouped.setdefault((student, day, start), set()).add(lesson_key)
+    return frozenset(student for (student, _day, _start), keys in grouped.items() if len(keys) > 1)
+
+
+def scope_grade_evidence_for_course(
+    evidence: Sequence[StudentGradeEvidence],
+    *,
+    teacher: str,
+    subject: str,
+    class_type: str = "",
+    ambiguous_students: Iterable[str] = (),
+) -> tuple[StudentGradeEvidence, ...]:
+    """Keep ambiguous-name evidence only when it matches this course track.
+
+    Non-ambiguous names retain the existing behavior.  For an ambiguous name,
+    evidence without enough course context is not attributed silently; legacy
+    evidence with a teacher/subject but no class type remains usable when the
+    available context still identifies the track.
+    """
+    ambiguous = {str(name).strip() for name in ambiguous_students if str(name).strip()}
+    if not ambiguous:
+        return tuple(evidence)
+    current_teacher = str(teacher or "").strip()
+    current_subject = str(subject or "").strip()
+    current_class_type = str(class_type or "").strip()
+    scoped: list[StudentGradeEvidence] = []
+    for item in evidence:
+        if item.student.strip() not in ambiguous:
+            scoped.append(item)
+            continue
+        if not current_teacher or not current_subject:
+            continue
+        if not item.teacher.strip() or item.teacher.strip() != current_teacher:
+            continue
+        if item.subject.strip() and item.subject.strip() != current_subject:
+            continue
+        if item.class_type.strip() and current_class_type and item.class_type.strip() != current_class_type:
+            continue
+        scoped.append(item)
+    return tuple(scoped)
+
+
+def _student_course_contexts(item: object) -> tuple[StudentCourseContext, ...]:
+    if isinstance(item, StudentCourseContext):
+        return (item,)
+    if isinstance(item, StudentGradeEvidence):
+        return (
+            StudentCourseContext(
+                student=item.student, lesson_date=item.lesson_date,
+                lesson_start_time=item.lesson_start_time, teacher=item.teacher,
+                subject=item.subject, class_type=item.class_type,
+            ),
+        )
+    if isinstance(item, CourseExportSnapshot):
+        status = str(item.lesson_status or "").strip()
+        if status and status != "已上课":
+            return ()
+        if item.attended is not None and item.attended <= 0:
+            return ()
+        return tuple(
+            StudentCourseContext(
+                student=student, lesson_date=item.lesson_date,
+                lesson_start_time=item.lesson_start_time, teacher=item.teacher,
+                subject=item.subject, class_type=item.teaching_form,
+                attended=item.attended, lesson_status=status,
+                source_file=item.source_file,
+            )
+            for student in split_student_names(item.student)
+        )
+    return ()
 
 
 def export_timestamp_from_source(value: object) -> str:
