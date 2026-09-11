@@ -31,8 +31,14 @@ venv/
 .env
 .env.*
 work/
+build/
+build_rc*/
+dist/
+dist_rc*/
 
 # Explicitly excluded sensitive Skill assets
 skill/payroll/references/学生年级查表.csv
 skill/payroll/references/学生年级查表.csv.bak_20260901
 skill/payroll/assets/
+build_v*/
+dist_v*/

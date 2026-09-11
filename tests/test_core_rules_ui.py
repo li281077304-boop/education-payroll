@@ -78,7 +78,7 @@ assert(!legacy.includes('不应显示'));
 
 
 def test_core_rule_ui_uses_supported_endpoints_and_month_periods():
-    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text()
+    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text(encoding="utf-8")
     assert 'api("/api/core-rules", { method: "POST"' in source
     assert 'api("/api/part-time-rates", { method: "POST"' in source
     assert "/core-rules`" in source and "/part-time-rates`" in source

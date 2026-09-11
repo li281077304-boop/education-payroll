@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import mimetypes
 import secrets
-import subprocess
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,6 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from payroll_core.excel.inspect import inspect_workbook
 
+from .platform import pick_excel_files
 from .service import PayrollService
 
 
@@ -241,11 +241,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _pick_excel() -> str | None:
-        script = 'POSIX path of (choose file with prompt "选择 Excel 文件" of type {"org.openxmlformats.spreadsheetml.sheet", "com.microsoft.excel.xls", "com.microsoft.excel.xlsm"})'
-        try:
-            return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
+        return next(iter(pick_excel_files()), None)
 
     @staticmethod
     def _inspect_path(raw: str) -> dict:
