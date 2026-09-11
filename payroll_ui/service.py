@@ -6,6 +6,7 @@ import io
 import re
 import uuid
 from dataclasses import asdict, replace
+from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,7 @@ from payroll_core.reconcile.ac_resolution import (
 from payroll_core.excel.reconciliation_bridge import GRADE_COEFFICIENTS
 from payroll_core.comments import render_comment
 from payroll_core.excel.writeback import preview as preview_writeback, sha256 as workbook_sha256, write_new_workbook
+from payroll_core.peripheral import summarize_authority_components
 from payroll_ui.assessment_flow import AssessmentService
 from payroll_ui.submissions import PayrollSubmissionService
 
@@ -157,8 +159,19 @@ class PayrollService(CoreFlow):
     def business_inputs(self, period: str = "", status: str = "") -> list[dict]:
         return self.inputs.list_admin(period=period, status=status)
 
-    def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None) -> list[dict]:
-        return self.inputs.import_results(input_type, period, path, submitted_by, activation_scope=activation_scope, replace_input_ids=replace_input_ids)
+    def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None, amount_column: str = "") -> list[dict]:
+        return self.inputs.import_results(input_type, period, path, submitted_by, activation_scope=activation_scope, replace_input_ids=replace_input_ids, amount_column=amount_column)
+
+    def peripheral_payroll(self, run_id: str) -> dict:
+        """Authoritative non-Core components bound to one run; no policy math."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        ids = {item.get("input_id") for item in run.get("business_input_bindings", [])}
+        records = [item for item in self.store.list_business_inputs() if item.get("id") in ids and item.get("status") == "APPROVED" and self.inputs.current(item["id"])]
+        result = {"run_id": run_id, "period": run["period"], "teachers": summarize_authority_components(records), "bindings": sorted(ids)}
+        run["peripheral_payroll"] = result
+        self.store.save(run)
+        return result
 
     def review_business_input(self, input_id: str, action: str, reviewer: str, note: str = "") -> dict:
         return self.inputs.review(input_id, action, reviewer, note)
@@ -582,6 +595,16 @@ class PayrollService(CoreFlow):
                 raise ValueError("AD 已由 AA + AC 独立计算，不接受手工或工资表 AD 覆盖。")
             checked = self.check(run_id)
             payroll = generated_from_calculation(checked["core_calculation"])
+            peripheral = self.peripheral_payroll(run_id)["teachers"]
+            composed_rows = []
+            for row in payroll.rows:
+                values = peripheral.get(row.teacher, {})
+                items = tuple(values.get("components", []))
+                periphery = Decimal(str(values.get("total", "0"))) if values else Decimal("0")
+                teaching = row.part_time_amount if row.part_time_amount is not None else row.af
+                total = None if teaching is None else float(Decimal(str(teaching)) + periphery)
+                composed_rows.append(replace(row, peripheral_total=float(periphery) if values else 0.0, payroll_total=total, peripheral_components=items))
+            payroll = replace(payroll, rows=tuple(composed_rows))
             path = render_generated_payroll(payroll, output_path)
             run = self.store.get(run_id)
             run["generated_payroll"] = {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(), "rows": [asdict(row) for row in payroll.rows]}

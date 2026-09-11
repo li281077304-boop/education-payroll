@@ -87,6 +87,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
             if parsed.path == "/api/comment-candidates":
                 return self._json(self.server.service.comment_candidates(parse_qs(parsed.query).get("run_id", [""])[0]))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/peripheral-payroll"):
+                return self._json(self.server.service.peripheral_payroll(parsed.path.split("/")[3]))
             if parsed.path == "/api/import-mapping":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.preview_import_mapping(query.get("path", [""])[0], query.get("role", ["schedule"])[0], query.get("period", [""])[0]))
@@ -184,7 +186,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             if path.startswith("/api/assessments/") and path.endswith("/confirm"):
                 return self._json(self.server.service.confirm_management_assessment(path.split("/")[3], str(payload.get("reviewer", "")), subjective_confirmations=payload.get("subjective_confirmations"), amount_rule=payload.get("amount_rule")))
             if path == "/api/business-inputs/import":
-                return self._json(self.server.service.import_business_results(str(payload.get("input_type", "")), str(payload.get("period", "")), str(payload.get("path", "")), str(payload.get("submitted_by", "")), str(payload.get("activation_scope", "SUPPLEMENT")), list(payload.get("replace_input_ids", []))), HTTPStatus.CREATED)
+                return self._json(self.server.service.import_business_results(str(payload.get("input_type", "")), str(payload.get("period", "")), str(payload.get("path", "")), str(payload.get("submitted_by", "")), str(payload.get("activation_scope", "SUPPLEMENT")), list(payload.get("replace_input_ids", [])), str(payload.get("amount_column", ""))), HTTPStatus.CREATED)
             if path.startswith("/api/business-inputs/"):
                 bits = path.strip("/").split("/")
                 if len(bits) == 4 and bits[3] == "review":

@@ -17,7 +17,7 @@ from ..payroll_generation import GeneratedPayroll, STATUS_FINAL
 
 HEADERS = (
     "教师", "AA 一对一折算小时", "AC 班课折算小时", "AD 最终授课小时",
-    "AE 该档每小时金额", "AF 总课时费", "AV 总工资", "状态", "待确认原因", "兼职按节课时费", "逐项确定性",
+    "AE 该档每小时金额", "AF 总课时费", "AV 总工资", "续费/退费/HR 外围合计", "工资组成合计", "状态", "待确认原因", "兼职按节课时费", "逐项确定性",
 )
 
 
@@ -42,7 +42,7 @@ def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path) -> s
         sheet.append([
             row.teacher,
             _value(row.one_to_one), _value(row.class_value), _value(row.teaching_hours),
-            _value(row.ae), _value(row.af), _value(row.av),
+            _value(row.ae), _value(row.af), _value(row.av), _value(row.peripheral_total), _value(row.payroll_total),
             "待确认" if not row.final else "已计算",
             "、".join(row.blockers),
             _value(row.part_time_amount),

@@ -44,6 +44,9 @@ class CorePayrollRow:
     blockers: tuple[str, ...] = ()
     fields: Mapping[str, dict] = field(default_factory=dict)
     part_time_amount: float | None = None
+    peripheral_total: float | None = None
+    payroll_total: float | None = None
+    peripheral_components: tuple[Mapping[str, object], ...] = ()
 
     @property
     def final(self) -> bool:

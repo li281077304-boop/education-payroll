@@ -17,7 +17,7 @@ from payroll_core.adapters import read_business_result
 from .storage import RunStore
 
 
-INPUT_TYPES = {"TEACHER_SUBMISSION", "RENEWAL_RESULT", "REFUND_RESULT", "REFERRAL_RESULT", "OTHER"}
+INPUT_TYPES = {"TEACHER_SUBMISSION", "RENEWAL_RESULT", "REFUND_RESULT", "HR_ALLOWANCE", "HR_ATTENDANCE", "REFERRAL_RESULT", "OTHER"}
 TEACHER_ITEM_TYPES = {"排课信息有误", "班课特殊核算", "续费问题", "退费说明", "推荐奖励", "其他"}
 REVIEW_ACTIONS = {"START_REVIEW": "REVIEW", "APPROVE": "APPROVED", "REJECT": "REJECTED", "REQUEST_MORE_INFO": "REQUEST_MORE_INFO"}
 TERMINAL_STATUSES = {"REJECTED", "SUPERSEDED"}
@@ -108,9 +108,9 @@ class BusinessInputService:
             items = [item for item in items if item["status"] == status]
         return items
 
-    def import_results(self, input_type: str, period: str, path: str, submitted_by: str, *, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None) -> list[dict]:
-        if input_type not in {"RENEWAL_RESULT", "REFUND_RESULT"}:
-            raise ValueError("本入口只导入最终续费或退费结果。")
+    def import_results(self, input_type: str, period: str, path: str, submitted_by: str, *, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None, amount_column: str = "") -> list[dict]:
+        if input_type not in {"RENEWAL_RESULT", "REFUND_RESULT", "HR_ALLOWANCE", "HR_ATTENDANCE"}:
+            raise ValueError("本入口只导入最终续费、退费或 HR 权威结果。")
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise ValueError("找不到要导入的最终结果表。")
@@ -146,9 +146,9 @@ class BusinessInputService:
         for row in records:
             item = {
                 "id": uuid.uuid4().hex[:16], "period": resolved_period, "teacher_id": row.teacher_id,
-                "input_type": input_type, "source_type": "UPSTREAM_FINAL_RESULT", "source_ref": str(source),
+                "input_type": input_type, "component_code": input_type, "source_type": "UPSTREAM_FINAL_RESULT", "source_ref": str(source),
                 "source_file_hash": after["sha256"], "source_row": row.row, "submitted_by": submitted_by.strip(), "submitted_at": now(),
-                "status": "SUBMITTED", "payload": row.payload, "evidence": {**row.evidence, **after, "batch_id": batch_id, "activation_scope": activation_scope},
+                "status": "SUBMITTED", "payload": {**row.payload, **({"payroll_amount": row.payload.get(amount_column), "payroll_amount_column": amount_column} if amount_column else {})}, "evidence": {**row.evidence, **after, "batch_id": batch_id, "activation_scope": activation_scope},
                 "reviewed_by": "", "reviewed_at": "", "review_note": "", "linked_run_id": "", "created_at": now(), "updated_at": now(),
             }
             self.store.save_business_input(item); created.append(item)
