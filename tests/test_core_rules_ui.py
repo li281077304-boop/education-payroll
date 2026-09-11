@@ -29,18 +29,15 @@ const seed = {
  effective_from:'2026-08', effective_to:'2026-09', source:'confirmed', lesson_hour_factor:'2',
  grade_coefficients:{'七年级':'0.9'}, excluded_grades:['领航伴学'],
  course_rules:[
-  {id:'one_to_one',treatment:'ONE_TO_ONE',class_types:['1对1']},
-  {id:'special_one_to_two',treatment:'SPECIAL_FIXED',class_types:['1对2'],coefficient:'1.2'},
-  {id:'small_group',treatment:'SMALL_GROUP',class_types:['小班']},
+  {id:'special_one_to_two',treatment:'SPECIAL',class_types:['1对2'],coefficients:{'1':'0.8','2':'1.2'}},
  ],
- small_group_headcount_coefficients:{'2':'1.0','3':'1.2'},
  ae:{tiers:[{id:'zero_to_30',minimum:'0',maximum:'30',base:'0',minimum_exclusive:false}],star_bonuses:{'3':'5'}},
  af:{default_policy_candidate:{obligation_hours:'30',label:'待个人确认',source:'规则说明'}},
 };
 context.seed = seed;
 const editor = vm.runInContext('coreRulesEditor(seed)', context);
-for (const text of ['班型与计算方式','特殊班型固定系数','年级系数与明确排除','普通小班实到人数系数','AE 课时档位','星级加成','AF 默认政策候选','special_one_to_two','领航伴学']) assert(editor.includes(text), text);
-for (const id of ['core-effective-from','core-course-editor','core-grade-editor','core-headcount-editor','core-tier-editor','core-star-editor']) assert(editor.includes(id), id);
+for (const text of ['特殊班型','实到人数','年级系数与明确排除','普通小班实到人数系数（固定，不可配置）','AE 课时档位','星级加成','AF 默认政策候选','special_one_to_two','领航伴学']) assert(editor.includes(text), text);
+for (const id of ['core-effective-from','core-course-editor','core-grade-editor','core-tier-editor','core-star-editor']) assert(editor.includes(id), id);
 assert(editor.includes('type="month"'));
 assert(!editor.includes('<textarea'));
 assert.equal(vm.runInContext('versionList([{id:"rate-v1"}])[0].id', context), 'rate-v1');

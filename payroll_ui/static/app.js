@@ -68,7 +68,9 @@ function coreBindingControls(runId, versions, rateVersions) {
 }
 
 function coreCourseRuleRow(rule = {}) {
-  return `<tr><td><input class="core-course-id" value="${escapeHtml(rule.id || "")}" placeholder="例如 special_one_to_two"></td><td><select class="core-course-treatment">${option("ONE_TO_ONE", rule.treatment, "一对一 → AA")}${option("SPECIAL_FIXED", rule.treatment, "特殊班型固定系数 → AC")}${option("SMALL_GROUP", rule.treatment, "普通小班按实到人数 → AC")}</select></td><td><input class="core-course-types" value="${escapeHtml((rule.class_types || []).join("、"))}" placeholder="多个名称用顿号分隔"></td><td><input class="core-course-coefficient" type="number" step="0.01" min="0" value="${escapeHtml(rule.coefficient ?? "")}" placeholder="仅特殊班型填写"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
+  // 只有特殊班型可配置：一对一与普通小班固定在 Core，不出现在这里。
+  const coefficients = Object.entries(rule.coefficients || {}).map(([count, value]) => `${count}=${value}`).join("、");
+  return `<tr><td><input class="core-course-id" value="${escapeHtml(rule.id || "")}" placeholder="例如 special_one_to_two"></td><td><select class="core-course-treatment">${option("SPECIAL", rule.treatment, "特殊班型（按实到人数配置）")}</select></td><td><input class="core-course-types" value="${escapeHtml((rule.class_types || []).join("、"))}" placeholder="多个名称用顿号分隔"></td><td><input class="core-course-coefficients" value="${escapeHtml(coefficients)}" placeholder="实到人数=系数，例如 1=0.8、2=1.2"></td><td><button type="button" class="quiet danger-link" onclick="this.closest('tr').remove()">删除</button></td></tr>`;
 }
 
 function coreGradeRuleRow(name = "", coefficient = "", excluded = false) {
@@ -93,9 +95,9 @@ function coreRulesEditor(rules) {
   const stars = Object.entries(rules.ae?.star_bonuses || {}).map(([star, value]) => coreStarRow(star, value)).join("");
   const candidate = rules.af?.default_policy_candidate;
   return `<div class="decision-form core-meta"><label>生效开始<input id="core-effective-from" type="month" value="${escapeHtml(rules.effective_from || "")}"></label><label>生效结束<input id="core-effective-to" type="month" value="${escapeHtml(rules.effective_to || "")}"></label><label>每节小时系数<input id="core-hour-factor" type="number" step="0.01" min="0" value="${escapeHtml(rules.lesson_hour_factor ?? "")}"></label></div>
-  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>班型与计算方式</h3><p class="muted small">特殊 1 对 2/1 对 3 使用固定系数；普通小班另按实到人数系数计算。</p></div><button type="button" class="quiet" onclick="addCoreCourseRule()">新增班型规则</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>规则标识</th><th>计算方式</th><th>班型名称</th><th>固定系数</th><th></th></tr></thead><tbody id="core-course-editor">${(rules.course_rules || []).map(coreCourseRuleRow).join("")}</tbody></table></div></section>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>特殊班型</h3><p class="muted small">特殊 1 对 2/1 对 3 必须按“班型 + 实到人数”配置；不能填一个固定单一系数。普通小班另按主核实到人数规则计算。</p></div><button type="button" class="quiet" onclick="addCoreCourseRule()">新增班型规则</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>规则标识</th><th>计算方式</th><th>班型名称</th><th>实到人数=系数</th><th></th></tr></thead><tbody id="core-course-editor">${(rules.course_rules || []).map(coreCourseRuleRow).join("")}</tbody></table></div></section>
   <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>年级系数与明确排除</h3><p class="muted small">没有配置且未明确排除的年级会显示“缺资料”。</p></div><button type="button" class="quiet" onclick="addCoreGradeRule()">新增年级</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>年级</th><th>处理方式</th><th>系数</th><th></th></tr></thead><tbody id="core-grade-editor">${grades}</tbody></table></div></section>
-  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>普通小班实到人数系数</h3><p class="muted small">这里只作用于“普通小班”，不会覆盖特殊班型的固定系数。</p></div><button type="button" class="quiet" onclick="addCoreHeadcountRule()">新增人数</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>实到人数</th><th>人数系数</th><th></th></tr></thead><tbody id="core-headcount-editor">${headcounts}</tbody></table></div></section>
+  <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>普通小班实到人数系数（固定，不可配置）</h3><p class="muted small">普通小班与一对一属于主核稳定规则，固定在 Core：普通小班按实到人数 1人0.8 / 2人1.0 / 3人1.2 …，一对一走独立 AA 逻辑。这里只读展示，不放进规则包。</p></div></div></section>
   <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>AE 课时档位（按 AD 小时数）</h3><p class="muted small">AD 档位驱动 AE 课时单价；边界连续且每个小时数只能命中一个档位，最高档上限留空。</p></div><button type="button" class="quiet" onclick="addCoreTierRule()">新增档位</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>档位</th><th>下限</th><th>边界</th><th>上限</th><th>基础金额</th><th></th></tr></thead><tbody id="core-tier-editor">${(rules.ae?.tiers || []).map(coreTierRow).join("")}</tbody></table></div></section>
   <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>星级加成</h3><p class="muted small">这是星级对应的金额加成；教师本人星级仍由独立星级资料确定。</p></div><button type="button" class="quiet" onclick="addCoreStarRule()">新增星级</button></div><div class="table-wrap"><table class="table editable-table"><thead><tr><th>星级</th><th>加成金额</th><th></th></tr></thead><tbody id="core-star-editor">${stars}</tbody></table></div></section>
   <section class="core-rule-block"><div class="core-rule-block-head"><div><h3>AF 默认政策候选</h3><p class="muted small">仅在缺少个人有效期政策时作为“估算”；不会标成已确定。</p></div><label class="inline-check"><input id="core-af-default-enabled" type="checkbox" ${candidate ? "checked" : ""}>启用候选</label></div><div class="decision-form"><label>义务课时<input id="core-af-obligation" type="number" step="0.01" min="0" value="${escapeHtml(candidate?.obligation_hours ?? "")}"></label><label>候选名称<input id="core-af-label" value="${escapeHtml(candidate?.label || "")}"></label><label class="wide">候选来源<input id="core-af-source" value="${escapeHtml(candidate?.source || "")}"></label></div></section>`;
@@ -188,16 +190,13 @@ function collectCoreRules() {
     else grade_coefficients[name] = inputValue(row, ".core-grade-coefficient");
   });
   const course_rules = editorRows("#core-course-editor").map((row) => {
-    const treatment = inputValue(row, ".core-course-treatment");
-    const rule = { id: inputValue(row, ".core-course-id"), treatment, class_types: splitNames(inputValue(row, ".core-course-types")) };
-    if (treatment === "SPECIAL_FIXED") rule.coefficient = inputValue(row, ".core-course-coefficient");
-    return rule;
+    const coefficients = {};
+    (inputValue(row, ".core-course-coefficients") || "").split(/[、,;；\s]+/).forEach((pair) => {
+      const parts = pair.split("=");
+      if (parts.length === 2 && parts[0].trim() && parts[1].trim()) coefficients[parts[0].trim()] = parts[1].trim();
+    });
+    return { id: inputValue(row, ".core-course-id"), treatment: "SPECIAL", class_types: splitNames(inputValue(row, ".core-course-types")), coefficients };
   }).filter((rule) => rule.id || rule.class_types.length);
-  const small_group_headcount_coefficients = {};
-  editorRows("#core-headcount-editor").forEach((row) => {
-    const count = inputValue(row, ".core-headcount-count");
-    if (count) small_group_headcount_coefficients[count] = inputValue(row, ".core-headcount-coefficient");
-  });
   const tiers = editorRows("#core-tier-editor").map((row) => ({
     id: inputValue(row, ".core-tier-id"),
     minimum: inputValue(row, ".core-tier-min"),
@@ -872,44 +871,13 @@ async function confirmAssessment(id) {
 }
 
 // ---------------------------------------------------------------------------
-// 班型折算规则：配置化。新增班型只需要配置，不需要改代码。
+// 历史班型规则：仅用于解释旧 Run；新 Run 统一由“核心规则面板”绑定规则包。
 async function classTypeRulesPage(runId = "") {
   try {
     const versions = await api("/api/class-type-rules");
-    const rows = versions.map((item) => `<tr><td>${escapeHtml(item.id)}</td><td>${escapeHtml(item.effective_from)} ～ ${escapeHtml(item.effective_to)}</td><td>${escapeHtml(item.status || "ACTIVE")}</td><td>${Object.entries(item.rules?.special_class_coefficients || {}).map(([name, value]) => `${escapeHtml(name)} ${value}`).join("；") || "—"}</td><td>${Object.entries(item.rules?.small_group_headcount_coefficients || {}).map(([name, value]) => `${escapeHtml(name)}人 ${value}`).join("；") || "—"}</td><td>${escapeHtml(item.source || "")}</td></tr>`).join("");
-    const period = new Date().toISOString().slice(0, 7);
-    const current = versions.find((item) => item.status === "ACTIVE" && item.effective_from <= period && period <= item.effective_to);
-    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>班型折算规则</h1><p class="muted">修改系数会生成新版本；旧版本保留，已经结算过的月份不会被改写。</p></div><button class="secondary" onclick="authorityDashboard('${runId}')">返回基础资料</button></div><section class="card"><h2>现有版本</h2><p class="muted small">当前月份适用：${current ? escapeHtml(current.id) : "没有适用版本"}</p><div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>特殊班型固定系数</th><th>普通小班实到人数系数</th><th>来源</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="muted">暂无规则版本。</td></tr>'}</tbody></table></div></section><section class="card"><h2>新增一个版本</h2><p class="muted small">特殊班型是固定系数；普通小班只按实到人数折算，两者不会互相相乘。出现新班型时在这里加上，只改系数也是新增版本，不要删除旧版本。</p><div class="decision-form"><label>生效开始<input id="ctr-from" type="date"></label><label>生效结束<input id="ctr-to" type="date" value="9999-12-31"></label><label>特殊班型固定系数（每行一个：班型=系数）<textarea id="ctr-special" rows="3" placeholder="1对2=1.2&#10;1对3=1.5"></textarea></label><label>普通小班实到人数系数（每行一个：人数=系数）<textarea id="ctr-headcount" rows="4" placeholder="1=0.8&#10;2=1.0&#10;3=1.2"></textarea></label><label>来源说明<input id="ctr-source" placeholder="例如：用户确认 / 校区通知"></label><label>操作人<input id="ctr-actor" placeholder="填写姓名"></label></div><div class="action-bar"><span class="muted small">保存后不会影响历史 Run；要让某个 Run 改用新版本，请用基础资料里的切换操作。</span><button onclick="saveClassTypeRules('${runId}')">保存新版本</button></div></section>`, false);
-  } catch (error) { showMessage(error.message); }
-}
-
-// 表单解析：两张表分开，普通小班永远不接收固定班型系数
-function parseRuleLines(value) {
-  const table = {};
-  (value || "").split("\n").forEach((line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    const parts = trimmed.split("=");
-    if (parts.length === 2 && parts[0].trim() && parts[1].trim()) table[parts[0].trim()] = Number(parts[1].trim());
-  });
-  return table;
-}
-
-async function saveClassTypeRules(runId = "") {
-  const special = parseRuleLines($("#ctr-special").value);
-  const headcounts = parseRuleLines($("#ctr-headcount").value);
-  if (Object.keys(special).some((name) => name === "小班")) {
-    showMessage("普通小班按实到人数折算，不能配置固定班型系数。", "error");
-    return;
-  }
-  try {
-    await api("/api/class-type-rules", { method: "POST", body: JSON.stringify({
-      effective_from: $("#ctr-from").value, effective_to: $("#ctr-to").value,
-      rules: { special_class_coefficients: special, small_group_headcount_coefficients: headcounts },
-      source: $("#ctr-source").value, actor: $("#ctr-actor").value,
-    }) });
-    showMessage("已保存新版本，旧版本保留。", "success");
-    await classTypeRulesPage(runId);
+    const summarize = (rules) => Object.entries(rules?.special_class_coefficients || {}).map(([name, table]) => `${name}（${Object.entries(table || {}).map(([count, value]) => `${count}人=${value}`).join("、")}）`).join("；") || "—";
+    const rows = versions.map((item) => `<tr><td>${escapeHtml(item.id)}</td><td>${escapeHtml(item.effective_from)} ～ ${escapeHtml(item.effective_to)}</td><td>${escapeHtml(item.status || "ACTIVE")}</td><td>${escapeHtml(summarize(item.rules))}</td><td>${escapeHtml(item.source || "")}</td></tr>`).join("");
+    shell(`<div class="section-head"><div><p class="eyebrow">历史兼容</p><h1>历史班型规则</h1><p class="muted">这里只读展示旧 Run 的规则快照。新核算请进入“核心规则面板”，它是唯一可编辑、唯一用于新 Run 的规则入口。</p></div><button class="secondary" onclick="authorityDashboard('${runId}')">返回基础资料</button></div><section class="card"><h2>历史版本</h2><div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>特殊班型（班型 × 实到人数）</th><th>来源</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">暂无历史版本。</td></tr>'}</tbody></table></div></section>`, false);
   } catch (error) { showMessage(error.message); }
 }
 

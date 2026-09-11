@@ -21,32 +21,22 @@ grade_coefficients:
   "托福": "1.5"
 excluded_grades: ["领航伴学"]
 non_teaching_lesson_statuses: ["未上课", "已取消", "取消", "停课", "请假"]
+# 只有特殊班型可配置；一对一与普通小班固定在 Core。
+# 特殊班型系数按 (班型, 实到人数) 配置：未配置的组合一律 NEEDS_INPUT，不猜。
 course_rules:
-  - id: one_to_one
-    treatment: ONE_TO_ONE
-    class_types: ["1对1"]
   - id: special_one_to_two
-    treatment: SPECIAL_FIXED
+    treatment: SPECIAL
     class_types: ["1对2"]
-    coefficient: "1.2"
+    coefficients:
+      "1": "0.8"
+      "2": "1.2"
   - id: special_one_to_three
-    treatment: SPECIAL_FIXED
+    treatment: SPECIAL
     class_types: ["1对3", "三人班"]
-    coefficient: "1.5"
-  - id: small_group
-    treatment: SMALL_GROUP
-    class_types: ["小班"]
-small_group_headcount_coefficients:
-  "1": "0.8"
-  "2": "1.0"
-  "3": "1.2"
-  "4": "1.4"
-  "5": "1.7"
-  "6": "1.9"
-  "7": "2.1"
-  "8": "2.3"
-  "9": "2.5"
-  "10": "2.7"
+    coefficients:
+      "1": "0.8"
+      "2": "1.2"
+      "3": "1.5"
 ae:
   tiers:
     - {id: zero_to_30, minimum: "0", maximum: "30", base: "0"}

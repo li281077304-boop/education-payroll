@@ -1,31 +1,28 @@
-# TASK — 下一位 Agent 接力任务
+# TASK — Windows 实机 UAT（v0.21.0-rc1）
 
-## 当前目标
+## 目标
 
-在不破坏既有 Core/UI 能力的前提下，完成并验收两个班课差异处理 workflow：
+在 Windows 10/11 x64 机器拉取 `feature/payroll-core-config-chain` 的 rc1 提交，验证现有 Mac 主线可以稳定运行。先做源码模式，再做 Windows 本机构建的 `--onedir` 打包验证。
 
-1. `SOURCE_DATA_CORRECTION`：对具体排课记录建立不可变的事实修正层，生成 effective fact，并重算 AC。
-2. `APPROVED_PAYROLL_OVERRIDE`：对明确课程建立本 Run/本月范围的特殊核算口径，并重算 AC。
+## 开始前
 
-优先审计现有未跟踪 `payroll_core/reconcile/ac_resolution.py`，不要先重写。任何实现前先运行测试并确认它与现有模型、UI、SQLite 的关系。
+1. 阅读 `AGENTS.md`、`CURRENT_STATE.md`、本文件与最新 `DEVLOG.md`。
+2. 确认分支、提交、工作区干净状态；不要基于未提交的 resolution workflow 半成品。
+3. 使用 Python 3.11 x64、独立 venv 和脱敏 fixtures。真实业务数据只允许本机只读使用，不能进入 Git 或安装包。
 
-## 已确认业务语义
+## 必须验证
 
-- 胡长春案例是上游事实错误：一节被记录为高三 6 人班，业务确认应按高二口径；典型原因码为 `GRADE_ROLLOVER_NOT_UPDATED`。原始 AC 68.43，修正后应为 68.05，与工资表一致。
-- 董葛飞案例是排课事实正确但经批准的特殊折算；必须绑定具体课程。当前历史 `ACCEPTED_EXCEPTION` 不能在无法确定课程时擅自迁移。
-- `EXACT_CAUSE` 只能由反事实重算精确闭合差额证明；否则只能是 `POSSIBLE_CAUSE`、`AMBIGUOUS_CAUSE` 或 `UNEXPLAINED`。
-- 原始事实永远保留；修正/override 需记录来源、hash、原因、确认人、时间、范围、指纹和重算前后结果。
+- 完整 pytest。
+- 中文路径、空格路径、LocalAppData 数据目录、SQLite Run/Decision 持久化、hash/STALE 检测、端口选择、浏览器启动与文件锁错误提示。
+- 脱敏流程：导入 → 建 Run → 核对 → Business Issue → 证据 → 人工决定 → rerun → 重启恢复。
+- 在 Windows 本机用 PyInstaller `--onedir` 打包后，再重复完整脱敏 E2E；产物不得依赖系统 Python。
 
-## 必须保持
+## 禁止事项
 
-- 保留 `CONFIRMED_ERROR`、`ACCEPTED_EXCEPTION`、`DEFERRED` 兼容性。
-- 通过结构化输入避免“总数相抵”掩盖逐课 contribution mismatch。
-- 真实 8 月数据只读留在本机；不得修改真实 Excel、上传真实数据或合并 `main`。
+- 不改变 AA/AC/AD/AE/AF 业务规则，不合并 main。
+- 不接续费、退费、推荐、管理绩效、AV，不触碰 Source correction / approved override 开发线。
+- 不提交真实工资、姓名、学生、排课、续退费数据或真实 Excel。
 
-## 回归验收
+## 完成标准
 
-至少覆盖：保留原始事实、年级修正闭合 0.38、Run 级 override、不改变排课事实、精确原因判定、模糊原因不冒充精确、相互抵消课程错误仍可识别，以及旧 `ACCEPTED_EXCEPTION` 兼容。真实 UAT 需要通过 UI 完成；不能用后台 SQLite 伪造。
-
-## 最终汇报
-
-报告两类 workflow 是否完成、胡长春 68.43→68.05、董葛飞是否需要最小确认、审计链、EXACT_CAUSE 依据、抵消错误测试、pytest、branch/commit/push/working tree 和安全检查。完成后停止，不扩展续费、退费或 AV。
+测试员解压 Windows RC1 压缩包后，双击即可启动 UI，并能用 demo 脱敏材料完成一次核对、保存人工决定、重启恢复与 STALE 验证。若出现跨平台问题，只修平台适配，不改工资算法。

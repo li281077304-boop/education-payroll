@@ -7,6 +7,7 @@ import pytest
 from openpyxl import load_workbook, Workbook
 
 from payroll_core.models.records import ScheduleRecord
+from payroll_core.models.class_type_rules import CONFIRMED_SPECIAL_CLASS_COEFFICIENTS, structured_rules
 from payroll_core.reconcile.payroll_scope import (
     class_value_contribution,
     schedule_field_checks,
@@ -33,32 +34,36 @@ def _schedule(path: Path, rows: list[list[object]], title: str = "课表") -> Pa
 
 def test_two_person_class_uses_configured_coefficient():
     record = _record("1对2", attended=2)
-    value, calculation = class_value_contribution(record)
+    rules = structured_rules(CONFIRMED_SPECIAL_CLASS_COEFFICIENTS)
+    value, calculation = class_value_contribution(record, rules)
 
     assert value is not None
     assert "班型系数 1.2" in calculation
     # The same record under a different configuration must give a different
     # number, which proves the coefficient is read from configuration.
-    doubled, _ = class_value_contribution(record, {"1对2": 2.4})
+    doubled, _ = class_value_contribution(record, {"special_class_coefficients": {"1对2": {"1": 1.6, "2": 2.4}}})
     assert doubled == pytest.approx(value * 2)
 
 
 def test_three_person_class_uses_configured_coefficient():
     record = _record("三人班", attended=3)
 
-    value, calculation = class_value_contribution(record)
+    value, calculation = class_value_contribution(record, structured_rules(CONFIRMED_SPECIAL_CLASS_COEFFICIENTS))
     assert value is not None and "班型系数 1.5" in calculation
     # 未经配置的班型依旧拒绝，不按小班或 1 猜。
     assert class_value_contribution(_record("四人精品班", attended=4))[0] is None
 
 
-def test_special_class_never_multiplies_the_attendance_coefficient():
-    """1对2 是固定 1.2：实到 3 人也仍然是 1.2，不是 1.2 × 1.2。"""
-    two_at_two = class_value_contribution(_record("1对2", attended=2))
-    two_at_three = class_value_contribution(_record("1对2", attended=3))
+def test_special_class_uses_its_own_attendance_mapping_not_small_group_mapping():
+    """1对2 的实到 1/2 人各自查专用配置，不能退回普通小班。"""
+    rules = structured_rules(CONFIRMED_SPECIAL_CLASS_COEFFICIENTS)
+    two_at_one = class_value_contribution(_record("1对2", attended=1), rules)
+    two_at_two = class_value_contribution(_record("1对2", attended=2), rules)
+    two_at_three = class_value_contribution(_record("1对2", attended=3), rules)
 
-    assert two_at_two[0] == pytest.approx(two_at_three[0])
-    assert "实到" not in two_at_three[1]
+    assert two_at_one[0] == pytest.approx(1.44)
+    assert two_at_two[0] == pytest.approx(2.16)
+    assert two_at_three[0] is None and "UNKNOWN_CLASS_RULE" in two_at_three[1]
 
 
 def test_ordinary_small_group_is_priced_by_attendance_only():
@@ -99,11 +104,11 @@ def test_changing_coefficient_requires_new_version(tmp_path):
     assert {item["id"] for item in seeded} >= {"CLASS_TYPE_RULE_2020_BASELINE", "CLASS_TYPE_RULE_2026-09"}
 
     with pytest.raises(ValueError, match="重叠"):
-        service.save_class_type_rule_version(effective_from="2026-09-15", effective_to="2026-12-31", rules={"special_class_coefficients": {"1对2": 1.3}}, source="测试", actor="管理员")
+        service.save_class_type_rule_version(effective_from="2026-09-15", effective_to="2026-12-31", rules={"special_class_coefficients": {"1对2": {"1": 0.8, "2": 1.3}}}, source="测试", actor="管理员")
 
     updated = service.save_class_type_rule_version(
         effective_from="2027-01-01", effective_to="9999-12-31",
-        rules={"special_class_coefficients": {"1对2": 1.3}, "small_group_headcount_coefficients": {"2": 1.1}},
+        rules={"special_class_coefficients": {"1对2": {"1": 0.8, "2": 1.3}}},
         source="测试", actor="管理员", supersedes_version_id="CLASS_TYPE_RULE_2026-09",
     )
     ids = {item["id"] for item in updated}
@@ -111,9 +116,9 @@ def test_changing_coefficient_requires_new_version(tmp_path):
     closed = next(item for item in updated if item["id"] == "CLASS_TYPE_RULE_2026-09")
     assert closed["status"] == "SUPERSEDED" and closed["effective_to"] == "2026-12-31"
     with pytest.raises(ValueError, match="大于 0"):
-        service.save_class_type_rule_version(effective_from="2028-01-01", effective_to="2028-12-31", rules={"special_class_coefficients": {"1对2": 0}}, source="测试", actor="管理员")
+        service.save_class_type_rule_version(effective_from="2028-01-01", effective_to="2028-12-31", rules={"special_class_coefficients": {"1对2": {"2": 0}}}, source="测试", actor="管理员")
     with pytest.raises(ValueError, match="实到人数"):
-        service.save_class_type_rule_version(effective_from="2028-01-01", effective_to="2028-12-31", rules={"小班": 0.8}, source="测试", actor="管理员")
+        service.save_class_type_rule_version(effective_from="2028-01-01", effective_to="2028-12-31", rules={"special_class_coefficients": {"小班": {"2": 0.8}}}, source="测试", actor="管理员")
 
 
 def test_historical_run_keeps_historical_rule(tmp_path):
@@ -129,13 +134,13 @@ def test_historical_run_keeps_historical_rule(tmp_path):
     october_rules, _ = service._class_type_rules_for_run(service.store.get(october["id"]))
     assert "三人班" not in august_rules["special_class_coefficients"], "2026-08 不能因为 9 月新增规则而改变"
     assert "1对3" not in august_rules["special_class_coefficients"]
-    assert august_rules["small_group_headcount_coefficients"]["1"] == 0.8
-    assert october_rules["special_class_coefficients"]["三人班"] == 1.5
-    assert october_rules["special_class_coefficients"]["1对3"] == 1.5
+    assert "small_group_headcount_coefficients" not in august_rules
+    assert october_rules["special_class_coefficients"]["三人班"]["3"] == 1.5
+    assert october_rules["special_class_coefficients"]["1对3"]["3"] == 1.5
 
     service.save_class_type_rule_version(
         effective_from="2027-01-01", effective_to="9999-12-31",
-        rules={"special_class_coefficients": {"1对2": 1.6}},
+        rules={"special_class_coefficients": {"1对2": {"1": 0.8, "2": 1.6}}},
         source="测试", actor="管理员", supersedes_version_id="CLASS_TYPE_RULE_2026-09",
     )
     after = service._class_type_rules_for_run(service.store.get(august["id"]))
@@ -148,15 +153,14 @@ def test_class_type_rule_is_not_hardcoded(tmp_path):
     service.save_class_type_rule_version(
         effective_from="2027-01-01", effective_to="9999-12-31",
         rules={
-            "special_class_coefficients": {"1对2": 1.2, "三人班": 1.5, "四人精品班": 2.0},
-            "small_group_headcount_coefficients": {1: 0.8, 2: 1.0, 3: 1.2},
+            "special_class_coefficients": {"1对2": {"1": 0.8, "2": 1.2}, "三人班": {"1": 0.8, "2": 1.2, "3": 1.5}, "四人精品班": {"4": 2.0}},
         },
         source="用户配置", actor="管理员", supersedes_version_id="CLASS_TYPE_RULE_2026-09",
     )
     run = service.create("2027-03")
     coefficients, version_id = service._class_type_rules_for_run(service.store.get(run["id"]))
 
-    assert coefficients["special_class_coefficients"]["四人精品班"] == 2.0
+    assert coefficients["special_class_coefficients"]["四人精品班"]["4"] == 2.0
     assert version_id != "CLASS_TYPE_RULE_2026-09"
     value, _ = class_value_contribution(_record("四人精品班", attended=4), coefficients)
     assert value is not None

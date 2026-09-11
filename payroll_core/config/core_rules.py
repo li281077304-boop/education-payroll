@@ -6,11 +6,13 @@ silently recalculate that run with later policy.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 import re
 from typing import Any, Mapping
+
+from ..models.class_type_rules import ORDINARY_SMALL_GROUP_HEADCOUNT_COEFFICIENTS
 
 
 _PERIOD = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -40,10 +42,14 @@ def _mapping(value: object, name: str) -> Mapping[str, Any]:
 
 @dataclass(frozen=True)
 class CourseRule:
+    """A **特殊班型** rule. 一对一 and 普通小班 are Core constants, not config."""
+
     id: str
-    treatment: str  # ONE_TO_ONE, SPECIAL_FIXED, SMALL_GROUP
+    treatment: str  # SPECIAL
     class_types: tuple[str, ...]
-    coefficient: Decimal | None = None
+    #: 实到人数 → multiplier. A special class value depends on the attendance,
+    #: so a single fixed coefficient is not representable (and not accepted).
+    coefficients: Mapping[int, Decimal] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "CourseRule":
@@ -52,26 +58,35 @@ class CourseRule:
         class_types = raw.get("class_types")
         if not isinstance(rule_id, str) or not rule_id:
             raise ValueError("course rule requires id")
-        if treatment not in {"ONE_TO_ONE", "SPECIAL_FIXED", "SMALL_GROUP"}:
-            raise ValueError(f"course rule {rule_id} has unsupported treatment")
+        if treatment != "SPECIAL":
+            raise ValueError(f"course rule {rule_id}: only 特殊班型 is configurable; 一对一 与 普通小班 固定在 Core")
         if not isinstance(class_types, list) or not class_types or not all(isinstance(v, str) and v for v in class_types):
             raise ValueError(f"course rule {rule_id} requires non-empty class_types")
-        coefficient = raw.get("coefficient")
-        if treatment == "SPECIAL_FIXED":
-            if coefficient is None:
-                raise ValueError(f"course rule {rule_id} requires coefficient")
-            coefficient = _decimal(coefficient, f"course rule {rule_id} coefficient")
+        raw_coefficients = raw.get("coefficients")
+        if not isinstance(raw_coefficients, Mapping) or not raw_coefficients:
+            raise ValueError(f"course rule {rule_id} requires per-attendance coefficients")
+        coefficients: dict[int, Decimal] = {}
+        for key, value in raw_coefficients.items():
+            try:
+                attended = int(key)
+            except (TypeError, ValueError):
+                raise ValueError(f"course rule {rule_id} attendance key must be an integer: {key!r}") from None
+            if attended < 1:
+                raise ValueError(f"course rule {rule_id} attendance must be positive")
+            coefficient = _decimal(value, f"course rule {rule_id} coefficient {key}")
             if coefficient <= 0:
                 raise ValueError(f"course rule {rule_id} coefficient must be positive")
-        elif coefficient is not None:
-            raise ValueError(f"course rule {rule_id} may not set coefficient")
-        return cls(rule_id, treatment, tuple(class_types), coefficient)
+            coefficients[attended] = coefficient
+        return cls(rule_id, treatment, tuple(class_types), coefficients)
+
+    def multiplier_for(self, attended: int) -> Decimal | None:
+        return self.coefficients.get(attended)
 
     def to_dict(self) -> dict[str, object]:
-        result: dict[str, object] = {"id": self.id, "treatment": self.treatment, "class_types": list(self.class_types)}
-        if self.coefficient is not None:
-            result["coefficient"] = str(self.coefficient)
-        return result
+        return {
+            "id": self.id, "treatment": self.treatment, "class_types": list(self.class_types),
+            "coefficients": {str(key): str(value) for key, value in sorted(self.coefficients.items())},
+        }
 
 
 @dataclass(frozen=True)
@@ -180,21 +195,11 @@ class CoreRules:
             if overlap:
                 raise ValueError(f"duplicate class type rule: {sorted(overlap)[0]}")
             seen_types.update(rule.class_types)
-        people_raw = _mapping(raw.get("small_group_headcount_coefficients"), "small_group_headcount_coefficients")
-        people: dict[int, Decimal] = {}
-        for key, value in people_raw.items():
-            try:
-                count = int(str(key))
-            except ValueError as exc:
-                raise ValueError("small group headcount must be integer") from exc
-            if str(count) != str(key) or count <= 0 or count in people:
-                raise ValueError("small group headcount keys must be unique positive integers")
-            coefficient = _decimal(value, f"headcount coefficient {count}")
-            if coefficient <= 0:
-                raise ValueError("small group coefficients must be positive")
-            people[count] = coefficient
-        if any(rule.treatment == "SMALL_GROUP" for rule in course_rules) and not people:
-            raise ValueError("SMALL_GROUP course rule requires headcount coefficients")
+        # 普通小班的实到人数系数表固定在 Core（主核稳定规则），不从规则包读取。
+        # 规则包里只允许出现特殊班型。
+        if "small_group_headcount_coefficients" in raw:
+            raise ValueError("普通小班系数固定在 Core，不得放进规则包")
+        people = dict(ORDINARY_SMALL_GROUP_HEADCOUNT_COEFFICIENTS)
         ae_raw = _mapping(raw.get("ae"), "ae")
         tiers_raw = ae_raw.get("tiers")
         if not isinstance(tiers_raw, list) or not tiers_raw:
@@ -233,7 +238,6 @@ class CoreRules:
             "excluded_grades": list(self.excluded_grades),
             "non_teaching_lesson_statuses": list(self.non_teaching_lesson_statuses),
             "course_rules": [item.to_dict() for item in self.course_rules],
-            "small_group_headcount_coefficients": {str(key): str(value) for key, value in self.small_group_headcount_coefficients.items()},
             "ae": {"tiers": [item.to_dict() for item in self.ae_tiers], "star_bonuses": {str(key): str(value) for key, value in self.star_bonuses.items()}},
             "af": {} if self.default_af_policy_candidate is None else {"default_policy_candidate": self.default_af_policy_candidate.to_dict()},
         }

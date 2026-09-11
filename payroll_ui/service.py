@@ -14,9 +14,9 @@ from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.models.evidence import AdapterIssue
 from payroll_core.models.class_type_rules import (
-    HEADCOUNT_RULES_KEY,
     SPECIAL_RULES_KEY,
     default_rule_versions,
+    normalize_special,
     rule_version_for_period,
     structured_rules,
 )
@@ -489,7 +489,7 @@ class PayrollService(CoreFlow):
 
     def save_class_type_rule_version(self, *, effective_from: str, effective_to: str, rules: dict, source: str, actor: str, notes: str = "", supersedes_version_id: str | None = None) -> list[dict]:
         """Editing a coefficient always creates a new version; old ones stay."""
-        special, headcounts = self._validate_class_rules(rules)
+        special = self._validate_class_rules(rules)
         if effective_from > effective_to:
             raise ValueError("生效开始时间不能晚于结束时间。")
         # The version being superseded is about to be closed, so it must not
@@ -504,7 +504,7 @@ class PayrollService(CoreFlow):
         self.store.save_class_type_rule_version({
             "id": f"CLASS_TYPE_RULE_{uuid.uuid4().hex[:8]}", "source": source.strip(), "actor": actor.strip(),
             "effective_from": effective_from, "effective_to": effective_to,
-            "rules": structured_rules(special, headcounts),
+            "rules": structured_rules(special),
             "status": "ACTIVE", "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "notes": notes.strip(),
             "supersedes": supersedes_version_id or "",
         })
@@ -519,41 +519,34 @@ class PayrollService(CoreFlow):
         return self.class_type_rule_versions()
 
     @staticmethod
-    def _validate_class_rules(rules: dict) -> tuple[dict[str, float], dict[int, float]]:
-        """Accept only the two-table shape: 特殊班型固定系数 + 普通小班人数系数。
+    def _validate_class_rules(rules: dict) -> dict[str, dict[int, float]]:
+        """Validate the legacy editor's special-class version shape.
 
-        普通小班 must never carry a fixed coefficient; it is priced by attendance.
+        Only special classes remain configurable here.  One-to-one and ordinary
+        small groups are stable Core rules, so accepting either as external
+        coefficients would create a second authority path.
         """
         if not rules:
-            raise ValueError("请至少配置特殊班型系数或普通小班实到人数系数。")
-        if SPECIAL_RULES_KEY not in rules and HEADCOUNT_RULES_KEY not in rules:
-            # A flat mapping is only meaningful for special class types.
-            if any(name in SMALL_GROUP_CLASS_TYPES for name in rules):
-                raise ValueError("普通小班按实到人数折算，不能配置固定班型系数。")
-            rules = {SPECIAL_RULES_KEY: rules, HEADCOUNT_RULES_KEY: {}}
-        special = {str(name).strip(): float(value) for name, value in (rules.get(SPECIAL_RULES_KEY) or {}).items()}
-        if any(name in SMALL_GROUP_CLASS_TYPES for name in special):
-            raise ValueError("普通小班按实到人数折算，不能配置固定班型系数。")
-        for name, value in special.items():
+            raise ValueError("请至少配置一个特殊班型的实到人数系数。")
+        if SPECIAL_RULES_KEY not in rules:
+            raise ValueError("特殊班型必须按“班型 → 实到人数 → 系数”配置。")
+        raw_special = rules.get(SPECIAL_RULES_KEY) or {}
+        try:
+            special = normalize_special(raw_special)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from None
+        for name, values in special.items():
             if not name:
                 raise ValueError("班型名称不能为空。")
-            if value <= 0:
-                raise ValueError(f"特殊班型“{name}”的系数必须大于 0。")
-        headcounts: dict[int, float] = {}
-        for key, value in (rules.get(HEADCOUNT_RULES_KEY) or {}).items():
-            try:
-                people = int(key)
-            except (TypeError, ValueError):
-                raise ValueError(f"实到人数必须是整数：{key!r}") from None
-            if people < 1:
-                raise ValueError("实到人数必须大于 0。")
-            if float(value) <= 0:
-                raise ValueError(f"实到 {people} 人的人数系数必须大于 0。")
-            headcounts[people] = float(value)
-        if not special and not headcounts:
-            raise ValueError("请至少配置特殊班型系数或普通小班实到人数系数。")
-        headcounts = headcounts or dict(HEADCOUNT_COEFFICIENTS)
-        return special or dict(SPECIAL_CLASS_COEFFICIENTS), headcounts
+            if name in SMALL_GROUP_CLASS_TYPES:
+                raise ValueError("普通小班按主核实到人数折算，不能配置外部系数。")
+            if name == "1对1":
+                raise ValueError("一对一走主核 AA 逻辑，不能配置班型系数。")
+            if not values or any(attended < 1 or value <= 0 for attended, value in values.items()):
+                raise ValueError(f"特殊班型“{name}”必须填写大于 0 的实到人数系数。")
+        if not special:
+            raise ValueError("请至少配置一个特殊班型的实到人数系数。")
+        return special
 
     def _class_type_rules_for_run(self, run: dict) -> tuple[dict[str, object], str]:
         bound = run.get("class_type_rule_version_id")

@@ -56,8 +56,8 @@ def test_aa_ac_ad_keep_chains_independent_and_special_precedes_headcount():
     rules = load_core_rules()
     result = calculate_payroll("2026-08", [
         record(class_type="1对1", attended=2),
-        record(class_type="1对2", attended=9),  # must not multiply 2.5
-        record(class_type="1对3", attended=9),  # must not multiply 2.5
+        record(class_type="1对2", attended=2),  # 配置值 1.2，不乘小班人数系数 1.0
+        record(class_type="1对3", attended=3),  # 配置值 1.5，不乘小班人数系数 1.2
         record(class_type="小班", attended=4),
     ], rules)
     calculated = row(result)
@@ -65,7 +65,11 @@ def test_aa_ac_ad_keep_chains_independent_and_special_precedes_headcount():
     assert calculated.ac.value == Decimal("7.38")  # 2.16 + 2.7 + 2.52
     assert calculated.ad.value == Decimal("10.98")
     assert calculated.ae.value == calculated.af.value == Decimal("0")
-    assert "不乘普通小班人数系数" in next(item.reason for item in result.course_contributions if item.field == "ac" and "专项" in item.reason)
+    assert "不乘普通小班人数系数" in next(item.reason for item in result.course_contributions if item.field == "ac" and "特殊班" in item.reason)
+    # 特殊班型没有配置的人数组合：不许退回普通小班人数系数，直接 NEEDS_INPUT。
+    unconfigured = calculate_course(record(class_type="1对2", attended=9), rules)
+    assert unconfigured.value is None and unconfigured.state == ValueState.NEEDS_INPUT
+    assert "UNKNOWN_CLASS_RULE" in unconfigured.reason
 
 
 def test_user_acceptance_special_classes_do_not_use_small_group_headcount():
@@ -121,10 +125,13 @@ def test_unknown_ac_grade_blocks_only_ac_and_evidence_contains_hand_calculation_
     calculated = row(result)
     assert calculated.aa.value == Decimal("3.6") and calculated.aa.state == ValueState.DETERMINED
     assert calculated.ac.state == calculated.ad.state == ValueState.NEEDS_INPUT
-    special = calculate_course(record(class_type="1对2", attended=9), rules)
+    special = calculate_course(record(class_type="1对2", attended=2), rules)
     evidence = special.evidence[0]
-    assert evidence.formula == "grade_coefficient × special_coefficient × lesson_hour_factor"
-    assert evidence.inputs == {"grade_coefficient": "0.9", "special_coefficient": "1.2", "lesson_hour_factor": "2"}
+    assert evidence.formula == "grade_coefficient × special_multiplier(class_type, attended) × lesson_hour_factor"
+    assert evidence.inputs["grade_coefficient"] == "0.9"
+    assert evidence.inputs["special_multiplier"] == "1.2"
+    assert evidence.inputs["attended"] == "2"
+    assert evidence.inputs["lesson_hour_factor"] == "2"
     assert "= 2.16" in evidence.detail
 
 
@@ -264,7 +271,7 @@ def test_management_no_teaching_cannot_mask_unknown_course_and_ordinary_no_sched
 
 def test_duplicate_class_type_and_invalid_tier_boundaries_fail_configuration():
     raw = load_core_rules().to_dict()
-    raw["course_rules"].append({"id": "duplicate", "treatment": "ONE_TO_ONE", "class_types": ["1对1"]})
+    raw["course_rules"].append({"id": "duplicate", "treatment": "SPECIAL", "class_types": ["1对2"], "coefficients": {"2": "1.9"}})
     with pytest.raises(ValueError, match="duplicate class type"):
         CoreRules.from_dict(raw)
     raw = load_core_rules().to_dict()

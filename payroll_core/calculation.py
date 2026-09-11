@@ -14,6 +14,11 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .config.core_rules import CoreRules
+from .models.class_type_rules import (
+    ONE_TO_ONE_CLASS_TYPES,
+    ORDINARY_SMALL_GROUP_HEADCOUNT_COEFFICIENTS,
+    SMALL_GROUP_CLASS_TYPES,
+)
 from .models.records import ScheduleRecord
 
 
@@ -235,10 +240,18 @@ def calculate_course(record: object, rules: CoreRules | Mapping[str, Any], *, ef
         return _not_applicable(key, teacher, f"年级“{grade}”在规则版本中明确排除，不进入核心 AA/AC/AD。")
     if lesson_status in core.non_teaching_lesson_statuses:
         return _not_applicable(key, teacher, f"状态“{lesson_status}”在规则版本中明确为未上课，不计入核心 AA/AC/AD。")
-    rule = core.course_rule(class_type)
-    if rule is None:
-        return CourseContribution(None, ValueState.NEEDS_INPUT, f"班型“{class_type}”没有配置规则，不能按最接近班型或人数猜测；effective_ac 不可旁路未知班型。", (), key, teacher, "")
-    target_field = "aa" if rule.treatment == "ONE_TO_ONE" else "ac"
+    # 一对一 与 普通小班 是主核稳定规则（Core 常量，不可外部配置）；
+    # 只有特殊班型从规则包里按 (班型, 实到人数) 查系数。
+    if class_type in ONE_TO_ONE_CLASS_TYPES:
+        treatment, rule_id, rule = "ONE_TO_ONE", "core_one_to_one", None
+    elif class_type in SMALL_GROUP_CLASS_TYPES:
+        treatment, rule_id, rule = "SMALL_GROUP", "core_small_group", None
+    else:
+        rule = core.course_rule(class_type)
+        if rule is None:
+            return CourseContribution(None, ValueState.NEEDS_INPUT, f"班型“{class_type}”既不是一对一、也不是普通小班，且没有配置特殊班型规则，不能按最接近班型或人数猜测。", (), key, teacher, "")
+        treatment, rule_id = "SPECIAL", rule.id
+    target_field = "aa" if treatment == "ONE_TO_ONE" else "ac"
     if lesson_status != "已上课":
         return CourseContribution(None, ValueState.NEEDS_INPUT, f"上课状态“{lesson_status or '空'}”不在已上课或明确排除状态中，不能静默跳过。", (), key, teacher, target_field)
     if attended_raw is None:
@@ -253,20 +266,26 @@ def calculate_course(record: object, rules: CoreRules | Mapping[str, Any], *, ef
         return _not_applicable(key, teacher, "实到人数不大于 0，不计入核心 AA/AC/AD。")
     grade_coefficient = core.grade_coefficients.get(grade)
     if grade_coefficient is None:
-        return CourseContribution(None, ValueState.NEEDS_INPUT, f"年级“{grade}”没有配置系数，不能计算课程贡献；effective_ac 不可旁路未知年级。", (Evidence("COURSE_RULE", rule_id=rule.id, record_key=key),), key, teacher, target_field)
-    if rule.treatment == "ONE_TO_ONE":
+        return CourseContribution(None, ValueState.NEEDS_INPUT, f"年级“{grade}”没有配置系数，不能计算课程贡献；effective_ac 不可旁路未知年级。", (Evidence("COURSE_RULE", rule_id=rule_id, record_key=key),), key, teacher, target_field)
+    if treatment == "ONE_TO_ONE":
         value = Decimal(attended) * core.lesson_hour_factor * grade_coefficient
-        return CourseContribution(value, ValueState.DETERMINED, "AA：实到人数 × 每节小时系数 × 年级系数。", (_course_evidence(key=key, rule_id=rule.id, formula="attended × lesson_hour_factor × grade_coefficient", value=value, attended=attended, lesson_hour_factor=core.lesson_hour_factor, grade_coefficient=grade_coefficient),), key, teacher, "aa")
-    if rule.treatment == "SPECIAL_FIXED":
-        assert rule.coefficient is not None
-        value = grade_coefficient * rule.coefficient * core.lesson_hour_factor
-        evidence = _course_evidence(key=key, rule_id=rule.id, formula="grade_coefficient × special_coefficient × lesson_hour_factor", value=value, grade_coefficient=grade_coefficient, special_coefficient=rule.coefficient, lesson_hour_factor=core.lesson_hour_factor)
+        return CourseContribution(value, ValueState.DETERMINED, "AA：实到人数 × 每节小时系数 × 年级系数。", (_course_evidence(key=key, rule_id=rule_id, formula="attended × lesson_hour_factor × grade_coefficient", value=value, attended=attended, lesson_hour_factor=core.lesson_hour_factor, grade_coefficient=grade_coefficient),), key, teacher, "aa")
+    if treatment == "SPECIAL":
+        assert rule is not None
+        multiplier = rule.multiplier_for(attended)
+        if multiplier is None:
+            return CourseContribution(None, ValueState.NEEDS_INPUT, f"特殊班型“{class_type}”没有配置实到 {attended} 人的系数（UNKNOWN_CLASS_RULE），不能按邻近人数或单一固定系数猜测。", (Evidence("COURSE_RULE", rule_id=rule.id, record_key=key),), key, teacher, "ac")
+        value = grade_coefficient * multiplier * core.lesson_hour_factor
+        evidence = _course_evidence(key=key, rule_id=rule.id, formula="grade_coefficient × special_multiplier(class_type, attended) × lesson_hour_factor", value=value, grade_coefficient=grade_coefficient, special_multiplier=multiplier, attended=attended, lesson_hour_factor=core.lesson_hour_factor)
+        reason = "AC 特殊班：年级系数 × 该班型在本次实到人数下的系数 × 每节小时系数；不乘普通小班人数系数。"
     else:
-        people = core.small_group_headcount_coefficients.get(attended)
+        people = ORDINARY_SMALL_GROUP_HEADCOUNT_COEFFICIENTS.get(attended)
         if people is None:
-            return CourseContribution(None, ValueState.NEEDS_INPUT, f"小班实到人数 {attended} 没有配置系数，不能按邻近人数猜测；effective_ac 不可旁路未知人数系数。", (Evidence("COURSE_RULE", rule_id=rule.id, record_key=key),), key, teacher, "ac")
-        value = grade_coefficient * people * core.lesson_hour_factor
-        evidence = _course_evidence(key=key, rule_id=rule.id, formula="grade_coefficient × small_group_headcount_coefficient × lesson_hour_factor", value=value, grade_coefficient=grade_coefficient, small_group_headcount_coefficient=people, lesson_hour_factor=core.lesson_hour_factor, attended=attended)
+            return CourseContribution(None, ValueState.NEEDS_INPUT, f"普通小班实到人数 {attended} 没有系数，不能按邻近人数猜测。", (Evidence("COURSE_RULE", rule_id=rule_id, record_key=key),), key, teacher, "ac")
+        people_coefficient = Decimal(str(people))
+        value = grade_coefficient * people_coefficient * core.lesson_hour_factor
+        evidence = _course_evidence(key=key, rule_id=rule_id, formula="grade_coefficient × small_group_headcount_coefficient × lesson_hour_factor", value=value, grade_coefficient=grade_coefficient, small_group_headcount_coefficient=people_coefficient, lesson_hour_factor=core.lesson_hour_factor, attended=attended)
+        reason = "AC 普通小班：年级系数 × 实到人数系数 × 每节小时系数。"
     injected = None if effective_ac is None else effective_ac.get(key)
     if injected is not None:
         effective_value = _decimal(injected, f"effective_ac[{key}]")
@@ -274,7 +293,6 @@ def calculate_course(record: object, rules: CoreRules | Mapping[str, Any], *, ef
             raise ValueError("effective_ac contribution must be non-negative")
         override = Evidence("EFFECTIVE_AC", "approved resolution", record_key=key, detail=f"confirmed effective AC overrides calculated {value} with {effective_value}", formula="effective_ac", inputs={"calculated_value": str(value), "effective_value": str(effective_value)})
         return CourseContribution(effective_value, ValueState.DETERMINED, "使用已确认的 AC resolution 有效贡献。", (evidence, override), key, teacher, "ac")
-    reason = "AC 特殊班：年级系数 × 专项班型系数 × 每节小时系数；不乘普通小班人数系数。" if rule.treatment == "SPECIAL_FIXED" else "AC 小班：年级系数 × 小班实到人数系数 × 每节小时系数。"
     return CourseContribution(value, ValueState.DETERMINED, reason, (evidence,), key, teacher, "ac")
 
 
