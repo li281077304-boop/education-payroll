@@ -26,7 +26,7 @@ from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.common import load_student_grade_lookup
 from payroll_core.excel.schedule import read_schedule_excel
-from payroll_core.grade_inference import StudentGradeEvidence
+from payroll_core.grade_inference import StudentGradeEvidence, split_student_names
 from payroll_core.formula_audit import audit_payroll_formulas
 from payroll_core.rules.authority import TeacherCompensationProfile, TeacherRating, default_compensation_bands, policy_fee_checks, rating_and_rate_checks
 from payroll_core.reconcile.payroll_scope import HEADCOUNT_COEFFICIENTS, LESSON_HOUR_FACTOR, SMALL_GROUP_CLASS_TYPES, FieldCheck, class_value_contribution, normalize_class_rules, schedule_field_checks, total_salary_read_checks
@@ -1594,7 +1594,7 @@ class PayrollService(CoreFlow):
             return result
         return {"math": read_payroll_excel, "science": read_payroll_excel, "baseline": read_payroll_excel, "check": read_check_workbook_schedule}[role](path, period)
 
-    def import_grade_history(self, path: str, period: str, expected_hash: str | None = None) -> dict:
+    def import_grade_history(self, path: str, period: str = "0000-00", expected_hash: str | None = None) -> dict:
         """Store direct grade facts from a prior schedule without retaining it.
 
         This is the one-time migration path for a school that starts using the
@@ -1618,21 +1618,92 @@ class PayrollService(CoreFlow):
         stored = self._save_direct_grade_evidence(result.records, before)
         return {"source": source.name, "period": period, "direct_grade_evidence": stored, "records": len(result.records)}
 
-    def save_student_grade_confirmation(self, student: str, grade: str, period: str, confirmed_by: str, note: str = "") -> dict:
+    def import_grade_history_for_run(self, run_id: str, path: str, expected_hash: str | None = None) -> dict:
+        """Add one more past schedule and report its practical effect."""
+        run = self._load(run_id)
+        before = self._grade_help_for_run(run)
+        imported = self.import_grade_history(path, expected_hash=expected_hash)
+        after = self._grade_help_for_run(run)
+        rendered = self.check(run_id) if self._materials_ready(run) else self.render(run)
+        return {"import": imported, "before_count": before["count"], "resolved": max(0, before["count"] - after["count"]), "remaining": after["count"], "grade_help": after, "run": rendered}
+
+    def save_student_grade_confirmation(self, student: str, grade: str, period: str, confirmed_by: str, note: str = "", *, effective_date: str = "") -> dict:
         """Save a human-confirmed dated fact for later, explainable reuse."""
         name, value = student.strip(), grade.strip()
         if not name or not value or not period:
             raise ValueError("请填写学生、确认年级和适用月份。")
         if not confirmed_by.strip():
             raise ValueError("请填写确认人。")
-        identifier = hashlib.sha256(f"manual-grade|{name}|{period}".encode()).hexdigest()[:24]
+        fact_date = effective_date or f"{period}-01"
+        try:
+            datetime.fromisoformat(fact_date).date()
+        except ValueError as exc:
+            raise ValueError("人工年级确认需要有效的课程日期。") from exc
+        identifier = hashlib.sha256(f"manual-grade|{name}|{fact_date}".encode()).hexdigest()[:24]
         item = {
-            "id": identifier, "student": name, "lesson_date": f"{period}-28", "grade": value,
+            "id": identifier, "student": name, "lesson_date": fact_date, "grade": value,
             "origin": "MANUAL_CONFIRMATION", "confirmed_by": confirmed_by.strip(), "note": note.strip(),
             "source_file": "", "source_hash": "", "sheet": "", "coordinate": "",
         }
         self.store.save_student_grade_evidence(item)
         return item
+
+    def save_grade_confirmations_for_run(self, run_id: str, confirmations: list[dict], confirmed_by: str, note: str = "") -> dict:
+        """Save one dated student fact and re-read every affected course."""
+        run = self._load(run_id)
+        pending = {item["student"]: item for item in self._grade_help_for_run(run)["students"] if item.get("manual_allowed")}
+        saved = []
+        for item in confirmations:
+            student = str(item.get("student", "")).strip()
+            grade = str(item.get("grade", "")).strip()
+            group = pending.get(student)
+            if group is None:
+                raise ValueError("只能确认当前待补齐列表中的学生。请刷新后重试。")
+            if not grade:
+                raise ValueError(f"请为 {student} 选择年级。")
+            saved.append(self.save_student_grade_confirmation(student, grade, run["period"], confirmed_by, str(item.get("note", note)), effective_date=str(group["first_course_date"])))
+        if not saved:
+            raise ValueError("请至少填写一名学生的年级。")
+        refreshed = self._grade_help_for_run(run)
+        rendered = self.check(run_id) if self._materials_ready(run) else self.render(run)
+        return {"saved": len(saved), "remaining": refreshed["count"], "grade_help": refreshed, "run": rendered}
+
+    def grade_help(self, run_id: str) -> dict:
+        return self._grade_help_for_run(self._load(run_id))
+
+    def _grade_help_for_run(self, run: dict) -> dict:
+        schedule_file = run.get("files", {}).get("schedule")
+        if not schedule_file:
+            return {"available": False, "count": 0, "students": [], "message": "请先导入本月排课表。"}
+        try:
+            result = self._read("schedule", Path(schedule_file["path"]), run["period"])
+        except (OSError, ValueError):
+            return {"available": False, "count": 0, "students": [], "message": "排课表暂时无法重新读取。"}
+        groups: dict[str, dict] = {}
+        for row in result.records:
+            if row.grade:
+                continue
+            students = split_student_names(row.student)
+            if not students:
+                students = (f"__missing_student__:{row.lesson_date}:{row.teacher}:{row.class_name}",)
+            for student in students:
+                missing = student.startswith("__missing_student__:")
+                key = student
+                group = groups.setdefault(key, {"student": "未填写学生姓名" if missing else student, "course_count": 0, "course_dates": [], "teachers": set(), "manual_allowed": not missing, "reason": row.grade_reason or "课程没有可用的年级信息。"})
+                group["course_count"] += 1
+                if row.lesson_date:
+                    group["course_dates"].append(row.lesson_date)
+                if row.teacher:
+                    group["teachers"].add(row.teacher)
+        students = []
+        for item in groups.values():
+            dates = sorted(set(item.pop("course_dates")))
+            item["first_course_date"] = dates[0] if dates else f"{run['period']}-01"
+            item["course_dates"] = dates
+            item["teachers"] = sorted(item["teachers"])
+            students.append(item)
+        students.sort(key=lambda item: item["student"])
+        return {"available": True, "count": len(students), "students": students, "message": "部分赠送、换购、特批课程没有写年级，或者当前班级名称已发生变化。年级会影响课时折算，需要先确认。"}
 
     def _stored_grade_evidence(self) -> tuple[list[StudentGradeEvidence], list[StudentGradeEvidence]]:
         manual: list[StudentGradeEvidence] = []
@@ -1661,13 +1732,14 @@ class PayrollService(CoreFlow):
             class_cell = record.provenance.get("grade") or record.provenance.get("class_name")
             coordinate = getattr(class_cell, "coordinate", "")
             sheet = getattr(class_cell, "sheet", "")
-            identifier = hashlib.sha256(f"schedule-grade|{source['sha256']}|{coordinate}|{record.student}|{record.lesson_date}|{record.grade}".encode()).hexdigest()[:24]
-            self.store.save_student_grade_evidence({
-                "id": identifier, "student": record.student, "lesson_date": record.lesson_date, "grade": record.grade,
-                "origin": "HISTORICAL_SCHEDULE", "source_file": record.source, "source_hash": source["sha256"],
-                "sheet": sheet, "coordinate": coordinate, "confirmed_by": "", "note": "源课表直接年级。",
-            })
-            saved += 1
+            for student in split_student_names(record.student):
+                identifier = hashlib.sha256(f"schedule-grade|{source['sha256']}|{coordinate}|{student}|{record.lesson_date}|{record.grade}".encode()).hexdigest()[:24]
+                self.store.save_student_grade_evidence({
+                    "id": identifier, "student": student, "lesson_date": record.lesson_date, "grade": record.grade,
+                    "origin": "HISTORICAL_SCHEDULE", "source_file": record.source, "source_hash": source["sha256"],
+                    "sheet": sheet, "coordinate": coordinate, "confirmed_by": "", "note": "源课表直接年级。",
+                })
+                saved += 1
         return saved
 
     def _student_grade_lookup(self) -> dict[str, str]:
@@ -1881,6 +1953,7 @@ class PayrollService(CoreFlow):
                 "rules": {"label": "工资规则", "name": "现行档位金额规则", "source": "skill/payroll/references/ae_tier_rules.md", "source_version": "2025-10", "effective_period": "2025-10 起持续维护"},
             },
             "business_input_bindings": run.get("business_input_bindings", []),
+            "grade_help": self._grade_help_for_run(run),
         }
 
     @staticmethod

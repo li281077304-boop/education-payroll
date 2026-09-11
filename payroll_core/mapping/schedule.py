@@ -96,7 +96,7 @@ def read_schedule_with_mapping(
         grade, grade_origin, grade_reason = resolve_schedule_grade(
             class_name, text("student"), period=period, student_grades=student_grades,
             manual_evidence=manual_grade_evidence, historical_evidence=historical_grade_evidence,
-            direct_grade=text("grade"),
+            direct_grade=text("grade"), course_date=lesson_date,
         )
         if not grade:
             unknown_grades += 1

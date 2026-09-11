@@ -122,6 +122,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 run_id = parsed.path.split("/")[3]
                 issue = parse_qs(parsed.query).get("issue", [""])[0]
                 return self._json(self.server.service.evidence(run_id, issue))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/grade-help"):
+                return self._json(self.server.service.grade_help(parsed.path.split("/")[3]))
             if parsed.path.startswith("/api/runs/") and "/resolutions/" in parsed.path:
                 parts = parsed.path.split("/")
                 return self._json(self.server.service.active_resolution(parts[3], parts[5]))
@@ -200,6 +202,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.rebind_calculation(run_id, "core" if action == "core-rules" else "part_time", str(payload.get("version_id", ""))))
                 if action == "files":
                     return self._json(self.server.service.import_file(run_id, str(payload.get("role", "")), str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
+                if action == "grade-history":
+                    return self._json(self.server.service.import_grade_history_for_run(run_id, str(payload.get("path", "")), payload.get("sha256")))
+                if action == "grade-confirmations":
+                    return self._json(self.server.service.save_grade_confirmations_for_run(run_id, list(payload.get("confirmations", [])), str(payload.get("confirmed_by", "")), str(payload.get("note", ""))))
                 if action == "check":
                     return self._json(self.server.service.check(run_id))
                 if action == "decisions":

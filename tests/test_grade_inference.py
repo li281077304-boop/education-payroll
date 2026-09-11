@@ -16,8 +16,24 @@ def test_july_eighth_grade_stays_eighth_in_august():
     assert (result.grade, result.status) == ("八年级", "DETERMINED")
 
 
-def test_july_eighth_grade_advances_to_ninth_in_september():
-    result = infer_historical_grade("学生甲", "2026-09", [evidence("学生甲", "2026-07-18", "八年级")])
+def test_eighth_grade_stays_eighth_before_september_twentieth():
+    result = infer_historical_grade(
+        "学生甲", "2026-09", [evidence("学生甲", "2026-07-18", "八年级")], target_date="2026-09-19",
+    )
+    assert result.grade == "八年级"
+
+
+def test_eighth_grade_advances_on_september_twentieth():
+    result = infer_historical_grade(
+        "学生甲", "2026-09", [evidence("学生甲", "2026-07-18", "八年级")], target_date="2026-09-20",
+    )
+    assert result.grade == "九年级"
+
+
+def test_eighth_grade_advances_after_september_twentieth():
+    result = infer_historical_grade(
+        "学生甲", "2026-09", [evidence("学生甲", "2026-07-18", "八年级")], target_date="2026-09-21",
+    )
     assert result.grade == "九年级"
 
 
@@ -98,11 +114,47 @@ def _gift_workbook(path: Path, class_name: str = "赠送课程", student: str = 
     return path
 
 
-def test_current_course_direct_grade_is_never_overridden_by_history(tmp_path):
-    path = _gift_workbook(tmp_path / "direct.xlsx", "八年级数学")
-    result = read_schedule_excel(path, "2026-08", historical_grade_evidence=[evidence("学生甲", "2026-07-18", "九年级")])
+def test_reliable_student_history_corrects_polluted_current_class_name(tmp_path):
+    path = _gift_workbook(tmp_path / "direct.xlsx", "高三数学")
+    result = read_schedule_excel(path, "2026-08", historical_grade_evidence=[evidence("学生甲", "2026-07-18", "高二")])
+    assert result.records[0].grade == "高二"
+    assert result.records[0].grade_origin == "HISTORICAL_SCHEDULE"
+    assert "覆盖当前班名" in result.records[0].grade_reason
+
+
+def test_roster_history_uses_each_student_and_corrects_current_class_name(tmp_path):
+    history_service = PayrollService(tmp_path / "local")
+    history = _gift_workbook(tmp_path / "history.xlsx", "八年级数学", "学生甲,学生乙", "2026-07-18 09:00")
+    imported = history_service.import_grade_history(str(history))
+    assert imported["direct_grade_evidence"] == 2
+    _manual, stored = history_service._stored_grade_evidence()
+    current = _gift_workbook(tmp_path / "current.xlsx", "高三数学", "学生甲,学生乙", "2026-08-03 09:00")
+    result = read_schedule_excel(current, "2026-08", historical_grade_evidence=stored)
     assert result.records[0].grade == "八年级"
-    assert result.records[0].grade_origin == "DIRECT_SOURCE"
+    assert result.records[0].grade_origin == "HISTORICAL_SCHEDULE"
+
+
+def test_multi_student_conflicting_history_requires_input(tmp_path):
+    current = _gift_workbook(tmp_path / "current.xlsx", "赠送课程", "学生甲,学生乙", "2026-08-03 09:00")
+    result = read_schedule_excel(current, "2026-08", historical_grade_evidence=[
+        evidence("学生甲", "2026-07-18", "八年级"),
+        evidence("学生乙", "2026-07-18", "九年级"),
+    ])
+    assert result.records[0].grade == ""
+    assert result.records[0].grade_origin == "NEEDS_INPUT"
+    assert "同一课程" in result.records[0].grade_reason
+
+
+def test_saved_legacy_confirmation_can_resolve_conflicting_history(tmp_path):
+    current = _gift_workbook(tmp_path / "current.xlsx", "赠送课程", "学生甲", "2026-08-03 09:00")
+    result = read_schedule_excel(
+        current, "2026-08", student_grades={"学生甲": "八年级"}, historical_grade_evidence=[
+            evidence("学生甲", "2026-07-18", "八年级", source_hash="v1"),
+            evidence("学生甲", "2026-07-18", "九年级", source_hash="v2"),
+        ],
+    )
+    assert result.records[0].grade == "八年级"
+    assert result.records[0].grade_origin == "MANUAL_LOOKUP"
 
 
 def test_adapter_uses_history_before_legacy_csv_for_missing_current_grade(tmp_path):
@@ -111,8 +163,9 @@ def test_adapter_uses_history_before_legacy_csv_for_missing_current_grade(tmp_pa
         path, "2026-09", student_grades={"学生甲": "八年级"},
         historical_grade_evidence=[evidence("学生甲", "2026-07-18", "八年级")],
     )
-    # A dated history fact is more current than an undated compatibility CSV.
-    assert result.records[0].grade == "九年级"
+    # The class happened before 20 September, so the dated history fact has
+    # not crossed the academic-year boundary yet.
+    assert result.records[0].grade == "八年级"
     assert result.records[0].grade_origin == "HISTORICAL_SCHEDULE"
 
 
@@ -147,11 +200,95 @@ def test_saved_history_is_used_by_a_later_monthly_schedule_import(tmp_path):
     history = _gift_workbook(tmp_path / "july.xlsx", "八年级数学", lesson_time="2026-07-18 09:00")
     service.import_grade_history(str(history), "2026-07")
     run = service.create("2026-09", "GENERATE")
-    current = _gift_workbook(tmp_path / "september-gift.xlsx", lesson_time="2026-09-03 09:00")
+    current = _gift_workbook(tmp_path / "september-gift.xlsx", lesson_time="2026-09-21 09:00")
     service.import_file(run["id"], "schedule", str(current))
     imported = service._read("schedule", current, "2026-09")
     assert imported.records[0].grade == "九年级"
     assert imported.records[0].grade_origin == "HISTORICAL_SCHEDULE"
+
+
+def _schedule_workbook(path: Path, rows: list[dict]) -> Path:
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "排课记录"
+    headers = ["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"]
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([row.get(header, "") for header in headers])
+    book.save(path)
+    return path
+
+
+def test_grade_help_groups_many_ungraded_courses_by_student(tmp_path):
+    service = PayrollService(tmp_path / "local")
+    run = service.create("2026-08", "GENERATE")
+    schedule = _schedule_workbook(tmp_path / "current.xlsx", [
+        {"上课班级": "赠送课程", "教学形式": "一对一", "上课时间": f"2026-08-{day:02d} 09:00", "上课状态": "已上课", "实到": 1, "上课学员": "学生甲", "上课科目": "数学", "任课老师": "教师甲"}
+        for day in range(1, 11)
+    ])
+    service.import_file(run["id"], "schedule", str(schedule))
+    help_data = service.grade_help(run["id"])
+    assert help_data["count"] == 1
+    assert help_data["students"][0]["student"] == "学生甲"
+    assert help_data["students"][0]["course_count"] == 10
+
+
+def test_grade_help_splits_one_class_roster_into_student_confirmations(tmp_path):
+    service = PayrollService(tmp_path / "local")
+    run = service.create("2026-08", "GENERATE")
+    schedule = _schedule_workbook(tmp_path / "current.xlsx", [
+        {"上课班级": "赠送课程", "教学形式": "一对一", "上课时间": "2026-08-03 09:00", "上课状态": "已上课", "实到": 2, "上课学员": "学生甲,学生乙", "上课科目": "数学", "任课老师": "教师甲"},
+    ])
+    service.import_file(run["id"], "schedule", str(schedule))
+    help_data = service.grade_help(run["id"])
+    assert [item["student"] for item in help_data["students"]] == ["学生乙", "学生甲"]
+    assert [item["course_count"] for item in help_data["students"]] == [1, 1]
+
+
+def test_manual_grade_confirmation_rechecks_all_courses_for_one_student(tmp_path):
+    service = PayrollService(tmp_path / "local")
+    run = service.create("2026-08", "GENERATE")
+    schedule = _schedule_workbook(tmp_path / "current.xlsx", [
+        {"上课班级": "换购课程", "教学形式": "一对一", "上课时间": f"2026-08-{day:02d} 09:00", "上课状态": "已上课", "实到": 1, "上课学员": "学生甲", "上课科目": "数学", "任课老师": "教师甲"}
+        for day in (3, 8, 15)
+    ])
+    service.import_file(run["id"], "schedule", str(schedule))
+    saved = service.save_grade_confirmations_for_run(run["id"], [{"student": "学生甲", "grade": "八年级"}], "审核人")
+    assert saved["saved"] == 1 and saved["remaining"] == 0
+    reread = service._read("schedule", schedule, "2026-08")
+    assert [row.grade for row in reread.records] == ["八年级", "八年级", "八年级"]
+
+
+def test_all_roster_confirmations_recheck_the_same_course(tmp_path):
+    service = PayrollService(tmp_path / "local")
+    run = service.create("2026-08", "GENERATE")
+    schedule = _schedule_workbook(tmp_path / "current.xlsx", [
+        {"上课班级": "赠送课程", "教学形式": "一对一", "上课时间": "2026-08-03 09:00", "上课状态": "已上课", "实到": 2, "上课学员": "学生甲,学生乙", "上课科目": "数学", "任课老师": "教师甲"},
+    ])
+    service.import_file(run["id"], "schedule", str(schedule))
+    result = service.save_grade_confirmations_for_run(run["id"], [
+        {"student": "学生甲", "grade": "八年级"},
+        {"student": "学生乙", "grade": "八年级"},
+    ], "审核人")
+    assert result["saved"] == 2 and result["remaining"] == 0
+    reread = service._read("schedule", schedule, "2026-08")
+    assert reread.records[0].grade == "八年级"
+
+
+def test_multiple_history_imports_continue_to_reduce_student_groups(tmp_path):
+    service = PayrollService(tmp_path / "local")
+    run = service.create("2026-08", "GENERATE")
+    current = _schedule_workbook(tmp_path / "current.xlsx", [
+        {"上课班级": "赠送课程", "教学形式": "一对一", "上课时间": "2026-08-03 09:00", "上课状态": "已上课", "实到": 1, "上课学员": "学生甲", "上课科目": "数学", "任课老师": "教师甲"},
+        {"上课班级": "换购课程", "教学形式": "一对一", "上课时间": "2026-08-03 09:00", "上课状态": "已上课", "实到": 1, "上课学员": "学生乙", "上课科目": "数学", "任课老师": "教师乙"},
+    ])
+    service.import_file(run["id"], "schedule", str(current))
+    history_a = _gift_workbook(tmp_path / "history-a.xlsx", "八年级数学", "学生甲", "2026-07-18 09:00")
+    history_b = _gift_workbook(tmp_path / "history-b.xlsx", "高一数学", "学生乙", "2026-07-18 09:00")
+    first = service.import_grade_history_for_run(run["id"], str(history_a))
+    second = service.import_grade_history_for_run(run["id"], str(history_b))
+    assert first["before_count"] == 2 and first["remaining"] == 1
+    assert second["before_count"] == 1 and second["remaining"] == 0
 
 
 def test_legacy_student_grade_lookup_remains_compatible(tmp_path):

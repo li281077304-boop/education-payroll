@@ -85,6 +85,7 @@ def read_schedule_excel(
             student_grades=student_grades,
             manual_evidence=manual_grade_evidence,
             historical_evidence=historical_grade_evidence,
+            course_date=lesson_date,
         )
         if not grade:
             unknown_grades += 1

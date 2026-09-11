@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..models.evidence import CellValueState, SourceEvidence
-from ..grade_inference import StudentGradeEvidence, infer_historical_grade
+from ..grade_inference import GradeInference, StudentGradeEvidence, infer_historical_grade, split_student_names
 
 
 # “一对多” does not tell us whether the approved special treatment is 1对2
@@ -193,35 +193,114 @@ def resolve_schedule_grade(
     manual_evidence: Sequence[StudentGradeEvidence] = (),
     historical_evidence: Sequence[StudentGradeEvidence] = (),
     direct_grade: Any = "",
+    course_date: str = "",
 ) -> tuple[str, str, str]:
     """Resolve one grade with an auditable authority order.
 
-    A current source cell is strongest.  A prior human confirmation comes
-    next: it is an explicit fact, so it is safer than a statistical inference.
-    Historical normal-course evidence is used only when it agrees.  The old
-    local CSV remains a compatibility fallback for existing installations.
+    Dated student evidence is stronger than a current class name.  This
+    protects historical courses from class labels auto-promoted by a later
+    export. Contradictory facts for one student require input; a multi-student
+    roster that cannot form one conclusion falls back to an explicit course
+    grade when one exists. The old local CSV remains a compatibility fallback.
     """
     direct = normalize_grade(direct_grade) or grade_from_class_name(class_name)
-    if direct:
-        return direct, "DIRECT_SOURCE", "当前课程或源表已明确标注年级。"
 
+    names = split_student_names(student)
     name = "" if student is None else str(student).strip()
-    confirmed = infer_historical_grade(name, period, manual_evidence, recent_history_only=False)
+    confirmed = _infer_roster_grade(names, period, manual_evidence, recent_history_only=False, course_date=course_date)
     if confirmed.grade:
-        return confirmed.grade, "MANUAL_CONFIRMATION", confirmed.reason
+        reason = confirmed.reason
+        if direct and direct != confirmed.grade:
+            reason += f" 已保存的学生年级事实覆盖当前班名年级“{direct}”。"
+        return confirmed.grade, "MANUAL_CONFIRMATION", reason
     if confirmed.evidence:
+        legacy_grade = _lookup_roster_grade(names, student_grades)
+        if legacy_grade:
+            return legacy_grade, "MANUAL_LOOKUP", "历史课表年级存在冲突；使用已保存的本地学生年级确认（兼容来源）。"
         return "", "NEEDS_INPUT", confirmed.reason
 
-    inferred = infer_historical_grade(name, period, historical_evidence)
+    inferred = _infer_roster_grade(names, period, historical_evidence, course_date=course_date)
     if inferred.grade:
-        return inferred.grade, "HISTORICAL_SCHEDULE", inferred.reason
+        reason = inferred.reason
+        if direct and direct != inferred.grade:
+            reason += f" 学生年级历史覆盖当前班名年级“{direct}”。"
+        return inferred.grade, "HISTORICAL_SCHEDULE", reason
     if inferred.evidence:
+        legacy_grade = _lookup_roster_grade(names, student_grades)
+        if legacy_grade:
+            return legacy_grade, "MANUAL_LOOKUP", "历史课表年级存在冲突；使用已保存的本地学生年级确认（兼容来源）。"
         return "", "NEEDS_INPUT", inferred.reason
+
+    if direct:
+        return direct, "DIRECT_SOURCE", "当前课程或源表已明确标注年级。"
 
     legacy = grade_from_schedule(class_name, student, student_grades)
     if legacy:
         return legacy, "MANUAL_LOOKUP", "来自本地学生年级确认表（兼容来源）。"
     return "", "NEEDS_INPUT", inferred.reason or "当前课程未标年级，且没有可用历史证据或人工确认。"
+
+
+def _lookup_roster_grade(students: Sequence[str], lookup: Mapping[str, str] | None) -> str:
+    """Use a saved compatibility confirmation only when it covers one roster.
+
+    The legacy lookup is an existing local human fact, not an automatic
+    inference.  It can break a conflict between historical exports, but it
+    must cover every listed student and agree on one grade.
+    """
+    if not students or not lookup:
+        return ""
+    values = [normalize_grade(lookup.get(student, "")) for student in students]
+    if not all(values) or len(set(values)) != 1:
+        return ""
+    return values[0]
+
+
+def _infer_roster_grade(
+    students: Sequence[str],
+    period: str,
+    evidence: Sequence[StudentGradeEvidence],
+    *,
+    recent_history_only: bool = True,
+    course_date: str = "",
+) -> "GradeInference":
+    """Infer one course grade from one or more named students.
+
+    A multi-student row may override a current class-name grade only when
+    every listed student has a non-conflicting conclusion and all conclusions
+    agree.  This prevents a single remembered student from silently assigning
+    a grade to their classmates.
+    """
+    if not students:
+        return infer_historical_grade("", period, evidence, recent_history_only=recent_history_only, target_date=course_date)
+    results = [
+        infer_historical_grade(item, period, evidence, recent_history_only=recent_history_only, target_date=course_date)
+        for item in students
+    ]
+    conflicted = [result for result in results if result.evidence and not result.grade]
+    if conflicted:
+        return conflicted[0]
+    known = [result for result in results if result.grade]
+    if len(known) != len(students):
+        return infer_historical_grade("", period, (), recent_history_only=recent_history_only, target_date=course_date)
+    grades = {result.grade for result in known}
+    if len(grades) != 1:
+        # This is a roster-level disagreement, not contradictory history for
+        # the same student.  It cannot safely override an explicit course
+        # grade, but that grade remains usable as the source's own fact.  If
+        # the course itself has no grade, the caller will surface this reason
+        # as a request for human input.
+        return GradeInference(
+            reason="同一课程中学生的历史年级推断互相冲突，需要人工确认。",
+            evidence=(),
+        )
+    grade = grades.pop()
+    facts = tuple(item for result in known for item in result.evidence)
+    return GradeInference(
+        grade=grade,
+        status="DETERMINED",
+        reason=f"依据 {len(students)} 名学生的历史年级证据自动推断。",
+        evidence=facts,
+    )
 
 
 def subject_from_source(value: Any) -> str:

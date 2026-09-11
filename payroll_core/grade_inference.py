@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import calendar
+import re
 from typing import Iterable
 
 
@@ -16,6 +17,21 @@ NATURAL_GRADE_LADDER = (
     "一年级", "二年级", "三年级", "四年级", "五年级", "六年级",
     "七年级", "八年级", "九年级", "高一", "高二", "高三",
 )
+ACADEMIC_ADVANCEMENT_MONTH = 9
+ACADEMIC_ADVANCEMENT_DAY = 20
+
+
+def split_student_names(value: object) -> tuple[str, ...]:
+    """Return the individual students represented by one schedule roster cell.
+
+    Schedule exports commonly put a whole small-class roster in the student
+    column.  Grade evidence is stored per student, never against an unstable
+    comma-joined roster string.  A single name remains a single-item tuple.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return ()
+    return tuple(dict.fromkeys(part.strip() for part in re.split(r"[,，、;；\n]+", text) if part.strip()))
 
 
 @dataclass(frozen=True)
@@ -52,13 +68,15 @@ def infer_historical_grade(
     evidence: Iterable[StudentGradeEvidence],
     *,
     recent_history_only: bool = True,
+    target_date: str = "",
 ) -> GradeInference:
     """Infer a grade only when every usable historical statement agrees.
 
-    The payroll month, rather than today's date or a later export title,
-    provides the target date.  A promotion occurs only when crossing 1 Sept.
+    The actual course date, when available, provides the target date.  The
+    payroll month only defines the history window.  A promotion occurs when
+    crossing 20 Sept, never when a later export happens to be opened.
     """
-    target = _period_end(target_period)
+    target = _parse_date(target_date) if target_date else _period_end(target_period)
     if target is None or not student.strip():
         return GradeInference(reason="缺少学生或核算月份，无法从历史课表推断年级。")
 
@@ -124,7 +142,7 @@ def _advance_for_boundaries(grade: str, source_day: date, target_day: date) -> s
     index = NATURAL_GRADE_LADDER.index(grade)
     boundaries = 0
     for year in range(source_day.year, target_day.year + 1):
-        boundary = date(year, 9, 1)
+        boundary = date(year, ACADEMIC_ADVANCEMENT_MONTH, ACADEMIC_ADVANCEMENT_DAY)
         if source_day < boundary <= target_day:
             boundaries += 1
     target_index = index + boundaries

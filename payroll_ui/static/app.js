@@ -466,7 +466,7 @@ function renderTab() {
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">排课数据和提交表齐全即可开始。导入基准最终工资表后，系统会用它核验本次提交教师。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，可以直接生成工资表（缺基础资料时只会生成草稿）。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? `<button ${current.health.ready ? "" : "disabled"} onclick="generatePayroll()">生成标准工资表</button>` : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">排课数据和提交表齐全即可开始。导入基准最终工资表后，系统会用它核验本次提交教师。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，可以直接生成工资表（缺基础资料时只会生成草稿）。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? `<button ${current.health.ready ? "" : "disabled"} onclick="generatePayroll()">生成标准工资表</button>` : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
 }
 
 function materialCard(material) {
@@ -476,6 +476,41 @@ function materialCard(material) {
   const stateText = material.state === "失效" ? "● 已变化，需重新选择" : file ? "✓ 已识别" : material.required ? "○ 必需材料" : "可稍后补充";
   const risk = file ? [file.missing_cache ? `${file.missing_cache} 个公式结果不可读取` : "", file.external_references ? `${file.external_references} 处依赖其他文件` : ""].filter(Boolean) : [];
   return `<article class="material-card ${material.state === "失效" ? "stale" : ""}"><div class="material-top"><strong>${escapeHtml(copy[0])}</strong><span class="${stateClass}">${stateText}</span></div><p class="small muted">${escapeHtml(copy[2])}</p>${file ? `<div class="file-name">${escapeHtml(file.name)}</div><div class="facts"><span>${file.records} 条记录</span><span>${file.teachers} 名教师</span></div>${risk.length ? `<p class="small warn">⚠ ${risk.join("；")}</p>` : ""}<details><summary>查看文件信息</summary><p class="small muted">工作表：${file.sheets.map(escapeHtml).join("、")}<br>文件标识：${file.sha256.slice(0, 10)}</p></details>` : '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" onclick="choose('${material.role}')">${escapeHtml(copy[1])}</button></article>`;
+}
+
+function gradeSupportSection(help) {
+  if (!help?.available || !help.count) return "";
+  return `<section class="card" id="grade-help-card"><div class="section-head"><div><p class="eyebrow">年级补齐</p><h2>有 ${help.count} 名学生暂时无法确定年级</h2><p class="muted">部分赠送、换购、特批课程没有写年级，或者当前排课表中的班级名称已经发生变化。年级会影响课时折算，因此需要先确认这些学生的年级。</p></div></div><div class="material-grid"><article class="material-card"><strong>① 从以前的排课表自动查找</strong><p class="small muted">如果这些学生以前上过正常课程，可以上传过去的排课记录。建议上传过去一年的记录，文件越完整，自动找到的学生越多。系统只提取学生年级证据，不会修改这些历史文件。</p><button class="secondary full" onclick="chooseGradeHistory()">选择历史排课表</button></article><article class="material-card"><strong>② 我自己填写</strong><p class="small muted">如果你知道学生目前的年级，可以直接填写。保存后以后不需要重复填写。</p><button class="secondary full" onclick="showManualGradeForm()">手动填写年级</button></article></div><p class="small muted">每年 9 月 20 日起，系统会自动将已保存学生统一升一个年级。历史月份不会因此改变。</p><div id="grade-manual-form"></div></section>`;
+}
+
+async function chooseGradeHistory() {
+  try {
+    const picked = await api("/api/pick", { method: "POST", body: "{}" });
+    if (!picked.path) return;
+    const result = await api(`/api/runs/${current.id}/grade-history`, { method: "POST", body: JSON.stringify({ path: picked.path }) });
+    current = result.run;
+    renderRun();
+    showMessage(`本次读取 ${result.import.direct_grade_evidence} 条有效年级记录，已自动解决 ${result.resolved} 名学生，仍有 ${result.remaining} 名需要确认。`, result.remaining ? "success" : "success");
+  } catch (error) { showMessage(error.message); }
+}
+
+function showManualGradeForm() {
+  const help = current.grade_help || {};
+  const grades = ["一年级", "二年级", "三年级", "四年级", "五年级", "六年级", "七年级", "八年级", "九年级", "高一", "高二", "高三"];
+  const rows = (help.students || []).filter(item => item.manual_allowed).map((item) => `<tr><td>${escapeHtml(item.student)}</td><td><select class="grade-confirmation" data-student="${escapeHtml(item.student)}"><option value="">请选择</option>${grades.map(grade => `<option value="${grade}">${grade}</option>`).join("")}</select></td></tr>`).join("");
+  const blocked = (help.students || []).filter(item => !item.manual_allowed).map(item => escapeHtml(item.student)).join("、");
+  $("#grade-manual-form").innerHTML = `<section class="action-first"><h3>填写学生年级</h3><p class="muted small">同一学生的多条课程只需填写一次。系统会以该学生本次最早待确认课程日期保存为事实，并按 9 月 20 日规则处理后续课程。</p><div class="table-wrap"><table class="table"><thead><tr><th>学生</th><th>年级</th></tr></thead><tbody>${rows || '<tr><td colspan="2" class="muted">没有可手动填写的学生。</td></tr>'}</tbody></table></div>${blocked ? `<p class="small warn">以下课程没有填写学生姓名，无法按学生补齐：${blocked}</p>` : ""}<div class="decision-form"><label>确认人<input id="grade-confirmed-by" placeholder="填写姓名"></label></div><div class="action-bar"><button class="secondary" onclick="$('#grade-manual-form').innerHTML=''">取消</button><button onclick="saveManualGrades()">保存并继续核算</button></div></section>`;
+}
+
+async function saveManualGrades() {
+  try {
+    const confirmations = [...document.querySelectorAll(".grade-confirmation")].filter(node => node.value).map(node => ({ student: node.dataset.student, grade: node.value }));
+    if (!confirmations.length) throw new Error("请至少选择一名学生的年级。");
+    const result = await api(`/api/runs/${current.id}/grade-confirmations`, { method: "POST", body: JSON.stringify({ confirmations, confirmed_by: $("#grade-confirmed-by").value }) });
+    current = result.run;
+    renderRun();
+    showMessage(`已保存 ${result.saved} 名学生的年级；剩余 ${result.remaining} 名待确认。`, "success");
+  } catch (error) { showMessage(error.message); }
 }
 
 function coreCalculationCell(field) {
