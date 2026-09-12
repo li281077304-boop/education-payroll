@@ -208,3 +208,11 @@ def test_default_export_location_is_reachable(tmp_path):
     data = service.default_export_path("标准工资表.xlsx")
     assert data["path"].endswith("标准工资表.xlsx")
     assert data["location"], "必须能告诉用户文件保存在哪里"
+
+
+# ------------------------------------------------------- 旧 UAT 扫雷（原则 17）
+def test_ui_copy_never_exposes_engineering_concepts():
+    """界面文案不能出现 Run / Adapter / YAML 这类工程概念。"""
+    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text(encoding="utf-8")
+    for phrase in ("个 Run", "历史 Run", "某个 Run", "旧 Run", "新 Run", "Adapter", "YAML"):
+        assert phrase not in source, f"界面文案不应出现工程概念：{phrase}"
