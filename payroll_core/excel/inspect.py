@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Iterable
 from zipfile import BadZipFile
 
@@ -92,6 +93,22 @@ class _XlrdSheet:
 
     def cell(self, row: int, column: int) -> _XlrdCell:
         return _XlrdCell(self._sheet.cell_value(row - 1, column - 1))
+
+    def __getitem__(self, coordinate: str) -> _XlrdCell:
+        """Provide the small coordinate lookup used by the inspector.
+
+        ``openpyxl`` sheets support ``sheet["A1"]``; the binary-XLS facade
+        must expose the same read-only seam so formula/cache inspection works
+        for genuine XLS files as well as OOXML files with an ``.xls`` suffix.
+        """
+        match = re.fullmatch(r"([A-Za-z]+)([0-9]+)", str(coordinate))
+        if not match:
+            raise KeyError(coordinate)
+        letters, row_text = match.groups()
+        column = 0
+        for char in letters.upper():
+            column = column * 26 + ord(char) - ord("A") + 1
+        return self.cell(int(row_text), column)
 
     def iter_rows(self):
         for row in range(self.max_row):
