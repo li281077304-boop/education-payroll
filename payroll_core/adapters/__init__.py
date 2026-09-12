@@ -19,6 +19,7 @@ from .personnel import (
 )
 from .refund import RefundReportRecord, read_refund_report
 from .renewal_report import RenewalReportRecord, read_renewal_report
+from .star import StarRecord, read_star_report
 from .weekly_report import WeeklyReportRecord, read_weekly_report
 
 __all__ = [
@@ -30,5 +31,6 @@ __all__ = [
     "default_part_time_records", "identity_conflicts", "read_personnel",
     "RefundReportRecord", "read_refund_report",
     "RenewalReportRecord", "read_renewal_report",
+    "StarRecord", "read_star_report",
     "WeeklyReportRecord", "read_weekly_report",
 ]

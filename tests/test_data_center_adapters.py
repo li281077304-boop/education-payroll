@@ -3,6 +3,7 @@ from pathlib import Path
 import openpyxl
 
 from payroll_core.adapters.personnel import DEFAULT_PART_TIME_RATES, default_part_time_records, identity_conflicts, read_personnel
+from payroll_core.adapters.star import read_star_report
 from payroll_core.calculation import calculate_payroll
 from payroll_core.config.core_rules import load_core_rules
 from payroll_core.models.records import ScheduleRecord
@@ -21,6 +22,18 @@ def _weekly_book(path: Path) -> Path:
     sheet.append(["序号", "教师", "一对一", "", "", "班课", "", "", "单科总数", "总课次", "续费", "续费率"])
     sheet.append(["", "", "生数", "课时数", "周均", "班课生数", "班级数", "平均班级生数", "", "", "人头", "率"])
     sheet.append([1, "刘宇", 2, 6, 3, 4, 1, 4, 6, 10, 2, 0.25])
+    book.save(path)
+    return path
+
+
+def _star_book(path: Path, *, rating: str = "三星", teacher: str = "教师甲") -> Path:
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Sheet1"
+    sheet.append(["星级教师具体名单"])
+    sheet.append(["", rating, "", "四星", ""])
+    sheet.append(["", "姓名", "学科", "姓名", "学科"])
+    sheet.append(["", teacher, "数学", "", ""])
     book.save(path)
     return path
 
@@ -55,6 +68,36 @@ def test_ooxml_content_with_xls_suffix_is_read_without_manual_rename(tmp_path):
     renewal = read_renewal_report(source, "2026-08")
     assert not renewal.errors
     assert renewal.records[0].renewal_rate == 2 / 6
+
+
+def test_star_adapter_reads_wide_tier_table_with_cell_evidence(tmp_path):
+    source = _star_book(tmp_path / "星级名单.xls")
+    result = read_star_report(source, "2026-08")
+    assert not result.errors
+    assert result.records[0].teacher == "教师甲"
+    assert result.records[0].rating == 3
+    assert result.records[0].cell == "Sheet1!B4"
+
+
+def test_package_loads_system_star_authority_and_preserves_conflicts(tmp_path):
+    source = _weekly_book(tmp_path / "weekly.xlsx")
+    book = openpyxl.load_workbook(source)
+    book.active.title = "排课列表"
+    book.active.delete_rows(1, book.active.max_row)
+    book.active.append(["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"])
+    book.active.append(["高二物理一对一", "一对一", "2026-08-01 10:00", "已上课", 1, "学生甲", "物理", "教师甲"])
+    book.save(tmp_path / "排课列表.xlsx")
+    _star_book(tmp_path / "星级名单.xlsx")
+    package = discover_payroll_package(tmp_path, "2026-08")
+    assert package.authority_ratings == {"教师甲": 3}
+    star_source = next(item for item in package.source_registry if item["source_type"] == "STAR")
+    assert star_source["status"] == "IMPORTED"
+
+    _star_book(tmp_path / "星级名单-冲突.xlsx", rating="四星")
+    conflicted = discover_payroll_package(tmp_path, "2026-08")
+    assert conflicted.authority_ratings == {}
+    assert conflicted.star_conflicts[0]["teacher"] == "教师甲"
+    assert conflicted.star_conflicts[0]["ratings"] == [3, 4]
 
 
 def test_renewal_population_prefers_one_to_one_plus_class_students(tmp_path):

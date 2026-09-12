@@ -27,6 +27,7 @@ from ..adapters.assessment import read_assessment_report
 from ..adapters.personnel import IdentityConflict, default_part_time_records, identity_conflicts, read_personnel
 from ..adapters.refund import read_refund_report
 from ..adapters.renewal_report import read_renewal_report
+from ..adapters.star import read_star_report
 from ..adapters.weekly_report import read_weekly_report
 
 
@@ -53,6 +54,9 @@ class PayrollPackage:
     template_path: Path | None = None
     reference_ratings: dict[str, int] = field(default_factory=dict)
     rating_sources: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    authority_ratings: dict[str, int] = field(default_factory=dict)
+    star_records: list[dict[str, Any]] = field(default_factory=list)
+    star_conflicts: list[dict[str, Any]] = field(default_factory=list)
     policy_profiles: list[dict[str, Any]] = field(default_factory=list)
     scope_teachers: tuple[str, ...] = ()
     grade_evidence: list[StudentGradeEvidence] = field(default_factory=list)
@@ -307,6 +311,11 @@ def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
         except Exception as exc:  # optional operating-data source must not block payroll
             assessment = AdapterResult()
             adapter_errors.append(f"ASSESSMENT: {exc}")
+        try:
+            star = read_star_report(path, period)
+        except Exception as exc:  # optional authority source must not block payroll
+            star = AdapterResult()
+            adapter_errors.append(f"STAR: {exc}")
         parsed_type = ""
         evidence: dict[str, Any] = {"layout": layout}
         if weekly.records:
@@ -344,25 +353,30 @@ def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
             # source and must not fall through to REFUND/OTHER.
             parsed_type = parsed_type or "ASSESSMENT"
             evidence.setdefault("features", []).append("ASSESSMENT")
+        if star.records:
+            package.star_records.extend(item.as_dict() for item in star.records)
+            parsed_type = parsed_type or "STAR"
+            evidence.setdefault("features", []).append("STAR")
+            evidence["authority"] = "SYSTEM_AUTHORITY"
         stem = path.stem
         kind = "MANAGEMENT_ASSESSMENT" if "考核" in stem or "最佳学科组" in stem else "OTHER_INPUT"
         notes = tuple(i.code for i in weekly.warnings + weekly.errors + renewal.warnings + renewal.errors + personnel.warnings + personnel.errors + assessment.warnings + assessment.errors) + tuple(adapter_errors)
         package.files.append(PackageFile(
             str(path), path.name, parsed_type or kind,
             bool(inspection and not inspection.errors)
-            or bool(weekly.records or renewal.records or personnel.records or refund or assessment.records),
+            or bool(weekly.records or renewal.records or personnel.records or refund or assessment.records or star.records),
             records=(len(weekly.records) + len(renewal.records) + len(personnel.records)
-                     + len(refund) + len(assessment.records)),
+                     + len(refund) + len(assessment.records) + len(star.records)),
             teachers=len({
                 getattr(item, "teacher", "") or getattr(item, "person", "")
-                for item in [*weekly.records, *renewal.records, *personnel.records, *refund, *assessment.records]
+                for item in [*weekly.records, *renewal.records, *personnel.records, *refund, *assessment.records, *star.records]
                 if getattr(item, "teacher", "") or getattr(item, "person", "")
             }),
             layout=layout,
             notes=notes,
         ))
         if parsed_type:
-            semantic_records = list(weekly.records) + list(renewal.records) + list(personnel.records) + list(assessment.records)
+            semantic_records = list(weekly.records) + list(renewal.records) + list(personnel.records) + list(assessment.records) + list(star.records)
             sheets = _record_sheets(semantic_records)
             if not sheets:
                 sheets = tuple(item.name for item in inspection.records[0].sheets) if inspection and inspection.records else (str(assessment.coverage.get("sheet", "")),)
@@ -372,7 +386,7 @@ def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
             # semantic source (for example weekly students and renewal counts).
             # They share the same file hash and parsed rows, but remain
             # separately addressable in the registry.
-            for feature_type in ("RENEWAL" if renewal.records else "", "PERSONNEL" if personnel.records else "", "REFUND" if refund else "", "ASSESSMENT" if assessment.records else ""):
+            for feature_type in ("RENEWAL" if renewal.records else "", "PERSONNEL" if personnel.records else "", "REFUND" if refund else "", "ASSESSMENT" if assessment.records else "", "STAR" if star.records else ""):
                 if feature_type:
                     register_source(feature_type, status=SourceStatus.IMPORTED, evidence={"shared_parsed_source": parsed_type, "features": [feature_type]}, sheets=sheets)
         else:
@@ -414,6 +428,20 @@ def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
                     policies.pop(record.teacher, None)
     package.reference_ratings = {teacher: next(iter(values)) for teacher, values in ratings.items() if len(values) == 1}
     package.rating_sources = {teacher: tuple(sorted(sources)) for teacher, sources in rating_sources.items()}
+    authority_values: dict[str, set[int]] = {}
+    authority_sources: dict[str, list[dict[str, Any]]] = {}
+    for item in package.star_records:
+        teacher = str(item.get("teacher", "")).strip()
+        rating = item.get("rating")
+        if not teacher or rating in (None, ""):
+            continue
+        authority_values.setdefault(teacher, set()).add(int(rating))
+        authority_sources.setdefault(teacher, []).append(item)
+    package.authority_ratings = {teacher: next(iter(values)) for teacher, values in authority_values.items() if len(values) == 1}
+    package.star_conflicts = [
+        {"teacher": teacher, "ratings": sorted(values), "sources": authority_sources.get(teacher, [])}
+        for teacher, values in authority_values.items() if len(values) > 1
+    ]
     if package.reference_ratings and package.payroll_paths:
         # Teacher-level stars extracted from a historical payroll are useful
         # reference data, but they are not the independent authority source;
@@ -464,6 +492,9 @@ def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
         "historical_payroll": [str(path) for path in package.payroll_paths],
         "template": str(package.template_path) if package.template_path else "",
         "reference_ratings": len(package.reference_ratings),
+        "authority_ratings": len(package.authority_ratings),
+        "star_records": len(package.star_records),
+        "star_conflicts": package.star_conflicts,
         "policy_profiles": len(package.policy_profiles),
         "scope_teachers": len(package.scope_teachers),
         "grade_evidence": len(package.grade_evidence),
