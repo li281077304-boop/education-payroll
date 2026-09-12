@@ -6,6 +6,8 @@ business rules; it only proves that a wrong action is never a dead end.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from threading import Thread
 from urllib.request import Request, urlopen
@@ -218,3 +220,32 @@ def test_navigation_endpoints_return_expected_targets(tmp_path):
         assert "materials" in detail and "health" in detail, "返回后状态必须完整，不能只剩半页"
     finally:
         server.shutdown()
+
+
+def test_top_navigation_stays_available_after_entering_a_module():
+    """进入任意模块后，顶部导航不能被吃掉（旧 UAT：点一个模块其他导航消失）。"""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const holder = { innerHTML: '' };
+const context = {
+  document: { querySelector(sel) { return sel === '#app' ? holder : null; } },
+  window: { confirm() { return true; }, clearTimeout() {}, setTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(source, context);
+vm.runInContext(`current = { id: 'r1', period: '2026-08', status: 'FILES_READY', period_check: null,
+  files: {}, materials: [], issue_groups: [], summary: {}, health: { readiness: 50, missing: [], warnings: [] } };`, context);
+vm.runInContext(`shell('<p>某个模块</p>')`, context);
+const html = holder.innerHTML;
+for (const label of ['核算历史', '工资表汇总', '岗位考核', '业务填报']) {
+  assert(html.includes(label), `顶部导航缺少：${label}`);
+}
+'''
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
