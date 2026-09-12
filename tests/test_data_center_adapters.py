@@ -32,12 +32,14 @@ def test_weekly_and_renewal_are_normalized_from_one_readable_layout(tmp_path):
     assert weekly.records[0].one_to_one_students == 2
     assert weekly.records[0].class_students == 4
     assert weekly.records[0].total_students == 6
+    assert weekly.records[0].suggested_total_students == 6
     assert weekly.records[0].one_to_one_weekly_average == 3
 
     renewal = read_renewal_report(source, "2026-08")
     assert not renewal.errors
     assert renewal.records[0].renewal_count == 2
     assert renewal.records[0].total_students == 6
+    assert renewal.records[0].suggested_total_students == 6
     assert renewal.records[0].renewal_rate == 2 / 6
     assert renewal.records[0].uploaded_renewal_rate == 0.25
     assert renewal.records[0].status == "RATE_MISMATCH"
@@ -65,8 +67,10 @@ def test_renewal_population_prefers_one_to_one_plus_class_students(tmp_path):
     book.save(source)
     renewal = read_renewal_report(source, "2026-08")
     assert not renewal.errors
-    assert renewal.records[0].total_students == 6
+    assert renewal.records[0].total_students == 99
+    assert renewal.records[0].suggested_total_students == 6
     assert renewal.records[0].evidence["reported_total_students"] == 99
+    assert renewal.records[0].evidence["total_students_authority"] == "FINAL_REPORTED_VALUE"
 
 
 def test_personnel_keeps_effective_rates_and_identity_conflict(tmp_path):
@@ -187,6 +191,21 @@ def test_package_file_counts_include_operating_records(tmp_path):
     weekly_file = next(item for item in package.files if item.kind == "WEEKLY_REPORT")
     assert weekly_file.records == len(package.weekly_reports)
     assert weekly_file.teachers == len({item["teacher"] for item in package.weekly_reports})
+
+
+def test_weekly_registry_exposes_reported_value_authority(tmp_path):
+    source = _weekly_book(tmp_path / "weekly.xlsx")
+    from openpyxl import load_workbook
+    book = load_workbook(source)
+    book.active.title = "排课列表"
+    book.active.delete_rows(1, book.active.max_row)
+    book.active.append(["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"])
+    book.active.append(["高二物理一对一", "一对一", "2026-08-01 10:00", "已上课", 1, "学生甲", "物理", "刘宇"])
+    book.save(tmp_path / "排课列表.xlsx")
+    package = discover_payroll_package(tmp_path, "2026-08")
+    record = next(item for item in package.source_registry if item["source_type"] == "WEEKLY_REPORT")
+    assert record["source_evidence"]["value_authority"] == "FINAL_REPORTED_VALUE"
+    assert record["source_evidence"]["suggested_fields"] == ["suggested_total_students"]
 
 
 def test_public_data_center_facade_uses_the_same_package_discovery():

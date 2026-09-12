@@ -312,10 +312,17 @@ def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
         if weekly.records:
             parsed_type = "WEEKLY_REPORT"
             package.weekly_reports.extend(item.as_dict() for item in weekly.records)
-            evidence.update({"records": len(weekly.records), "features": ["WEEKLY_REPORT"]})
+            evidence.update({
+                "records": len(weekly.records),
+                "features": ["WEEKLY_REPORT"],
+                "value_authority": "FINAL_REPORTED_VALUE",
+                "suggested_fields": ["suggested_total_students"],
+            })
         if renewal.records:
             package.renewal_reports.extend(item.as_dict() for item in renewal.records)
             evidence.setdefault("features", []).append("RENEWAL")
+            evidence["renewal_population_authority"] = "FINAL_REPORTED_VALUE"
+            evidence["renewal_formula"] = "RENEWAL_COUNT / TOTAL_STUDENTS"
             if not parsed_type:
                 parsed_type = "RENEWAL"
         if personnel.records:

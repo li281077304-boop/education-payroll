@@ -21,6 +21,7 @@ class WeeklyReportRecord:
     one_to_one_students: float | None
     class_students: float | None
     total_students: float | None
+    suggested_total_students: float | None
     one_to_one_weekly_average: float | None
     average_class_frequency: float | None
     source_file: str
@@ -194,9 +195,11 @@ def read_weekly_report(path: str | Path, period: str) -> AdapterResult[WeeklyRep
         one = _number(row[one_students]) if one_students < len(row) else None
         classes = _number(row[class_students]) if class_students < len(row) else None
         reported_total = _number(row[total_students]) if total_students is not None and total_students < len(row) else None
-        # Never use a differently defined “单科总数” as the canonical
-        # population when the two explicit populations are available.
-        total = (one + classes) if one is not None and classes is not None else None
+        # The final weekly report is a human-confirmed business value.  Keep
+        # the arithmetic sum as a suggestion only; it must not silently
+        # replace a manually filled “单科总数” when the two disagree.
+        suggested_total = (one + classes) if one is not None and classes is not None else None
+        total = reported_total if reported_total is not None else suggested_total
         weekly = _number(row[weekly_average]) if weekly_average is not None and weekly_average < len(row) else None
         avg_frequency = _number(row[frequency]) if frequency is not None and frequency < len(row) else None
         if avg_frequency is None and course_count is not None and total not in (None, 0) and course_count < len(row):
@@ -208,10 +211,16 @@ def read_weekly_report(path: str | Path, period: str) -> AdapterResult[WeeklyRep
             period=_period_from_value(None, period), campus=campus, group=group,
             teacher=teacher,
             one_to_one_students=one, class_students=classes, total_students=total,
+            suggested_total_students=suggested_total,
             one_to_one_weekly_average=weekly, average_class_frequency=avg_frequency,
             source_file=source.name, sheet=sheet, cell=f"{sheet}!{_excel_col(teacher_col + 1)}{row_number}",
             range=f"{sheet}!{_excel_col(first + 1)}{row_number}:{_excel_col(last + 1)}{row_number}",
-            evidence={"teacher": teacher, "row": row_number, "headers": headers, "reported_total_students": reported_total},
+            evidence={
+                "teacher": teacher, "row": row_number, "headers": headers,
+                "reported_total_students": reported_total,
+                "suggested_total_students": suggested_total,
+                "total_students_authority": "FINAL_REPORTED_VALUE" if reported_total is not None else "SUGGESTED_FROM_COMPONENTS",
+            },
         ))
     if not result.records:
         result.warnings.append(AdapterIssue("WEEKLY_NO_DATA_ROWS", "找到周报表头，但没有可识别教师数据行。", sheet=sheet))

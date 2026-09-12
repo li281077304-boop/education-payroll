@@ -21,6 +21,7 @@ class RenewalReportRecord:
     teacher: str
     renewal_count: float | None
     total_students: float | None
+    suggested_total_students: float | None
     renewal_rate: float | None
     source_file: str
     sheet: str
@@ -92,22 +93,30 @@ def read_renewal_report(path: str | Path, period: str) -> AdapterResult[RenewalR
         reported_total = _number(row[total_col]) if total_col is not None and total_col < len(row) else None
         one_to_one = _number(row[one_to_one_col]) if one_to_one_col is not None and one_to_one_col < len(row) else None
         class_students = _number(row[class_students_col]) if class_students_col is not None and class_students_col < len(row) else None
-        # The canonical population is the same one used by the weekly
-        # adapter.  Some legacy reports' “单科总数” column is not the sum of
-        # the two student populations, so it is retained only as evidence.
-        total = (one_to_one + class_students) if one_to_one is not None and class_students is not None else reported_total
+        # A final weekly report value is the authoritative population.  Keep
+        # the component sum as a reference suggestion rather than silently
+        # overriding the human-filled “单科总数”.
+        suggested_total = (one_to_one + class_students) if one_to_one is not None and class_students is not None else None
+        total = reported_total if reported_total is not None else suggested_total
         uploaded = _number(row[rate_col]) if rate_col is not None and rate_col < len(row) else None
         canonical = count / total if count is not None and total not in (None, 0) else None
         difference = canonical - uploaded if canonical is not None and uploaded is not None else None
-        status = "RATE_MISMATCH" if difference is not None and abs(difference) > 1e-9 else "READ"
+        status = "RATE_MISMATCH" if difference is not None and abs(difference) > 1e-9 else ("READ" if reported_total is not None else "SUGGESTED_TOTAL")
         first = next((index for index, value in enumerate(row) if _text(value)), 0)
         last = max(first, len(row) - 1)
         result.records.append(RenewalReportRecord(
             period=period, campus=campus, group=group, teacher=teacher,
-            renewal_count=count, total_students=total, renewal_rate=canonical,
+            renewal_count=count, total_students=total, suggested_total_students=suggested_total, renewal_rate=canonical,
             source_file=source.name, sheet=sheet, cell=f"{sheet}!{_excel_col(teacher_col + 1)}{row_number}",
             range=f"{sheet}!{_excel_col(first + 1)}{row_number}:{_excel_col(last + 1)}{row_number}",
-            evidence={"headers": headers, "row": row_number, "canonical_formula": "RENEWAL_COUNT / TOTAL_STUDENTS", "reported_total_students": reported_total, "total_students_formula": "ONE_TO_ONE_STUDENTS + CLASS_STUDENTS" if one_to_one is not None and class_students is not None else "reported_total_students"},
+            evidence={
+                "headers": headers, "row": row_number,
+                "canonical_formula": "RENEWAL_COUNT / TOTAL_STUDENTS",
+                "reported_total_students": reported_total,
+                "suggested_total_students": suggested_total,
+                "total_students_authority": "FINAL_REPORTED_VALUE" if reported_total is not None else "SUGGESTED_FROM_COMPONENTS",
+                "total_students_formula": "ONE_TO_ONE_STUDENTS + CLASS_STUDENTS" if suggested_total is not None else "FINAL_REPORTED_VALUE",
+            },
             uploaded_renewal_rate=uploaded, rate_difference=difference, status=status,
         ))
     result.coverage = {"records": len(result.records), "teachers": len(result.records), "canonical_rates": sum(item.renewal_rate is not None for item in result.records)}
