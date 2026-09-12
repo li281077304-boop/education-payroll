@@ -4,6 +4,12 @@
 
 本仓库先保存现有资产和版本关系，并在独立 feature 分支中逐步建立可审计的 Payroll Core 与本地只读核对工具。
 
+## 重要任务开始前请先阅读
+
+- `docs/UAT_BASELINE.md`：真人 UAT 验收基线（真实 UAT 优先）
+- `docs/DEVELOPMENT_PRINCIPLES.md`：开发原则（20 条）
+- `docs/MANUAL_DECISIONS.md`：已确认的人工业务决策
+
 ## 当前入口
 
 - 当前工资 Skill：`skill/payroll/SKILL.md`
