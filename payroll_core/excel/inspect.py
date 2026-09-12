@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Iterable
+from zipfile import BadZipFile
 
 import openpyxl
 
@@ -49,15 +50,75 @@ class WorkbookInspection:
 
 
 def load_workbook_pair(path: str | Path):
-    """Open an OOXML workbook without altering it, including .xls files with ZIP content."""
+    """Open OOXML or a genuine binary XLS workbook without altering it.
+
+    A few WPS exports use an ``.xls`` suffix for OOXML, so OOXML remains the
+    first path.  The xlrd fallback is intentionally a small read-only facade
+    exposing the cell operations used by the existing adapters; it does not
+    rewrite or convert the source workbook.
+    """
     source = Path(path)
     payload = source.read_bytes()
-    if not payload.startswith(ZIP_MAGIC):
-        raise ValueError("UNSUPPORTED_FILE_FORMAT: only OOXML/ZIP workbooks are supported by this adapter")
-    return (
-        openpyxl.load_workbook(BytesIO(payload), data_only=False, read_only=False, keep_links=True),
-        openpyxl.load_workbook(BytesIO(payload), data_only=True, read_only=False, keep_links=True),
-    )
+    if payload.startswith(ZIP_MAGIC):
+        return (
+            openpyxl.load_workbook(BytesIO(payload), data_only=False, read_only=False, keep_links=True),
+            openpyxl.load_workbook(BytesIO(payload), data_only=True, read_only=False, keep_links=True),
+        )
+    try:
+        import xlrd
+        return _xlrd_workbook_pair(payload)
+    except (ImportError, OSError, ValueError, BadZipFile) as exc:
+        raise ValueError("UNSUPPORTED_FILE_FORMAT: 仅支持可读取的 XLSX/XLS 工作簿。") from exc
+
+
+class _XlrdCell:
+    def __init__(self, value):
+        self.value = value
+        self.comment = None
+
+
+class _XlrdSheet:
+    sheet_state = "visible"
+
+    def __init__(self, sheet):
+        self._sheet = sheet
+        self.title = sheet.name
+        self.max_row = sheet.nrows
+        self.max_column = sheet.ncols
+        self.merged_cells = type("Merged", (), {"ranges": ()})()
+        self.row_dimensions = {}
+        self.column_dimensions = {}
+        self.data_validations = type("Validations", (), {"dataValidation": ()})()
+
+    def cell(self, row: int, column: int) -> _XlrdCell:
+        return _XlrdCell(self._sheet.cell_value(row - 1, column - 1))
+
+    def iter_rows(self):
+        for row in range(self.max_row):
+            yield tuple(_XlrdCell(self._sheet.cell_value(row, column)) for column in range(self.max_column))
+
+
+class _XlrdWorkbook:
+    def __init__(self, book):
+        self.worksheets = tuple(_XlrdSheet(book.sheet_by_index(index)) for index in range(book.nsheets))
+        self.sheetnames = tuple(sheet.title for sheet in self.worksheets)
+        self.defined_names = {}
+        self._external_links = []
+
+    def __getitem__(self, name: str) -> _XlrdSheet:
+        return next(sheet for sheet in self.worksheets if sheet.title == name)
+
+
+def _xlrd_workbook_pair(payload: bytes):
+    import xlrd
+    try:
+        book = xlrd.open_workbook(file_contents=payload, on_demand=False)
+    except Exception as exc:
+        raise ValueError("不是可读取的二进制 XLS 工作簿。") from exc
+    facade = _XlrdWorkbook(book)
+    # Binary XLS has no separate formula cache exposed by this read-only path;
+    # both views intentionally contain the values xlrd can safely provide.
+    return facade, facade
 
 
 def detect_fingerprint(workbook) -> WorkbookFingerprint:

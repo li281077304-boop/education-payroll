@@ -162,7 +162,49 @@ def test_ae_authority_reference_and_missing_rating_states():
     assert row(referenced).ae.value == Decimal("40") and row(referenced).ae.state == ValueState.ESTIMATED
     assert row(referenced).af.state == ValueState.ESTIMATED
     missing = calculate_payroll("2026-08", classes, rules, profiles=[approved_profile()])
-    assert row(missing).ae.state == row(missing).af.state == ValueState.NEEDS_INPUT
+    assert row(missing).ae.value == Decimal("30")
+    assert row(missing).ae.state == row(missing).af.state == ValueState.ESTIMATED
+    assert "默认二星" in row(missing).ae.reason
+
+
+def test_star_source_policy_is_explicit_and_conflicts_never_silently_win():
+    rules = load_core_rules()
+    classes = [record() for _ in range(10)]  # AD = 36, so AE/AF require a star.
+    profile = approved_profile()
+
+    verified = calculate_payroll(
+        "2026-08", classes, rules,
+        ratings=[RatingAuthority("教师甲", 3, "2026-08", "2026-09", "系统年度星级", "stars-v1")],
+        profiles=[profile],
+    )
+    verified_row = row(verified)
+    assert verified_row.ae.value == Decimal("35")
+    assert verified_row.ae.state == verified_row.af.state == ValueState.DETERMINED
+    assert "VERIFIED/已核验" in verified_row.ae.reason
+    assert verified_row.ae.evidence[-1].kind == "RATING_AUTHORITY"
+
+    fallback = calculate_payroll(
+        "2026-08", classes, rules,
+        reference_ratings={"教师甲": 4}, profiles=[profile],
+    )
+    fallback_row = row(fallback)
+    assert fallback_row.ae.value == Decimal("40")
+    assert fallback_row.ae.state == fallback_row.af.state == ValueState.ESTIMATED
+    assert "待核验" in fallback_row.ae.reason
+    assert fallback_row.ae.evidence[-1].kind == "PAYROLL_REFERENCE_RATING"
+    assert fallback_row.ae.evidence[-1].source == "上传资料星级"
+
+    conflict = calculate_payroll(
+        "2026-08", classes, rules,
+        ratings=[RatingAuthority("教师甲", 3, "2026-08", "2026-09", "系统年度星级", "stars-v1")],
+        reference_ratings={"教师甲": 4}, profiles=[profile],
+    )
+    conflict_row = row(conflict)
+    assert conflict_row.ae.value == Decimal("35") and conflict_row.af.value == Decimal("210")
+    assert conflict_row.ae.state == conflict_row.af.state == ValueState.ESTIMATED
+    assert "冲突" in conflict_row.ae.reason and "3" in conflict_row.ae.reason and "4" in conflict_row.ae.reason
+    assert "系统权威值" in conflict_row.ae.reason
+    assert {item.kind for item in conflict_row.ae.evidence} == {"AE_CALCULATION", "RATING_AUTHORITY", "PAYROLL_REFERENCE_RATING"}
 
 
 def test_ae_threshold_comes_from_first_tier_and_has_no_decimal_epsilon_gap():

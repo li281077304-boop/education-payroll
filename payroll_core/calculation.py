@@ -141,6 +141,7 @@ class PayrollRow:
     ae: CalculatedValue
     af: CalculatedValue
     part_time_fee: CalculatedValue
+    employment_type: str = "FULL_TIME"
 
 
 @dataclass(frozen=True)
@@ -311,6 +312,16 @@ def _value(value: Decimal | None, state: ValueState, reason: str, *evidence: Evi
     return CalculatedValue(value, state, reason, tuple(evidence))
 
 
+def _parse_rating(raw: object) -> int:
+    """Parse a rating without truncating fractional numeric input."""
+    if isinstance(raw, bool) or raw is None or raw == "":
+        raise ValueError("rating is not an integer")
+    value = Decimal(str(raw))
+    if not value.is_finite() or value != value.to_integral_value():
+        raise ValueError("rating is not an integer")
+    return int(value)
+
+
 def _aggregate(field: str, contributions: list[CourseContribution]) -> CalculatedValue:
     relevant = [item for item in contributions if item.field == field or (item.state == ValueState.NEEDS_INPUT and not item.field)]
     blocking = [item for item in relevant if item.state == ValueState.NEEDS_INPUT]
@@ -333,17 +344,57 @@ def _rating_for(teacher: str, period: str, ratings: Iterable[object], profiles: 
     if override is not None:
         # An override without both approval fact and effective range is not policy.
         if _get(profile, "approved_by") and _get(profile, "approved_at") and _get(profile, "effective_from") and _get(profile, "effective_to"):
-            rating = int(override)
-            return rating, ValueState.DETERMINED, "使用已审批且有效期覆盖本期的个人星级覆盖。", (Evidence("PROFILE_RATING_OVERRIDE", str(_get(profile, "source", ""))),)
+            try:
+                rating = _parse_rating(override)
+            except (TypeError, ValueError, InvalidOperation):
+                return None, ValueState.NEEDS_INPUT, "个人星级覆盖不是整数星级，不能生效。", (Evidence("INVALID_PROFILE_RATING_OVERRIDE", str(_get(profile, "source", "")), inputs={"rating": str(override)}),)
+            if rating not in range(1, 7):
+                return None, ValueState.NEEDS_INPUT, "个人星级覆盖不在一至六星范围内，不能生效。", (Evidence("INVALID_PROFILE_RATING_OVERRIDE", str(_get(profile, "source", "")), inputs={"rating": str(rating)}),)
+            return rating, ValueState.DETERMINED, "使用已审批且有效期覆盖本期的个人星级覆盖。", (Evidence("PROFILE_RATING_OVERRIDE", str(_get(profile, "source", "")), inputs={"rating": str(rating)}),)
         return None, ValueState.NEEDS_INPUT, "个人星级覆盖缺少审批事实或完整生效期，不能静默忽略或生效。", (Evidence("UNAPPROVED_PROFILE_RATING_OVERRIDE", str(_get(profile, "source", ""))),)
     authority = _one_active(ratings, teacher, period, "rating authority")
-    if authority is not None:
-        return int(_get(authority, "rating")), ValueState.DETERMINED, "使用独立星级权威资料。", (Evidence("RATING_AUTHORITY", str(_get(authority, "source", _get(authority, "source_version", "")))),)
     reference = reference_ratings.get(teacher)
+    authority_rating: int | None = None
+    authority_evidence: Evidence | None = None
+    if authority is not None:
+        try:
+            authority_rating = _parse_rating(_get(authority, "rating"))
+        except (TypeError, ValueError, InvalidOperation):
+            return None, ValueState.NEEDS_INPUT, "独立星级资料不是整数星级，不能生效。", (Evidence("INVALID_RATING_AUTHORITY", str(_get(authority, "source", "")), inputs={"rating": str(_get(authority, "rating"))}),)
+        if authority_rating not in range(1, 7):
+            return None, ValueState.NEEDS_INPUT, "独立星级资料不在一至六星范围内，不能生效。", (Evidence("INVALID_RATING_AUTHORITY", str(_get(authority, "source", "")), inputs={"rating": str(authority_rating)}),)
+        authority_evidence = Evidence(
+            "RATING_AUTHORITY",
+            str(_get(authority, "source", _get(authority, "source_version", ""))),
+            detail="VERIFIED/已核验：使用独立星级权威资料。",
+            inputs={"rating": str(authority_rating)},
+        )
+
+    reference_rating: int | None = None
     if reference is not None:
         rating = _get(reference, "rating", reference)
-        return int(rating), ValueState.ESTIMATED, "仅使用提交/参考星级；未由独立权威资料确认。", (Evidence("REFERENCE_RATING"),)
-    return None, ValueState.NEEDS_INPUT, "缺少独立星级权威资料；参考值也未提交。", ()
+        try:
+            reference_rating = _parse_rating(rating)
+        except (TypeError, ValueError, InvalidOperation):
+            return None, ValueState.NEEDS_INPUT, "参考星级不是整数星级，不能生效。", (Evidence("INVALID_REFERENCE_RATING", inputs={"rating": str(rating)}),)
+        if reference_rating not in range(1, 7):
+            return None, ValueState.NEEDS_INPUT, "参考星级不在一至六星范围内，不能生效。", (Evidence("INVALID_REFERENCE_RATING", inputs={"rating": str(rating)}),)
+    if authority_rating is not None:
+        if reference_rating is not None and reference_rating != authority_rating:
+            evidence = (
+                authority_evidence,
+                Evidence(
+                    "PAYROLL_REFERENCE_RATING",
+                    source="上传资料星级",
+                    detail="审计：上传资料星级与系统权威星级冲突，保留两方来源。",
+                    inputs={"rating": str(reference_rating)},
+                ),
+            )
+            return authority_rating, ValueState.ESTIMATED, f"系统权威星级与上传资料星级冲突；按业务规则采用系统权威值 {authority_rating} 星，并保留上传资料值 {reference_rating} 星用于审计。", evidence
+        return authority_rating, ValueState.DETERMINED, "VERIFIED/已核验：系统权威星级优先。", (authority_evidence,)
+    if reference_rating is not None:
+        return reference_rating, ValueState.ESTIMATED, "待核验：系统权威星级缺失，使用上传资料星级。", (Evidence("PAYROLL_REFERENCE_RATING", source="上传资料星级", detail="待核验：未获得系统权威星级。", inputs={"rating": str(reference_rating)}),)
+    return 2, ValueState.ESTIMATED, "系统权威星级与上传资料星级均缺失，按业务规则默认二星。", (Evidence("DEFAULT_TWO_STAR", source="业务规则", detail="缺少两个来源时默认二星。", inputs={"rating": "2"}),)
 
 
 def _ae_af_for_period(teacher: str, period: str, ad: CalculatedValue, rules: CoreRules, ratings: Iterable[object], profiles: Iterable[object], reference_ratings: Mapping[str, object]) -> tuple[CalculatedValue, CalculatedValue]:
@@ -352,7 +403,17 @@ def _ae_af_for_period(teacher: str, period: str, ad: CalculatedValue, rules: Cor
         return pending, pending
     if ad.value <= rules.ae_zero_threshold:
         threshold = rules.ae_zero_threshold
-        return _value(Decimal("0"), ValueState.DETERMINED, f"AD 不超过第一 AE 档阈值 {threshold}，AE 固定为 0。"), _value(Decimal("0"), ValueState.DETERMINED, f"AD 不超过第一 AE 档阈值 {threshold}，AF 固定为 0。")
+        # A rating is not required to determine the zero tier, but an active
+        # authority may still be carried as evidence so the generated output
+        # can show the star input without making it a prerequisite.
+        try:
+            _rating, _rating_state, _rating_reason, rating_evidence = _rating_for(teacher, period, ratings, profiles, reference_ratings)
+        except ValueError:
+            # The zero tier is independent of the star input.  A malformed or
+            # overlapping optional rating source must not block a valid zero
+            # AE/AF result, though it is omitted from display evidence.
+            rating_evidence = ()
+        return _value(Decimal("0"), ValueState.DETERMINED, f"AD 不超过第一 AE 档阈值 {threshold}，AE 固定为 0。", *rating_evidence), _value(Decimal("0"), ValueState.DETERMINED, f"AD 不超过第一 AE 档阈值 {threshold}，AF 固定为 0。", *rating_evidence)
     rating, rating_state, rating_reason, rating_evidence = _rating_for(teacher, period, ratings, profiles, reference_ratings)
     if rating is None or rating not in rules.star_bonuses:
         pending = _value(None, ValueState.NEEDS_INPUT, rating_reason if rating is None else "星级不在当前版本的星级加成配置内。", *rating_evidence)
@@ -450,7 +511,7 @@ def calculate_payroll(period: str, schedule: Iterable[object], rules: CoreRules 
             contributions = _part_time_contributions(teacher_records, teacher, period, rates, core)
             all_contributions.extend(contributions)
             zero_na = _value(None, ValueState.NOT_APPLICABLE, "兼职不适用 AA/AC/AD/AE/AF 核心折算链。")
-            rows.append(PayrollRow(teacher, zero_na, zero_na, zero_na, zero_na, zero_na, _aggregate("part_time_fee", contributions)))
+            rows.append(PayrollRow(teacher, zero_na, zero_na, zero_na, zero_na, zero_na, _aggregate("part_time_fee", contributions), employment_type=employment))
             continue
         contributions = [calculate_course(record, core, effective_ac=effective_ac) for record in teacher_records]
         all_contributions.extend(contributions)
@@ -475,5 +536,5 @@ def calculate_payroll(period: str, schedule: Iterable[object], rules: CoreRules 
             ae = af = _value(None, ValueState.NOT_APPLICABLE, "管理岗位无教学活动，不适用 AE/AF。")
         else:
             ae, af = _ae_af_for_period(teacher, period, ad, core, ratings, profiles, references)
-        rows.append(PayrollRow(teacher, aa, ac, ad, ae, af, _value(None, ValueState.NOT_APPLICABLE, "非兼职不适用按节兼职费。")))
+        rows.append(PayrollRow(teacher, aa, ac, ad, ae, af, _value(None, ValueState.NOT_APPLICABLE, "非兼职不适用按节兼职费。"), employment_type=employment))
     return PayrollResult(period, core.rule_version_id, tuple(rows), tuple(all_contributions))

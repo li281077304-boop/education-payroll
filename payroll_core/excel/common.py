@@ -193,6 +193,28 @@ def grade_from_schedule(
     return ""
 
 
+def _course_track_conflicts(
+    students: Sequence[str], evidence: Sequence[StudentGradeEvidence], subject: str,
+) -> frozenset[str]:
+    """Find same-name students whose dated facts span conflicting tracks."""
+    wanted = {str(student).strip() for student in students if str(student).strip()}
+    tracks: dict[str, dict[tuple[str, str, str], set[str]]] = {}
+    for item in evidence:
+        student = item.student.strip()
+        if student not in wanted:
+            continue
+        if subject and item.subject.strip() and item.subject.strip() != subject:
+            continue
+        track = (item.teacher.strip(), item.subject.strip(), item.class_type.strip())
+        if not any(track):
+            continue
+        tracks.setdefault(student, {}).setdefault(track, set()).add(item.grade.strip())
+    return frozenset(
+        student for student, by_track in tracks.items()
+        if len(by_track) > 1 and len({grade for grades in by_track.values() for grade in grades}) > 1
+    )
+
+
 def resolve_schedule_grade(
     class_name: Any,
     student: Any,
@@ -222,7 +244,9 @@ def resolve_schedule_grade(
     direct = normalize_grade(direct_grade) or grade_from_class_name(class_name)
 
     names = split_student_names(student)
-    ambiguous = frozenset(ambiguous_students) or detect_same_name_ambiguous_students((*manual_evidence, *historical_evidence))
+    ambiguous = set(ambiguous_students) or set(detect_same_name_ambiguous_students((*manual_evidence, *historical_evidence)))
+    if direct and names:
+        ambiguous.update(_course_track_conflicts(names, (*manual_evidence, *historical_evidence), course_subject.strip()))
     scoped_manual = scope_grade_evidence_for_course(
         manual_evidence, teacher=course_teacher, subject=course_subject,
         class_type=class_type, ambiguous_students=ambiguous,
@@ -231,6 +255,18 @@ def resolve_schedule_grade(
         historical_evidence, teacher=course_teacher, subject=course_subject,
         class_type=class_type, ambiguous_students=ambiguous,
     )
+    # The inference routine only ever looks up the students on this row.  Keep
+    # the same authority order and ambiguity rules, but avoid scanning every
+    # historical fact for every current course in a package-backed run.
+    # Empty rosters cannot produce a student-grade conclusion, so they need no
+    # evidence scan at all.
+    if names:
+        student_names = set(names)
+        scoped_manual = tuple(item for item in scoped_manual if item.student.strip() in student_names)
+        scoped_history = tuple(item for item in scoped_history if item.student.strip() in student_names)
+    else:
+        scoped_manual = ()
+        scoped_history = ()
     allow_partial_roster = _is_ordinary_single_grade_k12(class_name, direct, class_type)
     name = "" if student is None else str(student).strip()
     confirmed = _infer_roster_grade(names, period, scoped_manual, recent_history_only=False, course_date=course_date, allow_partial=allow_partial_roster)

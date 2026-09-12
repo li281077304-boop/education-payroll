@@ -1,0 +1,193 @@
+from pathlib import Path
+
+import openpyxl
+
+from payroll_core.adapters.personnel import DEFAULT_PART_TIME_RATES, default_part_time_records, identity_conflicts, read_personnel
+from payroll_core.calculation import calculate_payroll
+from payroll_core.config.core_rules import load_core_rules
+from payroll_core.models.records import ScheduleRecord
+from payroll_core.adapters.renewal_report import read_renewal_report
+from payroll_core.adapters.weekly_report import read_weekly_report
+from payroll_core.excel.package import discover_payroll_package
+from payroll_core.data_center import discover_payroll_package as discover_from_public_facade
+from payroll_core.source_registry import SourceRegistry, SourceStatus
+
+
+def _weekly_book(path: Path) -> Path:
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "教师"
+    sheet.append(["理化组学科教师数据汇总"])
+    sheet.append(["序号", "教师", "一对一", "", "", "班课", "", "", "单科总数", "总课次", "续费", "续费率"])
+    sheet.append(["", "", "生数", "课时数", "周均", "班课生数", "班级数", "平均班级生数", "", "", "人头", "率"])
+    sheet.append([1, "刘宇", 2, 6, 3, 4, 1, 4, 6, 10, 2, 0.25])
+    book.save(path)
+    return path
+
+
+def test_weekly_and_renewal_are_normalized_from_one_readable_layout(tmp_path):
+    source = _weekly_book(tmp_path / "weekly.xlsx")
+    weekly = read_weekly_report(source, "2026-08")
+    assert not weekly.errors
+    assert weekly.records[0].one_to_one_students == 2
+    assert weekly.records[0].class_students == 4
+    assert weekly.records[0].total_students == 6
+    assert weekly.records[0].one_to_one_weekly_average == 3
+
+    renewal = read_renewal_report(source, "2026-08")
+    assert not renewal.errors
+    assert renewal.records[0].renewal_count == 2
+    assert renewal.records[0].total_students == 6
+    assert renewal.records[0].renewal_rate == 2 / 6
+    assert renewal.records[0].uploaded_renewal_rate == 0.25
+    assert renewal.records[0].status == "RATE_MISMATCH"
+
+
+def test_ooxml_content_with_xls_suffix_is_read_without_manual_rename(tmp_path):
+    # Some WPS exports retain an .xls suffix while the payload is OOXML.  The
+    # adapter must sniff the payload and not route it straight to xlrd.
+    source = _weekly_book(tmp_path / "weekly.xls")
+    weekly = read_weekly_report(source, "2026-08")
+    assert not weekly.errors
+    assert weekly.records[0].total_students == 6
+    renewal = read_renewal_report(source, "2026-08")
+    assert not renewal.errors
+    assert renewal.records[0].renewal_rate == 2 / 6
+
+
+def test_renewal_population_prefers_one_to_one_plus_class_students(tmp_path):
+    source = _weekly_book(tmp_path / "weekly-renewal.xlsx")
+    # The fixture has a deliberately inconsistent “单科总数” value in the
+    # source shape used by legacy reports.  The operating population must use
+    # the explicit one-to-one and class populations instead.
+    book = openpyxl.load_workbook(source)
+    book["教师"]["I4"] = 99
+    book.save(source)
+    renewal = read_renewal_report(source, "2026-08")
+    assert not renewal.errors
+    assert renewal.records[0].total_students == 6
+    assert renewal.records[0].evidence["reported_total_students"] == 99
+
+
+def test_personnel_keeps_effective_rates_and_identity_conflict(tmp_path):
+    path = tmp_path / "personnel.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["姓名", "雇佣类型", "每节单价", "生效开始", "生效结束"])
+    sheet.append(["刘宇", "兼职", 140, "2026-08", "2026-08"])
+    sheet.append(["刘雨", "兼职", 140, "2026-08", "2026-08"])
+    sheet.append(["张祥", "兼职", 160, "2026-08", "2026-08"])
+    book.save(path)
+    result = read_personnel(path, "2026-08")
+    assert not result.errors
+    assert {item.teacher: item.fixed_rate for item in result.records} == {"刘宇": 140, "刘雨": 140, "张祥": 160}
+    assert identity_conflicts(item.teacher for item in result.records)[0].names == ("刘宇", "刘雨")
+    assert DEFAULT_PART_TIME_RATES["胡涛"] == 170
+
+
+def test_personnel_csv_is_read_only_and_keeps_effective_dates(tmp_path):
+    path = tmp_path / "personnel.csv"
+    path.write_text("姓名,雇佣类型,每节单价,生效开始,生效结束\n刘宇,兼职,140,2026-08,2026-09\n", encoding="utf-8")
+    result = read_personnel(path, "2026-08")
+    assert not result.errors
+    assert result.records[0].fixed_rate == 140
+    assert result.records[0].effective_from == "2026-08"
+    assert result.records[0].effective_to == "2026-09"
+
+
+def test_optional_personnel_read_failure_is_reported_not_raised(tmp_path):
+    result = read_personnel(tmp_path / "missing.xlsx", "2026-08")
+    assert result.errors and result.errors[0].code == "UNREADABLE_PERSONNEL"
+
+
+def test_default_part_time_records_keep_effective_source_and_pay_by_lesson():
+    records = default_part_time_records("2026-08", source="2026-08 人员资料确认")
+    by_teacher = {item.teacher: item for item in records}
+    assert {teacher: item.fixed_rate for teacher, item in by_teacher.items()} == {"刘宇": 140, "张祥": 160, "胡涛": 170}
+    assert all(item.effective_from == item.effective_to == "2026-08" for item in records)
+    assert all(item.source_file == "2026-08 人员资料确认" for item in records)
+
+    schedule = [ScheduleRecord("2026-08", "胡涛", "高二", "物理", "小班", 2, "已上课")]
+    result = calculate_payroll(
+        "2026-08", schedule, load_core_rules(),
+        teacher_contexts=[{"teacher": "胡涛", "employment_type": "PART_TIME", "effective_from": "2026-08", "effective_to": "2026-08", "source": "2026-08 人员资料确认"}],
+        part_time_rates=[{"teacher": item.teacher, "grade": "*", "rate_per_lesson": item.fixed_rate, "effective_from": item.effective_from, "effective_to": item.effective_to, "source": item.source_file, "approved_by": "审核员", "approved_at": "2026-08-01"} for item in records],
+    )
+    row = next(item for item in result.rows if item.teacher == "胡涛")
+    assert row.part_time_fee.value == 170
+    assert row.part_time_fee.evidence[0].source == "2026-08 人员资料确认"
+
+
+def test_source_registry_deduplicates_same_hash_and_marks_unknown(tmp_path):
+    path = tmp_path / "unknown.txt"
+    path.write_text("not a payroll source", encoding="utf-8")
+    registry = SourceRegistry()
+    first = registry.register("OTHER", "2026-08", path, status=SourceStatus.NEEDS_CONFIRMATION)
+    second = registry.register("OTHER", "2026-08", path, status=SourceStatus.NEEDS_CONFIRMATION)
+    assert first.id == second.id
+    assert len(registry) == 1
+    assert registry.values()[0].status == SourceStatus.NEEDS_CONFIRMATION
+
+
+def test_source_registry_keeps_reused_file_separate_by_period(tmp_path):
+    path = tmp_path / "template.xlsx"
+    path.write_bytes(b"same template")
+    registry = SourceRegistry()
+    first = registry.register("PAYROLL_TEMPLATE", "2026-08", path)
+    second = registry.register("PAYROLL_TEMPLATE", "2026-09", path)
+    assert first.id != second.id
+    assert len(registry) == 2
+
+
+def test_source_registry_audit_groups_semantic_views_into_one_parse_unit(tmp_path):
+    path = tmp_path / "shared.xlsx"
+    path.write_bytes(b"shared source")
+    registry = SourceRegistry()
+    registry.register("WEEKLY_REPORT", "2026-08", path, sheet="教师", source_evidence={"parse_count": 1, "parsed_once": True})
+    registry.register("RENEWAL", "2026-08", path, sheet="教师", source_evidence={"parse_count": 1, "parsed_once": True})
+    audit = registry.physical_file_audit()
+    assert len(audit) == 1
+    assert audit[0]["source_types"] == ["RENEWAL", "WEEKLY_REPORT"]
+    assert audit[0]["parse_count"] == 1 and audit[0]["parsed_once"] is True
+
+
+def test_package_does_not_reuse_previous_workbook_inspection_for_non_excel(tmp_path):
+    workbook = _weekly_book(tmp_path / "weekly.xlsx")
+    # The package scanner must keep non-Excel evidence independent of the
+    # previous workbook in directory order; stale layout/formula headers make
+    # audit records actively misleading.
+    (tmp_path / "probe.txt").write_text("not a payroll source", encoding="utf-8")
+    # A schedule is required for a valid package; the weekly workbook is a
+    # useful minimal stand-in only for the adapter-level assertion below.
+    from openpyxl import load_workbook
+    schedule = load_workbook(workbook)
+    schedule.active.title = "排课列表"
+    schedule.active.delete_rows(1, schedule.active.max_row)
+    schedule.active.append(["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"])
+    schedule.active.append(["高二物理一对一", "一对一", "2026-08-01 10:00", "已上课", 1, "学生甲", "物理", "刘宇"])
+    schedule.save(tmp_path / "排课列表.xlsx")
+    package = discover_payroll_package(tmp_path, "2026-08")
+    probe = next(item for item in package.source_registry if item["file_name"] == "probe.txt")
+    assert probe["source_type"] == "OTHER"
+    assert probe["source_evidence"]["historical_structure"]["layout"] == ""
+    assert probe["source_evidence"]["formula"]["count"] == 0
+    assert probe["source_evidence"]["header"] == {}
+
+
+def test_package_file_counts_include_operating_records(tmp_path):
+    source = _weekly_book(tmp_path / "weekly.xlsx")
+    from openpyxl import load_workbook
+    book = load_workbook(source)
+    book.active.title = "排课列表"
+    book.active.delete_rows(1, book.active.max_row)
+    book.active.append(["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"])
+    book.active.append(["高二物理一对一", "一对一", "2026-08-01 10:00", "已上课", 1, "学生甲", "物理", "刘宇"])
+    book.save(tmp_path / "排课列表.xlsx")
+    package = discover_payroll_package(tmp_path, "2026-08")
+    weekly_file = next(item for item in package.files if item.kind == "WEEKLY_REPORT")
+    assert weekly_file.records == len(package.weekly_reports)
+    assert weekly_file.teachers == len({item["teacher"] for item in package.weekly_reports})
+
+
+def test_public_data_center_facade_uses_the_same_package_discovery():
+    assert discover_from_public_facade is discover_payroll_package
