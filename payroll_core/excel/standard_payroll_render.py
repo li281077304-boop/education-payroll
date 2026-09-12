@@ -13,6 +13,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 
 from ..payroll_generation import GeneratedPayroll, STATUS_FINAL
+from .output_paths import safe_output_path
 
 
 HEADERS = (
@@ -22,9 +23,9 @@ HEADERS = (
 
 
 def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path) -> str:
-    target = Path(output)
-    if target.exists():
-        raise ValueError(f"输出文件已存在，不能覆盖：{target.name}")
+    # A same-named file is never overwritten and never fails the export:
+    # 工资表.xlsx already existing simply produces 工资表 (2).xlsx.
+    target = safe_output_path(output)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     book = Workbook()

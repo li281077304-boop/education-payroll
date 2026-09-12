@@ -14,6 +14,8 @@ from typing import Iterable
 from openpyxl import load_workbook
 from openpyxl.comments import Comment
 
+from .output_paths import safe_output_path
+
 
 @dataclass(frozen=True)
 class WritebackPreview:
@@ -57,8 +59,9 @@ def write_new_workbook(source: str | Path, output: str | Path, candidates: Itera
     source_path, output_path = Path(source), Path(output)
     if source_path.resolve() == output_path.resolve():
         raise ValueError("回填必须输出为新文件，不能覆盖原工资表。")
-    if output_path.exists():
-        raise ValueError("输出文件已存在，请选择新的文件名。")
+    # Same rule as every other export: never overwrite, never fail on a
+    # duplicate name. The caller is told which path was actually used.
+    output_path = safe_output_path(output)
     if source_path.suffix.lower() == ".xlsm":
         raise ValueError("当前版本不能可靠保留 XLSM 宏，拒绝回填。")
     if not source_path.is_file():

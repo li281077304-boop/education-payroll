@@ -329,8 +329,11 @@ def test_no_output_overwrite_and_multiple_candidates_same_cell_are_preserved(tmp
     assert "已确认退费" in text and "第二条退费" in text
     another = service.create_refund_comment_candidate(run["id"], first["id"], "math", "Sheet1", "AC5")
     _approve_candidate(service, another)
-    with pytest.raises(ValueError, match="已存在"):
-        service.writeback_comments(run["id"], run["files"]["math"]["path"], [another["id"]], str(output), "审核员")
+    # 同名输出不再报错：自动改成 (2)，并且第一次的结果一个字节都不能动。
+    before_bytes = output.read_bytes()
+    written = service.writeback_comments(run["id"], run["files"]["math"]["path"], [another["id"]], str(output), "审核员")
+    assert Path(written["output_path"]).name == "combined (2).xlsx"
+    assert output.read_bytes() == before_bytes
 
 
 def test_xlsm_writeback_is_explicitly_rejected(tmp_path):

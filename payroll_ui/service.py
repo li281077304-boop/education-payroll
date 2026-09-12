@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
+from payroll_core.period import coverage_for, dominant_month, month_from_filename
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.models.evidence import AdapterIssue
 from payroll_core.models.class_type_rules import (
@@ -21,6 +22,7 @@ from payroll_core.models.class_type_rules import (
     structured_rules,
 )
 from payroll_core.payroll_generation import build_legacy_generated_payroll, generated_from_calculation
+from payroll_core.excel.output_paths import default_output_dir, describe_location, safe_output_path
 from payroll_core.excel.standard_payroll_render import render_generated_payroll
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
@@ -258,14 +260,16 @@ class PayrollService(CoreFlow):
         strategies = {item.get("writeback_strategy", "APPEND") for item in items}
         if len(strategies) != 1:
             raise ValueError("一次回填的已有批注处理方式必须一致。")
-        result = write_new_workbook(source, output_path, items, strategy=strategies.pop())
+        # 同名输出自动改成 (2)/(3)…：不覆盖、不失败，并如实回报真正落盘的位置。
+        actual_path = safe_output_path(output_path)
+        result = write_new_workbook(source, actual_path, items, strategy=strategies.pop())
         when = datetime.now(timezone.utc).isoformat()
         for item in items:
-            item.update({"status": "WRITTEN", "written_at": when, "written_by": reviewer.strip(), "output_workbook": str(Path(output_path).resolve())})
+            item.update({"status": "WRITTEN", "written_at": when, "written_by": reviewer.strip(), "output_workbook": str(actual_path.resolve())})
             self.store.save_comment_candidate(item)
-        run.setdefault("writeback_history", []).append({"source_workbook": str(source), "output_workbook": str(Path(output_path).resolve()), "candidate_ids": candidate_ids, "written_by": reviewer.strip(), "written_at": when})
+        run.setdefault("writeback_history", []).append({"source_workbook": str(source), "output_workbook": str(actual_path.resolve()), "candidate_ids": candidate_ids, "written_by": reviewer.strip(), "written_at": when})
         self.store.save(run)
-        return {"output_path": str(Path(output_path).resolve()), "written": len(result), "candidates": items}
+        return {"output_path": str(actual_path.resolve()), "location": describe_location(actual_path), "written": len(result), "candidates": items}
 
     def _create_candidate(self, run: dict, source_input: dict | None, kind: str, target_role: str, sheet: str, cell: str, values: dict, *, resolution: dict | None = None) -> dict:
         if target_role not in run.get("files", {}):
@@ -574,6 +578,11 @@ class PayrollService(CoreFlow):
         return self.render(run)
 
     # ----------------------------------------------------------- generate mode
+    def default_export_path(self, filename: str = "标准工资表.xlsx") -> dict:
+        """Where an export goes by default, so users never type an absolute path."""
+        target = default_output_dir(filename)
+        return {"path": str(target), "location": describe_location(target), "exists": target.exists()}
+
     def generate_payroll(self, run_id: str, output_path: str, *, confirmed_hours: dict | None = None) -> dict:
         """生成模式：同一套 Core 结果直接渲染成标准工资表。"""
         run = self._load(run_id)
@@ -634,14 +643,15 @@ class PayrollService(CoreFlow):
             if item["sheet"] != "标准工资表" or item["cell"] != f"A{rows[item['teacher_id']]}":
                 raise ValueError("生成工资表的批注只能写在该教师自己的行上。")
             items.append(item)
-        result = write_new_workbook(generated, output_path, items, strategy=strategy, author=reviewer.strip() or "工资核算助手")
+        actual_path = safe_output_path(output_path)
+        result = write_new_workbook(generated, actual_path, items, strategy=strategy, author=reviewer.strip() or "工资核算助手")
         when = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for item in items:
-            item.update({"status": "WRITTEN", "written_at": when, "output_workbook": str(Path(output_path).resolve())})
+            item.update({"status": "WRITTEN", "written_at": when, "output_workbook": str(actual_path.resolve())})
             self.store.save_comment_candidate(item)
-        run.setdefault("writeback_history", []).append({"source_workbook": generated, "output_workbook": str(Path(output_path).resolve()), "candidate_ids": candidate_ids, "written_by": reviewer.strip(), "written_at": when})
+        run.setdefault("writeback_history", []).append({"source_workbook": generated, "output_workbook": str(actual_path.resolve()), "candidate_ids": candidate_ids, "written_by": reviewer.strip(), "written_at": when})
         self.store.save(run)
-        return {"output_path": str(Path(output_path).resolve()), "written": len(result), "candidates": items}
+        return {"output_path": str(actual_path.resolve()), "location": describe_location(actual_path), "written": len(result), "candidates": items}
 
     # ------------------------------------------------------------------ mapping
     # A layout mismatch is not an error: the engine maps business fields onto
@@ -774,6 +784,9 @@ class PayrollService(CoreFlow):
             self.save_import_profile(str(source), role, dict(mapping.get("mapping", {})), profile_actor, profile_name)
         run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets), "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets), "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets)}
         if role == "schedule":
+            # The file's real lesson dates decide which month it belongs to.
+            # This never refuses the upload and never silently rewrites the run.
+            run["period_check"] = self._period_evidence(run, result.records, source.name)
             # Grade resolutions are bound to coordinates in the imported
             # schedule workbook. Replacing that source invalidates them.
             run.pop("schedule_grade_resolutions", None)
@@ -794,6 +807,100 @@ class PayrollService(CoreFlow):
         self._fresh(run)
         self.store.save(run)
         return self.render(run)
+
+    def _period_evidence(self, run: dict, records, file_name: str) -> dict:
+        """Infer the month a schedule really belongs to, from lesson dates.
+
+        Priority: in-file lesson dates > authority/manual month > in-file month
+        field > file name. The file name is auxiliary evidence only.
+        """
+        dates = [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in records]
+        source_month = dominant_month(dates)
+        if source_month is None:
+            fallback = [getattr(record, "period", "") for record in records]
+            source_month = dominant_month(fallback)
+        file_month, file_has_year = month_from_filename(file_name)
+        coverage = coverage_for(run["period"], dates)
+        mismatch = bool(source_month and source_month != run["period"])
+        # A file name without a year can still disagree on the month itself;
+        # the accounting month supplies the year context.
+        if file_month and source_month:
+            filename_disagrees = file_month != source_month if file_has_year else file_month != source_month[5:7]
+        else:
+            filename_disagrees = False
+        return {
+            "run_month": run["period"],
+            "source_month": source_month,
+            "mismatch": mismatch,
+            "file_name_month": file_month,
+            "file_name_has_year": file_has_year,
+            "filename_disagrees": filename_disagrees,
+            "coverage": coverage.as_dict(),
+            "decision": "" if not mismatch else "PENDING",
+        }
+
+    def change_period(self, run_id: str, period: str) -> dict:
+        """Switch the accounting month without losing anything.
+
+        The uploaded files stay, the run state is not reset, and nothing has to
+        be uploaded again. Period-scoped authorities are re-resolved only when
+        the previously bound version does not cover the new month.
+        """
+        if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
+            raise ValueError("请选择有效月份。")
+        run = self._load(run_id)
+        if period == run["period"]:
+            return self.render(run)
+        run["period"] = period
+        stale = []
+        for role in list(run["files"]):
+            path = Path(run["files"][role]["path"])
+            if not path.is_file():
+                stale.append(role)
+                continue
+            result = self._read(role, path, period)
+            if result.errors:
+                stale.append(role)
+                continue
+            run["files"][role]["records"] = len(result.records)
+            run["files"][role]["teachers"] = len({record.teacher for record in result.records if hasattr(record, "teacher")})
+            if role == "schedule":
+                run["period_check"] = self._period_evidence(run, result.records, path.name)
+        if stale:
+            run["stale_files"] = sorted(set(run.get("stale_files", []) + stale))
+        else:
+            run.pop("stale_files", None)
+        for key, versions in (("rating_version_id", self.rating_versions()), ("policy_version_id", self.policy_versions())):
+            bound = run.get(key)
+            if not bound:
+                continue
+            current = next((item for item in versions if item["id"] == bound), None)
+            if current and current["effective_from"] <= period <= current["effective_to"]:
+                continue
+            covering = [item for item in versions if item["effective_from"] <= period <= item["effective_to"]]
+            run[key] = covering[0]["id"] if len(covering) == 1 else None
+        check = run.get("period_check") or {}
+        if check:
+            check["decision"] = "SWITCHED"
+            run["period_check"] = check
+        run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
+        self.store.save(run)
+        return self.render(run)
+
+    def resolve_period_check(self, run_id: str, decision: str) -> dict:
+        """Record the user's answer to a month mismatch: switch or keep."""
+        run = self._load(run_id)
+        check = run.get("period_check") or {}
+        if not check.get("mismatch"):
+            return self.render(run)
+        if decision == "SWITCH":
+            return self.change_period(run_id, check["source_month"])
+        if decision == "KEEP":
+            check["decision"] = "KEPT"
+            run["period_check"] = check
+            self.store.save(run)
+            return self.render(run)
+        raise ValueError("请选择切换到课表月份，或仍按当前月份核算。")
 
     def create_resolution(self, run_id: str, issue_id: str, kind: str, course_record_id: str, values: dict[str, Any], confirmed_by: str, expected_fingerprint: str) -> dict:
         """Persist one run-scoped AC correction or approved treatment.

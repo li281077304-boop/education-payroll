@@ -139,7 +139,7 @@ async function home() {
     homeRuns = await api("/api/runs");
     current = null;
     const today = new Date();
-    const defaultPeriod = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+    const defaultPeriod = defaultPayrollPeriod(today);
     shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，导入排课数据和本次提交表；如有基准最终工资表，系统以它作为工资结果依据。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
@@ -402,6 +402,18 @@ function duplicateHint() {
   hint.textContent = count ? `该月份已有 ${count} 条记录，新记录会单独保存。` : "";
 }
 
+
+// 默认核算月份：每月 20 日之前默认核算上一个自然月，20 日起默认核算当前月。
+// 时钟由调用方传入，测试可用固定日期。
+function defaultPayrollPeriod(now = new Date()) {
+  const day = now.getDate();
+  if (day >= 20) return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const month = now.getMonth(); // 0 基，0 表示 1 月
+  const year = month === 0 ? now.getFullYear() - 1 : now.getFullYear();
+  const previous = month === 0 ? 12 : month;
+  return `${year}-${String(previous).padStart(2, "0")}`;
+}
+
 async function createRun() {
   try {
     const mode = $("#mode") ? $("#mode").value : "AUDIT";
@@ -466,7 +478,7 @@ function renderTab() {
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">排课数据和提交表齐全即可开始。导入基准最终工资表后，系统会用它核验本次提交教师。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，可以直接生成工资表（缺基础资料时只会生成草稿）。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? `<button ${current.health.ready ? "" : "disabled"} onclick="generatePayroll()">生成标准工资表</button>` : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">排课数据和提交表齐全即可开始。导入基准最终工资表后，系统会用它核验本次提交教师。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，可以直接生成工资表（缺基础资料时只会生成草稿）。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? `<button ${current.health.ready ? "" : "disabled"} onclick="generatePayroll()">生成标准工资表</button>` : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>`;
 }
 
 function materialCard(material) {
@@ -807,7 +819,7 @@ async function addSheetPath() {
 }
 
 async function importSheets() {
-  const period = window.prompt("这些工资表属于哪个月份？", new Date().toISOString().slice(0, 7));
+  const period = window.prompt("这些工资表属于哪个月份？", defaultPayrollPeriod(new Date()));
   if (!period) return;
   try { const batch = await api("/api/payroll-submissions", {method: "POST", body: JSON.stringify({paths: sheetPaths, period, submitted_by: "管理员"})}); sheetPaths = []; showMessage(batch.pending_layouts.length ? "有工资表格式需要你先确认列含义。" : "已导入，请看合并预览。", batch.pending_layouts.length ? "error" : "success"); await previewBatch(batch.id); }
   catch (error) { showMessage(error.message); }
@@ -831,7 +843,7 @@ async function confirmMerge(id) {
 // 岗位考核：只有组长上传，客观项按已确认口径算，主观项必须人工确认
 async function assessmentsPage() {
   try {
-    const period = new Date().toISOString().slice(0, 7);
+    const period = defaultPayrollPeriod(new Date());
     const [records, findings, results] = await Promise.all([api(`/api/assessments?period=${period}`), api(`/api/assessment-findings?period=${period}`), api(`/api/assessment-results?period=${period}`)]);
     const recordRows = records.map((item) => `<tr><td>${escapeHtml(item.teacher_id)}</td><td>${escapeHtml(item.status)}</td><td>${item.objective_score}</td><td>${(item.pending_subjective || []).length}</td><td><button class="quiet" onclick="confirmAssessment('${item.id}')">确认</button></td></tr>`).join("");
     const findingRows = findings.map((item) => `<tr><td>${escapeHtml(item.code)}</td><td>${escapeHtml(item.teacher_id)}</td><td>${escapeHtml(item.message)}</td></tr>`).join("");
@@ -844,7 +856,7 @@ async function importAssessment() {
   try {
     const picked = await api("/api/pick");
     if (!picked.path) return;
-    const period = window.prompt("考核表属于哪个月份？", new Date().toISOString().slice(0, 7));
+    const period = window.prompt("考核表属于哪个月份？", defaultPayrollPeriod(new Date()));
     if (!period) return;
     const leader = window.prompt("这是哪位组长的考核表？", "");
     if (!leader) return;
@@ -884,12 +896,41 @@ async function classTypeRulesPage(runId = "") {
 // ---------------------------------------------------------------------------
 // 生成模式：同一套 Core 结果直接渲染成标准工资表（不复制任何提交表）
 async function generatePayroll() {
-  const output = window.prompt("标准工资表输出路径（不会覆盖已有文件）：", "");
+  // 默认导出到「桌面/工资导出」，用户不需要填绝对路径；重名会自动变成 (2)。
+  let suggested = "";
+  try { suggested = await defaultExportPath("标准工资表.xlsx"); } catch (error) { suggested = "标准工资表.xlsx"; }
+  const output = window.prompt("保存在哪里？（已存在同名文件会自动改名，不会覆盖）", suggested);
   if (!output) return;
   try {
     const result = await api(`/api/runs/${current.id}/generate`, { method: "POST", body: JSON.stringify({ output_path: output }) });
     const blockers = [...new Set(result.blockers || [])];
-    showMessage(result.status === "FINAL" ? `已生成标准工资表：${result.path}` : `已生成草稿，仍有待确认项：${blockers.join("、")}`, result.status === "FINAL" ? "success" : "error");
+    showMessage(result.status === "FINAL" ? `已生成标准工资表，保存在：${result.path}` : `已生成草稿，仍有待确认项：${blockers.join("、")}`, result.status === "FINAL" ? "success" : "error");
     await openRun(current.id);
   } catch (error) { showMessage(error.message); }
+}
+
+// 上传课表月份与当前核算月份冲突：提示 + 两个明确动作，不静默改、不报错终止
+function periodMismatchCard() {
+  const check = current?.period_check;
+  if (!check || !check.mismatch || check.decision) return "";
+  const source = check.source_month || "未知月份";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">月份确认</p><h2>这份课表看起来属于 ${escapeHtml(source)}</h2><p class="muted">检测到该课表主要属于 ${escapeHtml(source)}，当前核算月份为 ${escapeHtml(check.run_month)}。是否切换到 ${escapeHtml(source)}？</p>${check.filename_disagrees ? `<p class="muted small">文件名显示的是 ${escapeHtml(check.file_name_month)}，但以文件内的上课日期为准。</p>` : ""}</div></div><div class="action-bar"><span class="muted small">切换不会丢失已上传的文件，也不需要重新上传。</span><div><button onclick="resolvePeriod('SWITCH')">切换到 ${escapeHtml(source)}</button><button class="secondary" onclick="resolvePeriod('KEEP')">仍按 ${escapeHtml(check.run_month)}</button></div></div></section>`;
+}
+
+async function resolvePeriod(decision) {
+  try { current = await api(`/api/runs/${current.id}/period-check`, { method: "POST", body: JSON.stringify({ decision }) }); showMessage(decision === "SWITCH" ? "已切换核算月份，已上传文件保留。" : "已按当前月份继续。", "success"); renderRun(); }
+  catch (error) { showMessage(error.message); }
+}
+
+// 日期覆盖完整性：只警告，不阻断
+function coverageWarningCard() {
+  const coverage = current?.period_check?.coverage;
+  if (!coverage || !coverage.incomplete_tail || current?.period_check?.decision === "PENDING") return "";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">覆盖确认</p><h2>请确认是否已包含本月全部排课</h2><p class="muted">检测到本次课表覆盖 ${escapeHtml(coverage.first_date || "?")}–${escapeHtml(coverage.last_date || "?")}，请确认是否已包含本月全部排课。</p></div></div><div class="action-bar"><span class="muted small">这只是提醒，不会阻止你继续。</span><div><button class="secondary" onclick="showMessage('可以继续核算，如不完整请替换文件。')">继续核算</button><button class="secondary" onclick="choose('schedule')">替换文件</button></div></div></section>`;
+}
+
+// 导出路径：默认 Desktop/工资导出，不要求用户填绝对路径
+async function defaultExportPath(filename = "标准工资表.xlsx") {
+  const data = await api(`/api/default-export-path?filename=${encodeURIComponent(filename)}`);
+  return data.path;
 }

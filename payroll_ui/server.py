@@ -87,6 +87,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
             if parsed.path == "/api/comment-candidates":
                 return self._json(self.server.service.comment_candidates(parse_qs(parsed.query).get("run_id", [""])[0]))
+            if parsed.path == "/api/default-export-path":
+                return self._json(self.server.service.default_export_path(parse_qs(parsed.query).get("filename", ["标准工资表.xlsx"])[0]))
             if parsed.path == "/api/import-mapping":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.preview_import_mapping(query.get("path", [""])[0], query.get("role", ["schedule"])[0], query.get("period", [""])[0]))
@@ -221,6 +223,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.generate_payroll(run_id, str(payload.get("output_path", "")), confirmed_hours=payload.get("confirmed_hours")))
                 if action == "class-type-rules":
                     return self._json(self.server.service.rebind_class_type_rules(run_id, str(payload.get("version_id", ""))))
+                if action == "period":
+                    return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
+                if action == "period-check":
+                    return self._json(self.server.service.resolve_period_check(run_id, str(payload.get("decision", ""))))
                 if action == "writeback-generated":
                     return self._json(self.server.service.writeback_to_generated(run_id, list(payload.get("candidate_ids", [])), str(payload.get("output_path", "")), str(payload.get("reviewer", "")), str(payload.get("strategy", "APPEND"))))
                 if action == "comment-candidates" and len(bits) == 5 and bits[4] == "refund":
