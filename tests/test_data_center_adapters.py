@@ -79,6 +79,21 @@ def test_star_adapter_reads_wide_tier_table_with_cell_evidence(tmp_path):
     assert result.records[0].cell == "Sheet1!B4"
 
 
+def test_star_adapter_reads_each_sheet_once(tmp_path):
+    source = _star_book(tmp_path / "multi-sheet-stars.xlsx")
+    book = openpyxl.load_workbook(source)
+    sheet = book.create_sheet("Sheet2")
+    sheet.append(["星级教师具体名单"])
+    sheet.append(["", "四星", ""])
+    sheet.append(["", "姓名", "学科"])
+    sheet.append(["", "教师乙", "物理"])
+    book.save(source)
+    result = read_star_report(source, "2026-08")
+    assert {(item.teacher, item.rating, item.sheet) for item in result.records} == {
+        ("教师甲", 3, "Sheet1"), ("教师乙", 4, "Sheet2")
+    }
+
+
 def test_package_loads_system_star_authority_and_preserves_conflicts(tmp_path):
     source = _weekly_book(tmp_path / "weekly.xlsx")
     book = openpyxl.load_workbook(source)

@@ -61,7 +61,10 @@ def read_star_report(path: str | Path, period: str) -> AdapterResult[StarRecord]
         return result
 
     found = False
+    processed_sheets: set[str] = set()
     for header_index, (sheet, row) in enumerate(rows):
+        if sheet in processed_sheets:
+            continue
         tiers = {index: _rating(value) for index, value in enumerate(row)}
         tiers = {index: rating for index, rating in tiers.items() if rating is not None}
         if not tiers:
@@ -76,6 +79,7 @@ def read_star_report(path: str | Path, period: str) -> AdapterResult[StarRecord]
         if not name_columns:
             continue
         found = True
+        processed_sheets.add(sheet)
         for absolute_index, (row_sheet, values) in enumerate(rows[header_index + 2:], start=header_index + 2):
             if row_sheet != sheet:
                 continue
@@ -94,10 +98,8 @@ def read_star_report(path: str | Path, period: str) -> AdapterResult[StarRecord]
                     range=f"{sheet}!{_column_letter(column + 1)}{row_number}:{_column_letter(min(len(values), column + 2))}{row_number}",
                     evidence={"row": row_number, "rating_header": f"{rating}星", "subject": subject, "header_row": header_index + 1},
                 ))
-        # One wide star table can contain multiple tier blocks, but the first
-        # row with explicit tier/name pairs is the table authority.  Continuing
-        # would duplicate rows from a repeated title/header block.
-        break
+        # Continue to the next sheet.  A workbook can contain one independent
+        # star table per campus; each sheet is its own source view.
     if not found:
         result.errors.append(AdapterIssue("UNRECOGNIZED_STAR", "没有找到明确的星级标题与姓名列。"))
         return result
