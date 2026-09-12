@@ -174,7 +174,7 @@ def inspect_workbook(path: str | Path) -> AdapterResult[WorkbookInspection]:
     result.records.append(
         WorkbookInspection(
             source_file=str(path),
-            workbook_type="OOXML",
+            workbook_type="XLS" if isinstance(raw, _XlrdWorkbook) else "OOXML",
             fingerprint=fingerprint,
             sheets=sheets,
             defined_name_count=len(raw.defined_names),
