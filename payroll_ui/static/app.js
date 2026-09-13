@@ -425,20 +425,22 @@ function defaultPayrollPeriod(now = new Date()) {
 async function openRun(id) {
   try {
     current = await api(`/api/runs/${id}`);
-    tab = current.status === "STALE" || current.status === "DRAFT" || current.status === "FILES_READY" ? "materials" : (current.issue_groups || []).length ? "issues" : "overview";
+    tab = current.status === "STALE" || current.status === "DRAFT" || current.status === "FILES_READY" ? "materials" : (current.issue_groups || []).length ? "issues" : (current.generated_payroll || (current.mode === "GENERATE" && current.core_calculation?.rows?.length)) ? "payroll" : "overview";
     renderRun();
   } catch (error) { showMessage(error.message); }
 }
 
 function runSteps() {
   const checked = ["REVIEW_REQUIRED", "PASS"].includes(current.status);
-  return `<div class="steps"><span class="done">1 创建记录</span><span class="${current.health.readiness === 100 ? "done" : ""}">2 准备材料</span><span class="${checked ? "done" : ""}">3 查看结果</span><span class="${current.decisions?.length ? "done" : ""}">4 处理问题</span></div>`;
+  const hasPreview = Boolean(current.generated_payroll || current.core_calculation?.rows?.length);
+  return `<div class="steps"><span class="done">1 创建记录</span><span class="${current.health.readiness === 100 ? "done" : ""}">2 准备材料</span><span class="${checked ? "done" : ""}">3 自动核算与异常检查</span><span class="${current.decisions?.length ? "done" : ""}">4 处理问题</span><span class="${hasPreview ? "done" : ""}">5 工资预览与导出</span></div>`;
 }
 
 function navigation() {
   const checked = ["REVIEW_REQUIRED", "PASS"].includes(current.status);
   const groupCount = (current.issue_groups || []).length;
-  const items = [["materials", "材料准备", true], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["management", "管理岗位确认", true]];
+  const hasPayrollPreview = Boolean(current.generated_payroll || current.core_calculation?.rows?.length);
+  const items = [["materials", "材料准备", true], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["payroll", "工资预览", hasPayrollPreview], ["management", "管理岗位确认", true]];
   return `<nav class="tabs">${items.map(([id, label, enabled]) => `<button class="${tab === id ? "active" : ""}" ${enabled ? `onclick="setTab('${id}')"` : "disabled"}>${label}</button>`).join("")}</nav>`;
 }
 
@@ -472,12 +474,16 @@ function renderTab() {
   if (tab === "materials") view.innerHTML = materialsPage();
   if (tab === "overview") view.innerHTML = overviewPage();
   if (tab === "issues") view.innerHTML = issuesPage();
+  if (tab === "payroll") view.innerHTML = payrollPreviewPage();
   if (tab === "management") view.innerHTML = managementPage();
 }
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">可以逐项选择文件，也可以一次选择资料包文件夹，系统会自动绑定年级、星级、人员和经营数据。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="action-bar"><button onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">优先使用资料包导入；也可继续逐项选择文件。</span></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，可以直接生成工资表（缺基础资料时只会生成草稿）。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? `<button ${current.health.ready ? "" : "disabled"} onclick="generatePayroll()">生成标准工资表</button>` : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
+  const generateAction = current.generated_payroll
+    ? `<button onclick="setTab('payroll')">查看工资预览</button>`
+    : `<button ${current.health.ready ? "" : "disabled"} onclick="preparePayrollPreview()">自动核算并查看预览</button>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">可以逐项选择文件，也可以一次选择资料包文件夹，系统会自动绑定年级、星级、人员和经营数据。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="action-bar"><button onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">优先使用资料包导入；也可继续逐项选择文件。</span></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
 }
 
 async function choosePackage() {
@@ -570,6 +576,36 @@ function coreCalculationSection() {
   const rendered = rows.map((row) => `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong></td><td>${coreCalculationCell(fieldKey(row, "AA"))}</td><td>${coreCalculationCell(fieldKey(row, "AC"))}</td><td>${coreCalculationCell(fieldKey(row, "AD"))}</td><td>${coreCalculationCell(fieldKey(row, "AE"))}</td><td>${coreCalculationCell(fieldKey(row, "AF"))}</td><td>${coreCalculationCell(fieldKey(row, "PART_TIME"))}</td></tr>`).join("");
   const versionNote = [current.core_rule_version_id ? `核心规则 ${current.core_rule_version_id}` : "", current.part_time_rate_version_id ? `兼职单价 ${current.part_time_rate_version_id}` : ""].filter(Boolean).join(" · ");
   return `<section class="card core-calculation-card"><div class="section-head"><div><p class="eyebrow">核心计算结果</p><h2>每位教师的核心字段</h2><p class="muted">状态为“估算”“缺资料”或“不适用”的项目不会冒充全薪通过。${escapeHtml(versionNote)}</p></div></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>兼职按节课时费</th></tr></thead><tbody>${rendered}</tbody></table></div></section>`;
+}
+
+function payrollPreviewField(row, code, fallback = null) {
+  const field = row?.fields?.[code];
+  if (field && typeof field === "object") return field;
+  const finalField = row?.final_fields?.[code];
+  if (finalField && typeof finalField === "object") return finalField;
+  const values = { AA: row?.one_to_one, AC: row?.class_value, AD: row?.teaching_hours, AE: row?.ae, AF: row?.af, PART_TIME: row?.part_time_amount };
+  return { value: values[code] ?? fallback, state: values[code] == null ? "NEEDS_INPUT" : "DETERMINED" };
+}
+
+function payrollPreviewPage() {
+  const generated = current.generated_payroll || {};
+  const rows = generated.rows?.length ? generated.rows : (current.core_calculation?.rows || []);
+  if (!rows.length) {
+    return `<section class="card"><h2>工资预览尚未生成</h2><p class="muted">请先完成材料准备并自动核算。</p><div class="action-bar"><button onclick="setTab('materials')">返回材料准备</button></div></section>`;
+  }
+  const rowHtml = rows.map((row) => {
+    const fields = ["AA", "AC", "AD", "AE", "AF", "AK", "AV", "PART_TIME"].map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code))}</td>`).join("");
+    const starEvidence = (row.fields?.AE?.evidence || []).map((item) => item?.inputs?.rating).find((value) => value != null && value !== "");
+    const star = row.star ?? starEvidence ?? "—";
+    const blockers = (row.blockers || []).join("、");
+    return `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong><div class="small muted">${escapeHtml(row.status === "FINAL" ? "可导出" : blockers || "仍需确认")}</div></td>${fields}<td>${coreCalculationCell({ value: star, state: star === "—" ? "NEEDS_INPUT" : "DETERMINED" })}</td></tr>`;
+  }).join("");
+  const status = generated.status || (current.summary?.core_calculation_complete ? "待导出" : "待确认");
+  const path = generated.path ? `<p class="small muted">最近导出：${escapeHtml(generated.path)}</p>` : "";
+  const exportNote = current.mode === "GENERATE"
+    ? "导出会自动选择不冲突的新文件名，绝不覆盖已有工资表。状态为草稿时仍可导出，但文件会保留待确认标记。"
+    : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">${escapeHtml(current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
 }
 
 function overviewPage() {
@@ -747,8 +783,30 @@ async function refreshRun() {
 }
 
 async function recheck() {
-  try { current = await api(`/api/runs/${current.id}/check`, { method: "POST", body: "{}" }); tab = (current.issue_groups || []).length ? "issues" : "overview"; renderRun(); showMessage("已重新核对全部材料。", "success"); }
+  const release = markBusy("正在核对…");
+  try { current = await api(`/api/runs/${current.id}/check`, { method: "POST", body: "{}" }); tab = (current.issue_groups || []).length ? "issues" : (current.mode === "GENERATE" ? "payroll" : "overview"); renderRun(); showMessage("已重新核对全部材料。", "success"); }
   catch (error) { await refreshAfterError(error); }
+  finally { release(); }
+}
+
+function markBusy(label) {
+  const button = document.activeElement?.tagName === "BUTTON" ? document.activeElement : null;
+  if (!button) return () => {};
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  return () => { if (button.isConnected) { button.disabled = false; button.textContent = original; } };
+}
+
+async function preparePayrollPreview() {
+  const release = markBusy("正在自动核算…");
+  try {
+    current = await api(`/api/runs/${current.id}/check`, { method: "POST", body: "{}" });
+    tab = (current.issue_groups || []).length ? "issues" : "payroll";
+    renderRun();
+    showMessage((current.issue_groups || []).length ? "自动核算已完成，请先处理异常，再打开工资预览。" : "自动核算已完成，请检查工资预览后导出。", "success");
+  } catch (error) { await refreshAfterError(error); }
+  finally { release(); }
 }
 
 async function refreshAfterError(error) {
@@ -773,12 +831,15 @@ async function saveManagement() {
 }
 
 async function downloadReport() {
+  const release = markBusy("正在导出报告…");
   try {
     const response = await fetch(`/api/runs/${current.id}/export.csv`, { headers: { "X-Payroll-Token": token } });
     if (!response.ok) { const payload = await response.json(); throw new Error(payload.error || "报告导出未完成。"); }
     const url = URL.createObjectURL(await response.blob());
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = `工资核对报告_${current.period}.csv`; anchor.click(); URL.revokeObjectURL(url);
+    showMessage("核对报告已导出。", "success");
   } catch (error) { showMessage(error.message); }
+  finally { release(); }
 }
 
 (async () => {
@@ -960,7 +1021,8 @@ async function classTypeRulesPage(runId = "") {
 
 // ---------------------------------------------------------------------------
 // 生成模式：同一套 Core 结果直接渲染成标准工资表（不复制任何提交表）
-async function generatePayroll() {
+async function exportPayroll() {
+  const release = markBusy("正在生成文件…");
   let suggested = "";
   try { suggested = (await api("/api/default-export-path?filename=标准工资表.xlsx")).path; } catch (_) { suggested = "标准工资表.xlsx"; }
   const output = suggested || "标准工资表.xlsx";
@@ -970,4 +1032,8 @@ async function generatePayroll() {
     showMessage(result.status === "FINAL" ? `已生成标准工资表，保存在：${result.path}` : `已生成草稿，仍有待确认项：${blockers.join("、")}`, result.status === "FINAL" ? "success" : "error");
     await openRun(current.id);
   } catch (error) { showMessage(error.message); }
+  finally { release(); }
 }
+
+// Backward-compatible name for callers from older local pages.
+const generatePayroll = exportPayroll;

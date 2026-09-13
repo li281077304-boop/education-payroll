@@ -62,3 +62,27 @@ vm.runInContext("current={id:'test-run'}; api=async()=>payload; showMessage=(m)=
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_generate_flow_exposes_payroll_preview_and_safe_export_action():
+    """The normal generate flow must visibly connect calculation to export."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;}}, window:{}, console};
+vm.createContext(context);
+vm.runInContext(source, context);
+vm.runInContext(`current={period:'2026-08',mode:'GENERATE',summary:{core_calculation_complete:true},core_calculation:{rows:[{teacher:'教师甲',fields:{
+ AA:{value:20,state:'DETERMINED'},AC:{value:2.4,state:'DETERMINED'},AD:{value:22.4,state:'DETERMINED'},
+ AE:{value:40,state:'DETERMINED'},AF:{value:0,state:'DETERMINED'},PART_TIME:{value:null,state:'NOT_APPLICABLE'}
+}}]}}`, context);
+const html = vm.runInContext('payrollPreviewPage()', context);
+for (const text of ['工资预览','教师甲','AA','AC','AD','AE','AF','AK','AV','兼职按节课时费','星级','导出工资表']) assert(html.includes(text), text);
+assert(!html.includes('undefined'));
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
