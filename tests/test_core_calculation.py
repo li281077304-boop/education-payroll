@@ -159,11 +159,11 @@ def test_ae_authority_reference_and_missing_rating_states():
     assert row(authoritative).af.value == Decimal("210")
     assert row(authoritative).ae.evidence[0].inputs == {"AD": "36.0", "tier_base": "30", "rating": "3", "star_bonus": "5", "AE": "35"}
     referenced = calculate_payroll("2026-08", classes, rules, reference_ratings={"教师甲": 4}, profiles=[approved_profile()])
-    assert row(referenced).ae.value == Decimal("40") and row(referenced).ae.state == ValueState.ESTIMATED
-    assert row(referenced).af.state == ValueState.ESTIMATED
+    assert row(referenced).ae.value == Decimal("40") and row(referenced).ae.state == ValueState.DETERMINED
+    assert row(referenced).af.state == ValueState.DETERMINED
     missing = calculate_payroll("2026-08", classes, rules, profiles=[approved_profile()])
     assert row(missing).ae.value == Decimal("30")
-    assert row(missing).ae.state == row(missing).af.state == ValueState.ESTIMATED
+    assert row(missing).ae.state == row(missing).af.state == ValueState.DETERMINED
     assert "默认二星" in row(missing).ae.reason
 
 
@@ -189,9 +189,9 @@ def test_star_source_policy_is_explicit_and_conflicts_never_silently_win():
     )
     fallback_row = row(fallback)
     assert fallback_row.ae.value == Decimal("40")
-    assert fallback_row.ae.state == fallback_row.af.state == ValueState.ESTIMATED
-    assert "待核验" in fallback_row.ae.reason
-    assert fallback_row.ae.evidence[-1].kind == "PAYROLL_REFERENCE_RATING"
+    assert fallback_row.ae.state == fallback_row.af.state == ValueState.DETERMINED
+    assert "已确定" in fallback_row.ae.reason
+    assert fallback_row.ae.evidence[-1].kind == "FALLBACK_REFERENCE"
     assert fallback_row.ae.evidence[-1].source == "上传资料星级"
 
     conflict = calculate_payroll(
@@ -201,10 +201,21 @@ def test_star_source_policy_is_explicit_and_conflicts_never_silently_win():
     )
     conflict_row = row(conflict)
     assert conflict_row.ae.value == Decimal("35") and conflict_row.af.value == Decimal("210")
-    assert conflict_row.ae.state == conflict_row.af.state == ValueState.ESTIMATED
+    assert conflict_row.ae.state == conflict_row.af.state == ValueState.DETERMINED
     assert "冲突" in conflict_row.ae.reason and "3" in conflict_row.ae.reason and "4" in conflict_row.ae.reason
     assert "系统权威值" in conflict_row.ae.reason
-    assert {item.kind for item in conflict_row.ae.evidence} == {"AE_CALCULATION", "RATING_AUTHORITY", "PAYROLL_REFERENCE_RATING"}
+    assert {item.kind for item in conflict_row.ae.evidence} == {"AE_CALCULATION", "RATING_AUTHORITY", "PAYROLL_REFERENCE_RATING", "CONFLICT_AUTHORITY_WINS"}
+
+
+def test_missing_personal_af_policy_stays_estimated_after_star_is_determined():
+    rules = load_core_rules()
+    classes = [record() for _ in range(10)]
+    result = calculate_payroll("2026-08", classes, rules, reference_ratings={"教师甲": 4})
+    calculated = row(result)
+    assert calculated.ae.state == ValueState.DETERMINED
+    assert calculated.ae.evidence[-1].kind == "FALLBACK_REFERENCE"
+    assert calculated.af.state == ValueState.ESTIMATED
+    assert "缺个人 AF 政策" in calculated.af.reason
 
 
 def test_ae_threshold_comes_from_first_tier_and_has_no_decimal_epsilon_gap():

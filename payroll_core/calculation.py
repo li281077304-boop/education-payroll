@@ -389,12 +389,22 @@ def _rating_for(teacher: str, period: str, ratings: Iterable[object], profiles: 
                     detail="审计：上传资料星级与系统权威星级冲突，保留两方来源。",
                     inputs={"rating": str(reference_rating)},
                 ),
+                Evidence(
+                    "CONFLICT_AUTHORITY_WINS",
+                    source=str(_get(authority, "source", _get(authority, "source_version", ""))),
+                    detail="系统权威星级与上传资料星级冲突；按确定的优先级采用系统权威值。",
+                    inputs={
+                        "authority_rating": str(authority_rating),
+                        "reference_rating": str(reference_rating),
+                        "selected_rating": str(authority_rating),
+                    },
+                ),
             )
-            return authority_rating, ValueState.ESTIMATED, f"系统权威星级与上传资料星级冲突；按业务规则采用系统权威值 {authority_rating} 星，并保留上传资料值 {reference_rating} 星用于审计。", evidence
+            return authority_rating, ValueState.DETERMINED, f"系统权威星级与上传资料星级冲突；按业务规则采用系统权威值 {authority_rating} 星，并保留上传资料值 {reference_rating} 星用于审计。", evidence
         return authority_rating, ValueState.DETERMINED, "VERIFIED/已核验：系统权威星级优先。", (authority_evidence,)
     if reference_rating is not None:
-        return reference_rating, ValueState.ESTIMATED, "待核验：系统权威星级缺失，使用上传资料星级。", (Evidence("PAYROLL_REFERENCE_RATING", source="上传资料星级", detail="待核验：未获得系统权威星级。", inputs={"rating": str(reference_rating)}),)
-    return 2, ValueState.ESTIMATED, "系统权威星级与上传资料星级均缺失，按业务规则默认二星。", (Evidence("DEFAULT_TWO_STAR", source="业务规则", detail="缺少两个来源时默认二星。", inputs={"rating": "2"}),)
+        return reference_rating, ValueState.DETERMINED, "已确定：系统权威星级缺失，按规则使用上传资料星级。", (Evidence("FALLBACK_REFERENCE", source="上传资料星级", detail="系统权威星级缺失，使用上传资料星级作为确定值。", inputs={"rating": str(reference_rating), "fallback": "true"}),)
+    return 2, ValueState.DETERMINED, "已确定：系统权威星级与上传资料星级均缺失，按业务规则默认二星。", (Evidence("DEFAULT_TWO_STAR", source="业务规则", detail="缺少两个来源时默认二星。", inputs={"rating": "2"}),)
 
 
 def _ae_af_for_period(teacher: str, period: str, ad: CalculatedValue, rules: CoreRules, ratings: Iterable[object], profiles: Iterable[object], reference_ratings: Mapping[str, object]) -> tuple[CalculatedValue, CalculatedValue]:

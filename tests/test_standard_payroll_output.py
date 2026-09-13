@@ -114,7 +114,7 @@ def test_output_validation_detects_evidence_tampering(tmp_path: Path):
     assert any("核验与来源第" in error for error in validation["errors"])
 
 
-def test_reference_rating_is_visible_but_not_promoted_to_final(tmp_path: Path):
+def test_reference_rating_is_visible_and_determined(tmp_path: Path):
     payroll = _generated(reference_rating=True)
     output = tmp_path / "estimated.xlsx"
     render_generated_payroll(payroll, output)

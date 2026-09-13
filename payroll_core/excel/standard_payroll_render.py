@@ -46,12 +46,16 @@ def _star_display(row: Any) -> str | None:
     evidence = row.fields.get("AE", {}).get("evidence", ()) if isinstance(row.fields, Mapping) else ()
     kinds = {item.get("kind") for item in evidence if isinstance(item, Mapping)}
     if "DEFAULT_TWO_STAR" in kinds:
-        return f"业务默认/{row.star}星"
+        return f"已确定/默认二星"
+    if "CONFLICT_AUTHORITY_WINS" in kinds:
+        return f"已确定/冲突按权威/{row.star}星"
     if "RATING_AUTHORITY" in kinds and "PAYROLL_REFERENCE_RATING" in kinds:
-        return f"冲突按权威/{row.star}星"
+        return f"已确定/冲突按权威/{row.star}星"
     if "RATING_AUTHORITY" in kinds:
         return f"已核验/{row.star}星"
-    return f"待核验/{row.star}星"
+    if "FALLBACK_REFERENCE" in kinds:
+        return f"已确定/上传资料/{row.star}星"
+    return f"已确定/{row.star}星"
 
 
 GRADE_COLUMNS = {
