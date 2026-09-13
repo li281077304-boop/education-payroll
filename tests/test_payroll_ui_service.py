@@ -9,6 +9,8 @@ from openpyxl import load_workbook
 
 from payroll_ui.server import PayrollHttpServer
 from payroll_ui.service import PayrollService
+from payroll_ui.core_flow import CoreFlow
+from payroll_core.models.records import PayrollRecord
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "excel"
@@ -318,6 +320,24 @@ def test_sanitized_happy_path_marks_aa_and_ac_as_independently_checked(tmp_path)
     assert fields["class_value"]["state"] == "已核对"
     assert fields["one_to_one"]["authority"] is True
     assert fields["class_value"]["compared"] is True
+
+
+def test_zero_difference_does_not_become_manual_action_for_estimated_source():
+    """A matching target is not a user task merely because its source is estimated."""
+    result = {
+        "rows": [{
+            "teacher": "教师甲",
+            "fields": {
+                "AF": {"value": 3487.87, "state": "ESTIMATED", "reason": "默认 AF 政策候选"},
+            },
+        }],
+    }
+    target = [PayrollRecord("2026-08", "教师甲", af=3487.87)]
+
+    checks = CoreFlow._core_checks(result, target, "AUDIT")
+
+    assert len(checks) == 1
+    assert checks[0].status == "AF_POLICY_MATCH"
 
 
 def test_sanitized_one_to_one_difference_has_values_and_source_evidence(tmp_path):
