@@ -231,7 +231,7 @@ class PayrollService(CoreFlow):
         if package.authority_ratings:
             source_hash = hashlib.sha256(
                 "|".join(sorted(
-                    f"{item.get('source_file', '')}:{item.get('sheet', '')}:{item.get('cell', '')}:{item.get('rating', '')}"
+                    f"{item.get('source_file', '')}:{item.get('sheet', '')}:{item.get('cell', '')}:{item.get('teacher', '')}:{item.get('rating', '')}"
                     for item in package.star_records
                 )).encode()
             ).hexdigest()

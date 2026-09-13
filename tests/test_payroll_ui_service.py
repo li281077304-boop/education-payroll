@@ -89,6 +89,23 @@ def test_package_personnel_rates_bind_to_the_same_run_calculation_version(tmp_pa
     assert rate_version["profiles"][0]["rate_per_session"] == 140
 
 
+def test_package_star_fingerprint_changes_when_teacher_changes_in_same_cell(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    from shutil import copyfile
+    copyfile(FIXTURES / "fake_schedule.xlsx", package_dir / "排课列表.xlsx")
+    star = package_dir / "星级名单.xlsx"
+    _star_package_book(star, [("张三", "数学")])
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    first = service.import_package(run["id"], str(package_dir))["run"]["rating_version_id"]
+    book = load_workbook(star)
+    book.active["B4"] = "李四"
+    book.save(star)
+    second = service.import_package(run["id"], str(package_dir))["run"]["rating_version_id"]
+    assert second != first
+
+
 def _payroll_with_only(path: Path, row: int) -> None:
     copyfile(FIXTURES / "fake_payroll.xlsx", path)
     book = load_workbook(path)
