@@ -202,6 +202,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.rebind_calculation(run_id, "core" if action == "core-rules" else "part_time", str(payload.get("version_id", ""))))
                 if action == "files":
                     return self._json(self.server.service.import_file(run_id, str(payload.get("role", "")), str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
+                if action == "package":
+                    return self._json(self.server.service.import_package(run_id, str(payload.get("path", ""))))
                 if action == "grade-history":
                     return self._json(self.server.service.import_grade_history_for_run(run_id, str(payload.get("path", "")), payload.get("sha256")))
                 if action == "grade-confirmations":

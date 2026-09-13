@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
+from payroll_core.excel.package import discover_payroll_package
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.models.evidence import AdapterIssue
 from payroll_core.models.class_type_rules import (
@@ -168,6 +169,101 @@ class PayrollService(CoreFlow):
 
     def business_inputs(self, period: str = "", status: str = "") -> list[dict]:
         return self.inputs.list_admin(period=period, status=status)
+
+    def import_package(self, run_id: str, package_path: str) -> dict:
+        """Discover a local materials package and bind its star authority.
+
+        This is intentionally a thin bridge into the existing Run flow: the
+        package scanner owns content recognition and provenance, while the
+        normal ``import_file``/``check`` path remains the calculation path.
+        Source workbooks are never copied into the store.
+        """
+        run = self._load(run_id)
+        package = discover_payroll_package(package_path, run["period"])
+        for evidence in package.grade_evidence:
+            identifier = hashlib.sha256(
+                f"package-grade|{evidence.source_hash}|{evidence.coordinate}|{evidence.student}|{evidence.lesson_date}|{evidence.grade}".encode()
+            ).hexdigest()[:24]
+            self.store.save_student_grade_evidence({
+                "id": identifier, "student": evidence.student, "lesson_date": evidence.lesson_date,
+                "grade": evidence.grade, "origin": evidence.origin, "source_file": evidence.source_file,
+                "source_hash": evidence.source_hash, "sheet": evidence.sheet, "coordinate": evidence.coordinate,
+                "teacher": evidence.teacher, "subject": evidence.subject,
+                "lesson_start_time": evidence.lesson_start_time, "class_type": evidence.class_type,
+                "note": "资料包自动识别的历史年级证据。",
+            })
+
+        run["reference_ratings"] = dict(package.reference_ratings)
+        run["reference_rating_sources"] = {key: list(value) for key, value in package.rating_sources.items()}
+        run["authority_ratings"] = dict(package.authority_ratings)
+        run["star_records"] = list(package.star_records)
+        run["star_conflicts"] = list(package.star_conflicts)
+        run["package_root"] = str(package.root)
+        run["package_inventory"] = package.inventory
+        run["source_registry"] = list(package.source_registry)
+        if package.star_conflicts:
+            # A source can be readable yet not bindable for this Run.  Mark
+            # that distinction in the Run-local registry so the UI does not
+            # claim a verified authority where the values conflict.
+            for source in run["source_registry"]:
+                if source.get("source_type") == "STAR":
+                    source["status"] = "NEEDS_CONFIRMATION"
+                    source.setdefault("source_evidence", {})["conflicts"] = list(package.star_conflicts)
+        run["scope_teachers"] = list(package.scope_teachers)
+        run["data_center"] = {
+            "sources": list(package.source_registry),
+            "physical_file_audit": list(package.inventory.get("physical_file_audit") or []),
+            "pending_confirmation": [
+                item for item in package.source_registry
+                if item.get("status") == "NEEDS_CONFIRMATION"
+            ],
+        }
+
+        # A package's standalone star files are system authority.  Conflicting
+        # teachers are deliberately excluded, preserving the existing
+        # needs-review behavior instead of choosing one value silently.
+        if package.authority_ratings:
+            source_hash = hashlib.sha256(
+                "|".join(sorted(
+                    f"{item.get('source_file', '')}:{item.get('sheet', '')}:{item.get('cell', '')}:{item.get('rating', '')}"
+                    for item in package.star_records
+                )).encode()
+            ).hexdigest()
+            source_version = f"package-stars-{source_hash[:12]}"
+            existing = next((item for item in self.store.list_rating_versions()
+                             if item.get("source_hash") == source_hash
+                             and item.get("source_version") == source_version
+                             and item.get("effective_from") <= run["period"] <= item.get("effective_to")), None)
+            if existing is None:
+                self.save_rating_version(
+                    run["period"], run["period"], "资料包系统权威星级", source_version,
+                    [{"teacher": teacher, "rating": rating} for teacher, rating in sorted(package.authority_ratings.items())],
+                    source_hash=source_hash,
+                )
+                existing = next(item for item in self.store.list_rating_versions()
+                                if item.get("source_hash") == source_hash and item.get("source_version") == source_version)
+            run["rating_version_id"] = existing["id"]
+            run["star_authority_status"] = "VERIFIED_WITH_CONFLICTS" if package.star_conflicts else "VERIFIED"
+        elif package.star_conflicts:
+            # Do not discard an already explicit Run binding, but make the
+            # conflict visible to the UI/audit layer.
+            run["star_authority_status"] = "CONFLICT_NEEDS_CONFIRMATION"
+        else:
+            run["star_authority_status"] = "NOT_PROVIDED"
+
+        if package.schedule_path is None:
+            raise ValueError("资料包中没有可识别的排课表。")
+        self.store.save(run)
+        imported = self.import_file(run_id, "schedule", str(package.schedule_path))
+        return {
+            "run": imported,
+            "inventory": package.inventory,
+            "schedule": str(package.schedule_path),
+            "reference_ratings": len(package.reference_ratings),
+            "authority_ratings": len(package.authority_ratings),
+            "star_conflicts": len(package.star_conflicts),
+            "grade_evidence": len(package.grade_evidence),
+        }
 
     def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None) -> list[dict]:
         return self.inputs.import_results(input_type, period, path, submitted_by, activation_scope=activation_scope, replace_input_ids=replace_input_ids)
@@ -2092,7 +2188,11 @@ class PayrollService(CoreFlow):
             },
             "authority_context": {
                 "schedule": {"label": "排课权威源", "name": schedule.get("name") if schedule else "尚未导入", "sha256": schedule.get("sha256") if schedule else None},
-                "rating": self._authority_reference(rating, "教师星级"),
+                "rating": {
+                    **self._authority_reference(rating, "教师星级"),
+                    "binding_status": run.get("star_authority_status", "BOUND" if rating else "NOT_PROVIDED"),
+                    "conflicts": list(run.get("star_conflicts", [])),
+                },
                 "policy": self._authority_reference(policy, "教师工资政策"),
                 "class_type_rules": {"label": "班型折算规则", "version_id": class_rule_version_id, "coefficients": class_rules},
                 "core_rules": self._calculation_version(run, "core"),

@@ -13,6 +13,61 @@ from payroll_ui.service import PayrollService
 FIXTURES = Path(__file__).parent / "fixtures" / "excel"
 
 
+def _star_package_book(path: Path, rows: list[tuple[str, str]]) -> Path:
+    book = load_workbook(FIXTURES / "fake_payroll.xlsx")
+    sheet = book.active
+    sheet.delete_rows(1, sheet.max_row)
+    sheet.append(["星级教师具体名单"])
+    sheet.append(["", "三星", "", "四星", ""])
+    sheet.append(["", "姓名", "学科", "姓名", "学科"])
+    for name, subject in rows:
+        sheet.append(["", name, subject, "", ""])
+    book.save(path)
+    return path
+
+
+def test_package_star_authority_is_bound_to_run_and_core(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    schedule = package_dir / "排课列表.xlsx"
+    from shutil import copyfile
+    copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    _star_package_book(package_dir / "星级名单.xlsx", [("张三", "数学"), ("李四", "物理")])
+
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    imported = service.import_package(run["id"], str(package_dir))["run"]
+
+    assert imported["authority_ratings"] == {"张三": 3, "李四": 3}
+    rating = service.store.get_rating_version(imported["rating_version_id"])
+    assert rating["source"] == "资料包系统权威星级"
+    assert imported["authority_context"]["rating"]["source"] == "资料包系统权威星级"
+    checked = service.check(imported["id"])
+    rows = {row["teacher"]: row for row in checked["core_calculation"]["rows"]}
+    assert rows["张三"]["fields"]["AE"]["state"] == "DETERMINED"
+    assert rows["张三"]["fields"]["AE"]["evidence"][0]["kind"] == "RATING_AUTHORITY"
+
+
+def test_package_star_conflict_is_preserved_without_binding_conflicting_teacher(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    from shutil import copyfile
+    copyfile(FIXTURES / "fake_schedule.xlsx", package_dir / "排课列表.xlsx")
+    _star_package_book(package_dir / "星级名单-3.xlsx", [("张三", "数学")])
+    # A second independent source disagrees for the same teacher.
+    book = load_workbook(package_dir / "星级名单-3.xlsx")
+    sheet = book.active
+    sheet["B2"] = "四星"
+    book.save(package_dir / "星级名单-4.xlsx")
+
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    imported = service.import_package(run["id"], str(package_dir))["run"]
+    assert imported["star_conflicts"][0]["teacher"] == "张三"
+    assert imported.get("star_authority_status") == "CONFLICT_NEEDS_CONFIRMATION"
+    assert imported.get("rating_version_id") is None
+
+
 def _payroll_with_only(path: Path, row: int) -> None:
     copyfile(FIXTURES / "fake_payroll.xlsx", path)
     book = load_workbook(path)

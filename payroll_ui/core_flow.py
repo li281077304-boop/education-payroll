@@ -43,12 +43,18 @@ class CoreFlow:
             contexts.append(context)
             if profile:
                 profiles.append({**profile, **metadata, "version": policy["id"], "approved_by": profile.get("approved_by", profile.get("special_approval", "")), "approved_at": profile.get("approved_at", policy.get("created_at", ""))})
-        ratings = [{**p, "effective_from": rating["effective_from"], "effective_to": rating["effective_to"], "source": rating["source"], "source_version": rating["id"]} for p in (rating or {}).get("ratings", []) if p["teacher"] in teachers]
+        ratings = [{**p, "effective_from": rating["effective_from"], "effective_to": rating["effective_to"], "source": rating["source"], "source_version": rating.get("source_version", rating["id"])} for p in (rating or {}).get("ratings", []) if p["teacher"] in teachers]
         rates = [{**p, "grade": p["grade_scope"], "rate_per_lesson": p["rate_per_session"], "effective_from": part_time["effective_from"], "effective_to": part_time["effective_to"], "source": part_time["source"], "version": part_time["id"], "approved_by": part_time["actor"], "approved_at": part_time["created_at"]} for p in (part_time or {}).get("profiles", [])]
         if not rule_version:
             reason = "当前月份没有唯一绑定的核心规则版本，请到基础资料选择生效版本。"
             return {"period": run["period"], "rows": [{"teacher": t, "fields": {f: {"value": None, "state": "NEEDS_INPUT", "reason": reason, "evidence": []} for f in ("AA", "AC", "AD", "AE", "AF", "PART_TIME")}} for t in sorted(teachers)], "course_contributions": [], "rule_versions": {}}
-        result = calculate_payroll(period=run["period"], schedule=schedule, rules=CoreRules.from_dict(rule_version["rules"]), ratings=ratings, profiles=profiles, reference_ratings={p.teacher: star_from_level(p.teacher_level) for p in payroll if star_from_level(p.teacher_level) is not None}, teacher_contexts=contexts, part_time_rates=rates, effective_ac=effective_ac or {})
+        # Package-discovered historical ratings are persisted on the Run and
+        # become the fallback layer for this calculation.  The submitted
+        # payroll sheet remains an additional reference only; neither source
+        # can silently replace an independent system-authority rating.
+        references = dict(run.get("reference_ratings") or {})
+        references.update({p.teacher: star_from_level(p.teacher_level) for p in payroll if star_from_level(p.teacher_level) is not None})
+        result = calculate_payroll(period=run["period"], schedule=schedule, rules=CoreRules.from_dict(rule_version["rules"]), ratings=ratings, profiles=profiles, reference_ratings=references, teacher_contexts=contexts, part_time_rates=rates, effective_ac=effective_ac or {})
         raw = result.as_dict()
         def value(item: dict) -> dict:
             return {**item, "value": None if item["value"] is None else float(item["value"])}
