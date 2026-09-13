@@ -9,6 +9,8 @@ import json
 import mimetypes
 import secrets
 import subprocess
+import traceback
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +55,20 @@ class PayrollHandler(SimpleHTTPRequestHandler):
 
     def _authorized(self) -> bool:
         return self.headers.get("X-Payroll-Token") == self.server.token
+
+    def _unexpected_error(self, context: str, exc: Exception) -> None:
+        """Return a complete JSON response while retaining a local traceback."""
+        error_id = secrets.token_hex(8)
+        log_path = self.server.service.root / "technical-errors.log"
+        entry = f"[{datetime.now(timezone.utc).isoformat()}] {error_id} {context}\n{traceback.format_exc()}\n"
+        try:
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(entry)
+        except OSError:
+            # The response must still reach the browser even if diagnostics
+            # cannot be written (for example, a read-only data directory).
+            pass
+        return self._error(f"{context}，系统已记录错误（错误编号 {error_id}），请重试。", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _serve_static(self, relative: str) -> None:
         path = (self.server.static_root / relative).resolve()
@@ -136,6 +152,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return self._error(str(exc))
         except OSError:
             return self._error("文件无法读取。请关闭 Excel/WPS，确认文件仍在原位置后重试。")
+        except Exception as exc:  # pragma: no cover - exercised through HTTP regression
+            return self._unexpected_error("系统处理失败", exc)
 
     def do_POST(self) -> None:  # noqa: N802
         # Teacher routes authenticate independently and cannot call admin APIs.
@@ -234,7 +252,12 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action == "assessments":
                     return self._json(self.server.service.bind_management_assessment(run_id, str(payload.get("result_id", ""))))
                 if action == "generate":
-                    return self._json(self.server.service.generate_payroll(run_id, str(payload.get("output_path", "")), confirmed_hours=payload.get("confirmed_hours")))
+                    try:
+                        return self._json(self.server.service.generate_payroll(run_id, str(payload.get("output_path", "")), confirmed_hours=payload.get("confirmed_hours")))
+                    except (ValueError, OSError):
+                        raise
+                    except Exception as exc:
+                        return self._unexpected_error("生成工资表失败", exc)
                 if action == "class-type-rules":
                     return self._json(self.server.service.rebind_class_type_rules(run_id, str(payload.get("version_id", ""))))
                 if action == "writeback-generated":
@@ -254,6 +277,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return self._error(str(exc))
         except OSError:
             return self._error("文件无法读取。请关闭 Excel/WPS，确认文件仍在原位置后重试。")
+        except Exception as exc:  # pragma: no cover - exercised through HTTP regression
+            return self._unexpected_error("系统处理失败", exc)
 
     @staticmethod
     def _pick_excel() -> str | None:

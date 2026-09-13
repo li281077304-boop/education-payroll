@@ -1172,20 +1172,26 @@ class PayrollService(CoreFlow):
                 checks = [c for c in recalculated if c.field != "class_value"] + ac_checks
             run["core_calculation"] = core_result
             run["calculation_context"] = self._calculation_context(run)
-        for teacher in sorted(scope_teachers - {row.teacher for row in payroll}):
-            checks.extend((
-                FieldCheck(teacher, "one_to_one", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
-                FieldCheck(teacher, "class_value", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
-            ))
-        checks += total_salary_read_checks(payroll)
+        is_generate = run.get("mode", MODE_AUDIT) == MODE_GENERATE
+        if not is_generate:
+            # These checks describe reconciliation against an existing payroll
+            # target.  GENERATE has no target by design; the schedule defines
+            # the population and must not manufacture one issue per teacher.
+            for teacher in sorted(scope_teachers - {row.teacher for row in payroll}):
+                checks.extend((
+                    FieldCheck(teacher, "one_to_one", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
+                    FieldCheck(teacher, "class_value", None, None, "MISSING_TARGET", "提交范围内教师未出现在基准最终工资表。"),
+                ))
+            checks += total_salary_read_checks(payroll)
         rating_version = self._rating_version_for_run(run)
         ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"], allow_blank_payroll_rating=item.get("allow_blank_payroll_rating", False)) for item in rating_version.get("ratings", [])] if rating_version else []
-        rating_checks = rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
-        if configured:
-            exempt = {row["teacher"] for row in core_result["rows"] if row["fields"]["AE"]["state"] == "NOT_APPLICABLE"}
-            checks += [c for c in rating_checks if c.field == "rating" and c.teacher not in exempt]
-        else:
-            checks += rating_checks
+        if not is_generate:
+            rating_checks = rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
+            if configured:
+                exempt = {row["teacher"] for row in core_result["rows"] if row["fields"]["AE"]["state"] == "NOT_APPLICABLE"}
+                checks += [c for c in rating_checks if c.field == "rating" and c.teacher not in exempt]
+            else:
+                checks += rating_checks
         policy_version = self._policy_version_for_run(run)
         profiles = [TeacherCompensationProfile(item["teacher"], item["role"], item.get("rating"), item.get("rating_override"), item.get("special_approval", ""), item.get("obligation_hours", 0), item.get("obligation_hours_deduction_enabled", False), policy_version["effective_from"], policy_version["effective_to"], policy_version["source"], item.get("note", "")) for item in policy_version.get("profiles", [])] if policy_version else []
         if not configured:

@@ -131,16 +131,20 @@ function statusBadge(run) {
 }
 
 function shell(content, historyButton = true) {
-  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="businessInputsPage()">业务填报</button>${current ? '<button class="quiet" onclick="writebackPage()">批注回填</button>' : ""}${historyButton ? '<button class="quiet" onclick="home()">核算历史</button>' : ""}<button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button><button class="quiet" onclick="assessmentsPage()">岗位考核</button><a class="quiet" href="/teacher">教师填报</a></div></header>${content}</div>`;
+  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="businessInputsPage()">业务填报</button>${current ? '<button class="quiet" onclick="writebackPage()">批注回填</button>' : ""}<button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button><button class="quiet" onclick="assessmentsPage()">岗位考核</button><a class="quiet" href="/teacher">教师填报</a></div></header>${content}</div>`;
 }
 
 async function home() {
   try {
-    homeRuns = await api("/api/runs");
+    // The historical list is intentionally disabled for now.  Rendering every
+    // stored run requires a full calculation/readiness render and makes the
+    // primary entry point slower as the local archive grows.  Historical data
+    // remains intact and will return behind a lightweight index later.
+    homeRuns = [];
     current = null;
     const today = new Date();
     const defaultPeriod = defaultPayrollPeriod(today);
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，导入排课数据和本次提交表；如有基准最终工资表，系统以它作为工资结果依据。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史记录</p><h2>最近核算</h2></div><span class="muted">${homeRuns.length} 条</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，导入排课数据和本次提交表；如有基准最终工资表，系统以它作为工资结果依据。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }

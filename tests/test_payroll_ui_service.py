@@ -1,6 +1,7 @@
 from pathlib import Path
 from shutil import copyfile
 from threading import Thread
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import json
 
@@ -185,6 +186,22 @@ def test_ui_does_not_treat_other_subject_teachers_in_a_campus_schedule_export_as
     assert not any(item["teacher"] == "无关教师" and item["status"] == "MISSING_TARGET" for item in result["issues"])
 
 
+def test_generate_mode_excludes_payroll_reconciliation_issues(tmp_path):
+    """A generated payroll has no submitted target to reconcile against."""
+    from shutil import copyfile
+
+    schedule = tmp_path / "schedule.xlsx"
+    copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    service.import_file(run["id"], "schedule", str(schedule))
+
+    checked = service.check(run["id"])
+
+    assert not any(item["status"] == "MISSING_TARGET" for item in checked["issues"])
+    assert not any(item["status"] in {"MISSING_PAYROLL_VALUE", "RATING_MISMATCH", "RATE_MISMATCH"} for item in checked["issues"])
+
+
 def test_ui_marks_run_stale_when_original_file_changes(tmp_path):
     service, run, schedule = _prepared_run(tmp_path)
     with schedule.open("ab") as handle:
@@ -217,6 +234,41 @@ def test_loopback_ui_bootstrap_and_create_run(tmp_path):
         request = Request(base + "/api/runs", data=b'{"period":"2026-08"}', method="POST", headers={"Content-Type": "application/json", "X-Payroll-Token": token})
         payload = json.loads(urlopen(request).read())
         assert payload["period"] == "2026-08"
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
+
+
+def test_http_generate_unexpected_error_is_json_and_server_survives(tmp_path, monkeypatch):
+    service = PayrollService(tmp_path / "app-data")
+    static = Path(__file__).parents[1] / "payroll_ui" / "static"
+    server = PayrollHttpServer(("127.0.0.1", 0), service, static)
+    worker = Thread(target=server.serve_forever, daemon=True); worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+    run = service.create("2026-08", mode="GENERATE")
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("synthetic renderer failure")
+
+    monkeypatch.setattr(service, "generate_payroll", explode)
+    request = Request(
+        base + f"/api/runs/{run['id']}/generate",
+        data=json.dumps({"output_path": str(tmp_path / "out.xlsx")}).encode(),
+        method="POST",
+        headers={"Content-Type": "application/json", "X-Payroll-Token": token},
+    )
+    try:
+        try:
+            urlopen(request)
+            raise AssertionError("expected HTTP 500")
+        except HTTPError as exc:
+            body = json.loads(exc.read())
+            assert exc.code == 500
+            assert "生成工资表失败" in body["error"]
+            assert "错误编号" in body["error"]
+        assert json.loads(urlopen(base + "/api/bootstrap").read())["token"] == token
+        log = tmp_path / "app-data" / "technical-errors.log"
+        assert log.exists() and "synthetic renderer failure" in log.read_text(encoding="utf-8")
     finally:
         server.shutdown(); server.server_close(); worker.join()
 
@@ -351,6 +403,9 @@ def test_browser_shell_uses_plain_language_for_core_workflow():
         assert technical_word not in source
     for plain_label in ("材料准备", "核对结果", "待处理问题", "管理岗位确认", "排课项目完成度"):
         assert plain_label in source
+    home_block = source.split("async function home()", 1)[1].split("async function authorityDashboard", 1)[0]
+    assert 'api("/api/runs")' not in home_block
+    assert "最近核算" not in home_block
 
 
 def test_run_binds_effective_rating_version_and_reports_a_rating_mismatch(tmp_path):
