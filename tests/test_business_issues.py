@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from payroll_ui.business import build_groups
+from payroll_ui.business import build_groups, build_user_actions
 from payroll_ui.service import PayrollService, version
 from payroll_core.models.evidence import AdapterResult
 from payroll_core.models.records import PayrollRecord, ScheduleRecord
@@ -87,6 +87,26 @@ def test_six_raw_fields_become_four_business_issues_without_losing_audits():
         "aa", "ac", "rate", "af-policy", "formula-ae", "formula-af"
     }
     assert records == original
+
+
+def test_user_actions_collapse_repeated_cause_without_discarding_audit_groups():
+    records = [
+        _record("rating-a", "rating", teacher="教师甲", expected=3, actual=2, status="RATING_MISMATCH"),
+        _record("rating-b", "rating", teacher="教师乙", expected=3, actual=2, status="RATING_MISMATCH"),
+        _record("ac-a", "class_value", teacher="教师甲", expected=2, actual=3),
+    ]
+    run = _run()
+    groups = _groups(run, records)
+
+    actions = build_user_actions(run, groups)
+
+    assert len(groups) == 3
+    rating_action = next(item for item in actions if item["cause"] == "compensation_rate_authority")
+    assert rating_action["count"] == 2
+    assert rating_action["teacher_count"] == 2
+    assert set(rating_action["teachers"]) == {"教师甲", "教师乙"}
+    assert len(rating_action["group_ids"]) == 2
+    assert len(actions) == 2
 
 
 def test_rate_and_af_policy_only_merge_when_both_sides_imply_same_billable_hours():
