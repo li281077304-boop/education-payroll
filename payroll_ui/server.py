@@ -87,6 +87,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
             if parsed.path == "/api/comment-candidates":
                 return self._json(self.server.service.comment_candidates(parse_qs(parsed.query).get("run_id", [""])[0]))
+            if parsed.path == "/api/default-export-path":
+                return self._json(self.server.service.default_export_path(parse_qs(parsed.query).get("filename", ["标准工资表.xlsx"])[0]))
             if parsed.path == "/api/import-mapping":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.preview_import_mapping(query.get("path", [""])[0], query.get("role", ["schedule"])[0], query.get("period", [""])[0]))
@@ -193,6 +195,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.review_business_input(bits[2], str(payload.get("action", "")), str(payload.get("reviewer", "")), str(payload.get("note", ""))))
             if path == "/api/pick":
                 return self._json({"path": self._pick_excel()})
+            if path == "/api/pick-directory":
+                return self._json({"path": self._pick_directory()})
             if path == "/api/inspect":
                 return self._json(self._inspect_path(str(payload.get("path", ""))))
             bits = path.strip("/").split("/")
@@ -210,6 +214,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.save_grade_confirmations_for_run(run_id, list(payload.get("confirmations", [])), str(payload.get("confirmed_by", "")), str(payload.get("note", ""))))
                 if action == "check":
                     return self._json(self.server.service.check(run_id))
+                if action == "period":
+                    return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
+                if action == "period-check":
+                    return self._json(self.server.service.resolve_period_check(run_id, str(payload.get("decision", ""))))
                 if action == "decisions":
                     return self._json(self.server.service.decide(run_id, str(payload.get("issue_id", "")), str(payload.get("action", "")), str(payload.get("person", "")), str(payload.get("reason", "")), expected_fingerprint=payload.get("fingerprint")))
                 if action == "management":
@@ -250,6 +258,14 @@ class PayrollHandler(SimpleHTTPRequestHandler):
     @staticmethod
     def _pick_excel() -> str | None:
         script = 'POSIX path of (choose file with prompt "选择 Excel 文件" of type {"org.openxmlformats.spreadsheetml.sheet", "com.microsoft.excel.xls", "com.microsoft.excel.xlsm"})'
+        try:
+            return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    @staticmethod
+    def _pick_directory() -> str | None:
+        script = 'POSIX path of (choose folder with prompt "选择工资资料包文件夹")'
         try:
             return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
         except (OSError, subprocess.CalledProcessError):

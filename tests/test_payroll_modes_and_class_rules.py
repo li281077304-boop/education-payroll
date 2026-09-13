@@ -227,8 +227,10 @@ def test_generate_mode_marks_draft_and_never_overwrites(tmp_path):
     service.generate_payroll(run["id"], str(output))
     text = load_workbook(output)["标准工资表"]["A2"].value
     assert "不等于最终全项工资" in text
-    with pytest.raises(ValueError, match="不能覆盖"):
-        service.generate_payroll(run["id"], str(output))
+    first_bytes = output.read_bytes()
+    second = service.generate_payroll(run["id"], str(output))
+    assert Path(second["path"]).name == "标准工资表 (2).xlsx"
+    assert output.read_bytes() == first_bytes
 
 
 def test_unknown_class_type_blocks_the_generated_payroll(tmp_path):

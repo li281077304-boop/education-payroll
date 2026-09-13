@@ -19,6 +19,7 @@ from openpyxl.styles import Font
 from ..final_fields import FINAL_FIELD_CODES, FIELD_LABELS
 from ..payroll_generation import GeneratedPayroll
 from .golden_baseline import golden_formula_for_row
+from .output_paths import safe_output_path
 
 
 CORE_HEADERS = (
@@ -86,9 +87,8 @@ def _formula_for_row(row: Any, code: str, row_number: int) -> str:
 
 
 def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path, *, template_path: str | Path | None = None) -> str:
-    target = Path(output)
-    if target.exists():
-        raise ValueError(f"输出文件已存在，不能覆盖：{target.name}")
+    # Preserve prior exports; collisions receive the next numbered name.
+    target = safe_output_path(output)
     if not payroll.rows:
         raise ValueError("没有可生成的教师记录，不能创建空的标准工资表。")
     rows = _ordered_rows(payroll)
