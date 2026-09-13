@@ -61,11 +61,32 @@ def test_package_star_conflict_is_preserved_without_binding_conflicting_teacher(
     book.save(package_dir / "星级名单-4.xlsx")
 
     service = PayrollService(tmp_path / "app-data")
+    service.save_rating_version("2026-08", "2026-08", "旧绑定星级", "old", [{"teacher": "张三", "rating": 2}])
     run = service.create("2026-08", mode="GENERATE")
     imported = service.import_package(run["id"], str(package_dir))["run"]
     assert imported["star_conflicts"][0]["teacher"] == "张三"
     assert imported.get("star_authority_status") == "CONFLICT_NEEDS_CONFIRMATION"
     assert imported.get("rating_version_id") is None
+
+
+def test_package_personnel_rates_bind_to_the_same_run_calculation_version(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    from shutil import copyfile
+    copyfile(FIXTURES / "fake_schedule.xlsx", package_dir / "排课列表.xlsx")
+    book = load_workbook(FIXTURES / "fake_payroll.xlsx")
+    sheet = book.active
+    sheet.delete_rows(1, sheet.max_row)
+    sheet.append(["姓名", "雇佣类型", "每节单价", "生效开始", "生效结束"])
+    sheet.append(["张三", "兼职", 140, "2026-08", "2026-08"])
+    book.save(package_dir / "人员资料.xlsx")
+
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    imported = service.import_package(run["id"], str(package_dir))["run"]
+    assert imported["part_time_rate_version_id"]
+    rate_version = next(item for item in service.part_time_rate_versions() if item["id"] == imported["part_time_rate_version_id"])
+    assert rate_version["profiles"][0]["rate_per_session"] == 140
 
 
 def _payroll_with_only(path: Path, row: int) -> None:

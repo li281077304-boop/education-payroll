@@ -198,6 +198,12 @@ class PayrollService(CoreFlow):
         run["authority_ratings"] = dict(package.authority_ratings)
         run["star_records"] = list(package.star_records)
         run["star_conflicts"] = list(package.star_conflicts)
+        run["personnel_records"] = list(package.personnel_records)
+        run["identity_conflicts"] = list(package.identity_conflicts)
+        run["weekly_reports"] = list(package.weekly_reports)
+        run["renewal_reports"] = list(package.renewal_reports)
+        run["refund_reports"] = list(package.refund_reports)
+        run["assessment_reports"] = list(package.assessment_reports)
         run["package_root"] = str(package.root)
         run["package_inventory"] = package.inventory
         run["source_registry"] = list(package.source_registry)
@@ -245,11 +251,49 @@ class PayrollService(CoreFlow):
             run["rating_version_id"] = existing["id"]
             run["star_authority_status"] = "VERIFIED_WITH_CONFLICTS" if package.star_conflicts else "VERIFIED"
         elif package.star_conflicts:
-            # Do not discard an already explicit Run binding, but make the
-            # conflict visible to the UI/audit layer.
+            # Clear any pre-existing auto-binding as well: retaining an older
+            # rating would silently choose a value in the face of this
+            # package's conflicting system sources.
+            run["rating_version_id"] = None
             run["star_authority_status"] = "CONFLICT_NEEDS_CONFIRMATION"
         else:
             run["star_authority_status"] = "NOT_PROVIDED"
+
+        # Personnel is a dated input, not a prompt-time override.  Materialize
+        # the package's explicit part-time rates into the same calculation
+        # version store used by ordinary Runs, while leaving identity
+        # conflicts unbound until they are resolved.
+        conflicted_names = {
+            name for conflict in package.identity_conflicts for name in conflict.get("names", [])
+        }
+        personnel_profiles = [
+            {
+                "teacher": item["teacher"], "grade_scope": "*",
+                "rate_per_session": item["fixed_rate"],
+                "notes": f"人员资料生效 {item.get('effective_from', run['period'])}～{item.get('effective_to', run['period'])}",
+            }
+            for item in package.personnel_records
+            if item.get("employment_type") == "PART_TIME"
+            and item.get("fixed_rate") is not None
+            and item.get("teacher") not in conflicted_names
+        ]
+        if personnel_profiles:
+            source = "资料包人员资料（只读提取）"
+            existing_part_time = next((item for item in self.part_time_rate_versions()
+                                       if item.get("source") == source
+                                       and item.get("effective_from") == run["period"]
+                                       and item.get("effective_to") == run["period"]
+                                       and item.get("profiles") == personnel_profiles), None)
+            if existing_part_time is None:
+                versions = self.save_part_time_rate_version(personnel_profiles, source, run["period"], run["period"], "系统识别")
+                existing_part_time = next(item for item in versions if item.get("source") == source and item.get("effective_from") == run["period"] and item.get("effective_to") == run["period"])
+            run["part_time_rate_version_id"] = existing_part_time["id"]
+            run["personnel_contexts"] = [
+                {"teacher": item["teacher"], "employment_type": item["employment_type"],
+                 "effective_from": item["effective_from"], "effective_to": item["effective_to"],
+                 "source": item["source_file"]}
+                for item in package.personnel_records if item.get("teacher") not in conflicted_names
+            ]
 
         if package.schedule_path is None:
             raise ValueError("资料包中没有可识别的排课表。")
@@ -1094,6 +1138,11 @@ class PayrollService(CoreFlow):
         version_id = run.get("rating_version_id")
         if version_id:
             return self.store.get_rating_version(version_id)
+        if run.get("star_authority_status") == "CONFLICT_NEEDS_CONFIRMATION":
+            # A package conflict is an explicit stop for automatic authority
+            # selection; do not let the generic single-version fallback pick
+            # an older unrelated rating behind the user's back.
+            return None
         matches = [item for item in self.store.list_rating_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= run["period"] <= item["effective_to"]]
         if len(matches) == 1:
             run["rating_version_id"] = matches[0]["id"]
