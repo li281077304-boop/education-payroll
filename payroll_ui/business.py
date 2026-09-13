@@ -125,6 +125,42 @@ def build_groups(run: dict, records: list[dict], rating_version: dict | None, po
     return sorted(output, key=lambda row: (row["severity_rank"], row["title"], row["teacher"], row["id"]))
 
 
+def build_user_actions(run: dict, groups: list[dict]) -> list[dict]:
+    """Collapse per-teacher audit cards into the actions a user must take.
+
+    ``issue_groups`` remains the immutable, teacher-scoped audit view used by
+    evidence and decision APIs.  This separate projection prevents repeated
+    instances of the same root cause (for example, a rating-source issue for
+    many teachers) from being presented as dozens of separate user tasks.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for group in groups:
+        # The final component is the stable business cause (the run and
+        # teacher are intentionally excluded from the user-action key).
+        cause = str(group.get("root_cause_key", "")).rsplit(":", 1)[-1]
+        key = f"{run.get('id', '')}:{cause or group.get('title', 'unknown')}"
+        buckets.setdefault(key, []).append(group)
+    actions: list[dict] = []
+    for key, members in buckets.items():
+        members = sorted(members, key=lambda item: (item.get("severity_rank", 9), item.get("teacher", ""), item.get("id", "")))
+        teachers = sorted({str(item.get("teacher", "")) for item in members if item.get("teacher")})
+        fields = sorted({field for item in members for field in item.get("affected_fields", [])})
+        actions.append({
+            "id": "action-" + hashlib.sha256(key.encode()).hexdigest()[:16],
+            "cause": key.rsplit(":", 1)[-1],
+            "title": members[0].get("title", "需要处理"),
+            "count": len(members),
+            "teacher_count": len(teachers),
+            "teachers": teachers,
+            "fields": fields,
+            "group_ids": [item["id"] for item in members],
+            "severity_rank": min(item.get("severity_rank", 9) for item in members),
+            "severity_label": min(members, key=lambda item: item.get("severity_rank", 9)).get("severity_label", "需要处理"),
+            "blocking": any(item.get("severity_rank", 9) <= 1 for item in members),
+        })
+    return sorted(actions, key=lambda item: (item["severity_rank"], item["title"], item["id"]))
+
+
 def decision_label(decision: dict | None) -> str:
     if not decision:
         return "待处理"

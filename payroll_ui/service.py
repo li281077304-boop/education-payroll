@@ -58,7 +58,7 @@ from payroll_ui.assessment_flow import AssessmentService
 from payroll_ui.submissions import PayrollSubmissionService
 
 from .storage import RunStore
-from .business import build_groups, invalidate as invalidate_business_decisions
+from .business import build_groups, build_user_actions, invalidate as invalidate_business_decisions
 from .business_inputs import BusinessInputService
 from .core_flow import CoreFlow, valid_period
 
@@ -498,7 +498,7 @@ class PayrollService(CoreFlow):
         policies = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "field_status": self._field_status([]), "summary": self._summary([])}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         self.store.save(run)
         return self.render(run)
@@ -964,7 +964,7 @@ class PayrollService(CoreFlow):
         # Legacy per-field decisions predate business review cards.  They are
         # cleared for backward compatibility; durable business decisions are
         # retained but explicitly require a fresh confirmation.
-        run["issues"], run["field_records"], run["issue_groups"], run["decisions"] = [], [], [], []
+        run["issues"], run["field_records"], run["issue_groups"], run["user_actions"], run["decisions"] = [], [], [], [], []
         invalidate_business_decisions(run.setdefault("business_decisions", []))
         run.pop("last_error", None)
         run.pop("stale_files", None)
@@ -1214,6 +1214,7 @@ class PayrollService(CoreFlow):
         run["audit_context"] = self._business_context(run)
         run.pop("business_context_stale", None)
         run["issue_groups"] = self._business_groups(run)
+        run["user_actions"] = build_user_actions(run, run["issue_groups"])
         run["field_status"] = self._field_status(checks)
         run["summary"] = self._summary(checks)
         if configured:
@@ -1600,6 +1601,7 @@ class PayrollService(CoreFlow):
         context = self._business_context(run)
         records = run.get("field_records") or run.get("issues", [])
         run["issue_groups"] = build_groups(run, records, context["rating_version"], context["policy_version"], context["default_compensation_bands"], ISSUE_LABELS)
+        run["user_actions"] = build_user_actions(run, run["issue_groups"])
         if run.get("business_context_stale"):
             for group in run["issue_groups"]:
                 group["status_label"] = "依据已变化，需重新核对"
