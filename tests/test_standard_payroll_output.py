@@ -19,6 +19,7 @@ from payroll_core.excel.standard_payroll_render import (
 )
 from payroll_core.models.records import ScheduleRecord
 from payroll_core.payroll_generation import GeneratedPayroll, build_generated_payroll, generated_from_calculation
+from payroll_ui.service import PayrollService
 
 
 def _generated(*, reference_rating: bool = False, business_inputs=()):
@@ -108,10 +109,58 @@ def test_output_validation_detects_evidence_tampering(tmp_path: Path):
             row[4].value = "被篡改"
             break
     book.save(output)
-
     validation = validate_standard_payroll_workbook(output, payroll)
     assert validation["ok"] is False
     assert any("核验与来源第" in error for error in validation["errors"])
+
+
+def test_preview_uses_final_fields_without_writing_until_export(tmp_path: Path, monkeypatch):
+    """Preview and export share final-field calculation; only export writes XLSX."""
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    run["calculation_engine"] = "CONFIGURED_V1"
+    service.store.save(run)
+    inputs = _business_inputs(complete=True)
+    for item in inputs:
+        item = {**item, "created_at": "2026-08-01T00:00:00+00:00"}
+        service.store.save_business_input(item)
+    checked = {
+        "period": "2026-08",
+        "business_input_bindings": [{"input_id": item["id"], "source_file_hash": ""} for item in inputs],
+        "core_calculation": {
+            "period": "2026-08",
+            "rule_versions": {"core": "core-v1"},
+            "rows": [{
+                "teacher": "教师甲", "employment_type": "FULL_TIME",
+                "fields": {
+                    "AA": {"value": 20, "state": DETERMINED, "reason": "测试核心规则"},
+                    "AC": {"value": 2.4, "state": DETERMINED, "reason": "测试核心规则"},
+                    "AD": {"value": 22.4, "state": DETERMINED, "reason": "测试核心规则"},
+                    "AE": {"value": 40, "state": DETERMINED, "reason": "测试核心规则"},
+                    "AF": {"value": 80, "state": DETERMINED, "reason": "测试核心规则"},
+                    "PART_TIME": {"value": None, "state": NOT_APPLICABLE, "reason": "测试核心规则"},
+                },
+            }],
+        },
+    }
+    monkeypatch.setattr(service, "check", lambda _run_id: checked)
+
+    preview = service.preview_payroll(run["id"])
+    row = preview["generated_payroll"]["rows"][0]
+    assert row["final_fields"]["AK"]["value"] == pytest.approx(9.5)
+    assert row["final_fields"]["AV"]["value"] == pytest.approx(80 + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 9.5 - 60)
+    assert not list(tmp_path.rglob("*.xlsx"))
+
+    output = tmp_path / "工资表.xlsx"
+    result = service.generate_payroll(run["id"], str(output))
+    assert Path(result["path"]).is_file()
+    reopened = load_workbook(result["path"], data_only=False)
+    columns = {header: index + 1 for index, header in enumerate(HEADERS)}
+    assert reopened["标准工资表"].cell(4, columns["AK 推荐续费奖"]).value == pytest.approx(9.5)
+    assert reopened["标准工资表"]["G4"].value == pytest.approx(row["final_fields"]["AV"]["value"])
+    second = service.generate_payroll(run["id"], str(output))
+    assert Path(second["path"]).is_file()
+    assert Path(second["path"]) != output
 
 
 def test_reference_rating_is_visible_and_determined(tmp_path: Path):

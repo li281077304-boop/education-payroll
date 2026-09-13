@@ -749,7 +749,7 @@ class PayrollService(CoreFlow):
             if confirmed_hours:
                 raise ValueError("AD 已由 AA + AC 独立计算，不接受手工或工资表 AD 覆盖。")
             checked = self.check(run_id)
-            payroll = generated_from_calculation(checked["core_calculation"])
+            payroll = self._generated_from_checked(checked)
             path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"))
             run = self.store.get(run_id)
             run["generated_payroll"] = {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(), "rows": [asdict(row) for row in payroll.rows]}
@@ -783,6 +783,27 @@ class PayrollService(CoreFlow):
         }
         self.store.save(run)
         return {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rows": [asdict(row) for row in payroll.rows], "rule_versions": dict(payroll.rule_versions)}
+
+    def preview_payroll(self, run_id: str) -> dict:
+        """核算并返回完整工资预览，不创建或修改任何输出工作簿."""
+        run = self._load(run_id)
+        if run.get("calculation_engine") != "CONFIGURED_V1":
+            raise ValueError("当前核算记录尚未启用完整工资计算链。")
+        checked = self.check(run_id)
+        return self._with_generated_preview(checked)
+
+    def _with_generated_preview(self, checked: dict) -> dict:
+        """Attach the canonical final-field preview without writing a file."""
+        if not checked.get("core_calculation"):
+            return checked
+        payroll = self._generated_from_checked(checked)
+        return {**checked, "generated_payroll": {"status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "rows": [asdict(row) for row in payroll.rows]}}
+
+    def _generated_from_checked(self, checked: dict):
+        """Build the one canonical final-field result used by preview/export."""
+        bindings = checked.get("business_input_bindings", [])
+        inputs = [self.store.get_business_input(item["input_id"]) for item in bindings]
+        return generated_from_calculation(checked["core_calculation"], business_inputs=inputs)
 
     def writeback_to_generated(self, run_id: str, candidate_ids: list[str], output_path: str, reviewer: str, strategy: str = "APPEND") -> dict:
         """生成模式复用同一套批注机制：同样的预览与回填函数，没有第二套逻辑。"""
@@ -1115,7 +1136,11 @@ class PayrollService(CoreFlow):
         run.pop("last_error", None)
         self.store.save(run)
         try:
-            return self._perform_check(run)
+            result = self._perform_check(run)
+            # Keep the post-decision recheck on the same complete preview path
+            # as the explicit preview action. This is read-only: workbook
+            # rendering remains exclusively inside generate_payroll().
+            return self._with_generated_preview(result)
         except OSError as exc:
             message = self._file_error(exc)
             self._finish_failed_check(run, message)

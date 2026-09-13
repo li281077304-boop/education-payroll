@@ -801,7 +801,7 @@ function markBusy(label) {
 async function preparePayrollPreview() {
   const release = markBusy("正在自动核算…");
   try {
-    current = await api(`/api/runs/${current.id}/check`, { method: "POST", body: "{}" });
+    current = await api(`/api/runs/${current.id}/preview`, { method: "POST", body: "{}" });
     tab = (current.issue_groups || []).length ? "issues" : "payroll";
     renderRun();
     showMessage((current.issue_groups || []).length ? "自动核算已完成，请先处理异常，再打开工资预览。" : "自动核算已完成，请检查工资预览后导出。", "success");

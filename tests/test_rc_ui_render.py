@@ -75,12 +75,13 @@ const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[
 const context = {document:{querySelector(){return null;}}, window:{}, console};
 vm.createContext(context);
 vm.runInContext(source, context);
-vm.runInContext(`current={period:'2026-08',mode:'GENERATE',summary:{core_calculation_complete:true},core_calculation:{rows:[{teacher:'教师甲',fields:{
+vm.runInContext(`current={period:'2026-08',mode:'GENERATE',summary:{core_calculation_complete:true},generated_payroll:{status:'NEEDS_CONFIRMATION',rows:[{teacher:'教师甲',fields:{
  AA:{value:20,state:'DETERMINED'},AC:{value:2.4,state:'DETERMINED'},AD:{value:22.4,state:'DETERMINED'},
  AE:{value:40,state:'DETERMINED'},AF:{value:0,state:'DETERMINED'},PART_TIME:{value:null,state:'NOT_APPLICABLE'}
-}}]}}`, context);
+},final_fields:{AK:{value:9.5,state:'DETERMINED'},AV:{value:84.5,state:'DETERMINED'}}}]}}`, context);
 const html = vm.runInContext('payrollPreviewPage()', context);
 for (const text of ['工资预览','教师甲','AA','AC','AD','AE','AF','AK','AV','兼职按节课时费','星级','导出工资表']) assert(html.includes(text), text);
+assert(html.includes('9.5') && html.includes('84.5'));
 assert(!html.includes('undefined'));
 '''
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"

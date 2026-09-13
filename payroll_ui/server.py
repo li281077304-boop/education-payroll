@@ -232,6 +232,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.save_grade_confirmations_for_run(run_id, list(payload.get("confirmations", [])), str(payload.get("confirmed_by", "")), str(payload.get("note", ""))))
                 if action == "check":
                     return self._json(self.server.service.check(run_id))
+                if action == "preview":
+                    return self._json(self.server.service.preview_payroll(run_id))
                 if action == "period":
                     return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
                 if action == "period-check":
