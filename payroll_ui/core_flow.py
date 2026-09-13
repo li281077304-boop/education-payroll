@@ -98,6 +98,13 @@ class CoreFlow:
                 expected = value["value"]
                 if value["state"] == "NOT_APPLICABLE":
                     status = "NOT_APPLICABLE"
+                elif target is not None and actual is not None and expected is not None and math.isclose(expected, actual, rel_tol=0, abs_tol=1e-6):
+                    # A zero-difference comparison is conclusive even when
+                    # the independent source is marked estimated (for
+                    # example, a default AF policy).  Keep the source state
+                    # in Core evidence, but do not turn an already matching
+                    # value into a user action.
+                    status = {"AE": "RATE_MATCH", "AF": "AF_POLICY_MATCH"}.get(code, "MATCH")
                 elif value["state"] != "DETERMINED":
                     status = "NEEDS_MANUAL_REVIEW"
                 elif mode == "GENERATE":
@@ -108,8 +115,6 @@ class CoreFlow:
                     status = "NOT_APPLICABLE"
                 elif actual is None:
                     status = "MISSING_PAYROLL_VALUE"
-                elif expected is not None and math.isclose(expected, actual, rel_tol=0, abs_tol=1e-6):
-                    status = {"AE": "RATE_MATCH", "AF": "AF_POLICY_MATCH"}.get(code, "MATCH")
                 else:
                     status = {"AE": "RATE_MISMATCH", "AF": "AF_POLICY_MISMATCH"}.get(code, "UNEXPLAINED_DIFFERENCE")
                 reason = str(value.get("reason", ""))
