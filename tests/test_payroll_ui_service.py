@@ -521,7 +521,7 @@ def test_browser_shell_uses_plain_language_for_core_workflow():
     source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text()
     for technical_word in ("Adapter", "Fingerprint", "Coverage", "Payroll Core"):
         assert technical_word not in source
-    for plain_label in ("材料准备", "核对结果", "待处理问题", "管理岗位确认", "排课项目完成度"):
+    for plain_label in ("工作台", "材料准备", "核对结果", "待处理问题", "管理岗位确认", "排课项目完成度"):
         assert plain_label in source
     home_block = source.split("async function home()", 1)[1].split("async function authorityDashboard", 1)[0]
     assert 'api("/api/runs")' not in home_block
