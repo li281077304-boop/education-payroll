@@ -489,7 +489,7 @@ function renderTab() {
   }
 }
 
-async function avSourceMapPage(runId = current?.id || "") {
+async function legacyAvSourceMapPage(runId = current?.id || "") {
   try {
     const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
     const data = await api(`/api/av-source-map${query}`);
@@ -506,6 +506,32 @@ async function avSourceMapPage(runId = current?.id || "") {
     const missing = fields.filter((item) => ["SOURCE_MISSING", "RULE_NOT_DEFINED", "MANUAL_INPUT_REQUIRED"].includes(item.category));
     const back = current ? "renderRun()" : "home()";
     shell(`<section class="section-head"><div><p class="eyebrow">只读证据</p><h1>总工资来源地图</h1><p class="muted">${data.period ? `当前 Run：${escapeHtml(data.period)} · ` : ""}来源、规则和缺口来自现有代码、Run 证据与真实工资模板；本页面不会写入任何核算状态。</p></div><button class="secondary" onclick="${back}">返回</button></section><section class="card"><div class="section-head"><div><h2>AV 公式</h2><p class="muted">真实模板 data_only=False 读取；未把历史数值反推成新规则。</p></div><strong class="readiness">${escapeHtml(data.full_payroll_completeness?.label || "—")}</strong></div><div class="formula-box">${escapeHtml(data.av_formula || "NO EVIDENCE")}</div><p class="small muted">FULL_PAYROLL_COMPLETENESS = 已确定或明确不适用的 AV 组成项 / ${data.full_payroll_completeness?.total || 0} 个组成项</p></section><section class="card"><h2>核心工资</h2><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>业务含义</th><th>关系</th><th>来源</th><th>来源类型</th><th>状态</th><th>权威来源</th></tr></thead><tbody>${core.map(row).join("")}</tbody></table></div></section><section class="card"><h2>外围工资与人工项</h2><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>业务含义</th><th>关系</th><th>来源</th><th>来源类型</th><th>状态</th><th>权威来源</th></tr></thead><tbody>${peripheral.map(row).join("")}</tbody></table></div></section><section class="card"><h2>缺口清单</h2>${missing.length ? `<div class="evidence-list">${missing.map((item) => `<div class="evidence-card"><div><span>${escapeHtml(item.column)} ${escapeHtml(item.business_name)}</span><strong>${escapeHtml(statusLabel(item.category))}</strong></div><div><span>当前系统</span><strong>${escapeHtml(statusLabel(item.current_system_status))}</strong></div><div><span>依据</span><strong>${escapeHtml(item.authoritative_source || "NO EVIDENCE")}</strong></div></div>`).join("")}</div>` : '<div class="empty success">当前没有缺口。</div>'}</section>`, false);
+  } catch (error) { showMessage(error.message); }
+}
+
+async function avSourceMapPage(runId = current?.id || "") {
+  try {
+    const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    const data = await api(`/api/av-source-map${query}`);
+    const fields = data.fields || [];
+    const directCodes = data.direct_components || data.components || [];
+    const upstream = data.upstream_dependencies || {AK: ["AH", "AI", "AJ"]};
+    const statusClass = (status) => ["DETERMINED", "NOT_APPLICABLE", "DONE"].includes(status) ? "ok" : (["NO_EVIDENCE", "HUMAN_REQUIRED", "SOURCE_MISSING", "RULE_NOT_DEFINED", "MANUAL_INPUT_REQUIRED", "BLOCKED_BY_COMPONENTS"].includes(status) ? "warn" : "info");
+    const statusLabel = (status) => ({
+      DETERMINED: "已确定", NOT_APPLICABLE: "不适用", HUMAN_REQUIRED: "待补来源/确认",
+      SOURCE_MISSING: "缺来源", RULE_NOT_DEFINED: "规则未定义", MANUAL_INPUT_REQUIRED: "需人工输入",
+      SOURCE_AVAILABLE_NOT_CONNECTED: "已有来源，尚未接入", DERIVED_OUTPUT: "衍生输出", BLOCKED_BY_COMPONENTS: "由组成项阻塞",
+      DONE: "已完成", NO_EVIDENCE: "NO EVIDENCE",
+    }[status] || status);
+    const row = (item) => `<tr><td><strong>${escapeHtml(item.column)}</strong></td><td>${escapeHtml(item.business_name)}</td><td>${escapeHtml(item.relationship || "—")}${item.template_formula ? `<div class="small muted">模板公式：${escapeHtml(item.template_formula)}</div>` : ""}</td><td>${escapeHtml(item.source || "—")}</td><td>${escapeHtml(item.source_type || "—")}</td><td><span class="status ${statusClass(item.category)}">${escapeHtml(statusLabel(item.category))}</span><div class="small muted">当前：${escapeHtml(statusLabel(item.current_system_status))}</div></td><td>${escapeHtml(item.authoritative_source || "—")}</td></tr>`;
+    const direct = directCodes.map((code) => fields.find((item) => item.column === code)).filter(Boolean);
+    const av = fields.find((item) => item.column === "AV");
+    const upstreamCodes = [...new Set(Object.values(upstream).flat())];
+    const upstreamFields = upstreamCodes.map((code) => fields.find((item) => item.column === code)).filter(Boolean);
+    const missing = direct.filter((item) => ["SOURCE_MISSING", "RULE_NOT_DEFINED", "MANUAL_INPUT_REQUIRED"].includes(item.category));
+    const avState = data.av_status_model?.state || av?.current_system_status || "NO_EVIDENCE";
+    const back = current ? "renderRun()" : "home()";
+    shell(`<section class="section-head"><div><p class="eyebrow">只读证据</p><h1>总工资来源地图</h1><p class="muted">${data.period ? `当前 Run：${escapeHtml(data.period)} · ` : ""}来源、规则和缺口来自现有代码、Run 证据与真实工资模板；本页面不会写入任何核算状态。</p></div><button class="secondary" onclick="${back}">返回</button></section><section class="card"><div class="section-head"><div><h2>AV（总工资）</h2><p class="muted">AV 是衍生输出，不是人工填报字段。</p></div><span class="status ${statusClass(avState)}">${escapeHtml(statusLabel(avState))}</span></div><div class="formula-box">${escapeHtml(data.av_formula || "NO EVIDENCE")}</div><p class="small muted">AV ↓ ${directCodes.length} 个直接组成项（M 在第一项）；只有 DETERMINED / NOT_APPLICABLE 才计入完整度。</p><div class="component-flow">${directCodes.map((code) => `<span class="status info">${escapeHtml(code)}</span>`).join(" ")}</div><strong class="readiness">FULL_PAYROLL_COMPLETENESS = ${escapeHtml(data.full_payroll_completeness?.label || "—")}</strong></section><section class="card"><h2>AV 直接组成项（${directCodes.length}）</h2><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>业务含义</th><th>关系</th><th>来源</th><th>来源类型</th><th>状态</th><th>权威来源</th></tr></thead><tbody>${direct.map(row).join("")}</tbody></table></div></section><section class="card"><h2>上游依赖（不计入 AV 分母）</h2><p class="muted">AK 的直接组成是 AH、AI、AJ；它们只作为 AK 的上游缺口展示。</p><div class="table-wrap"><table class="table"><thead><tr><th>上游字段</th><th>当前状态</th><th>来源</th><th>关系</th></tr></thead><tbody>${upstreamFields.map((item) => `<tr><td><strong>${escapeHtml(item.column)}</strong> · ${escapeHtml(item.business_name)}</td><td><span class="status ${statusClass(item.current_system_status)}">${escapeHtml(statusLabel(item.current_system_status))}</span></td><td>${escapeHtml(item.source || "—")}</td><td>${escapeHtml(item.relationship || "—")}</td></tr>`).join("")}</tbody></table></div></section><section class="card"><h2>缺口清单</h2>${missing.length ? `<div class="evidence-list">${missing.map((item) => `<div class="evidence-card"><div><span>${escapeHtml(item.column)} ${escapeHtml(item.business_name)}</span><strong>${escapeHtml(statusLabel(item.category))}</strong></div><div><span>当前系统</span><strong>${escapeHtml(statusLabel(item.current_system_status))}</strong></div><div><span>依据</span><strong>${escapeHtml(item.authoritative_source || "NO EVIDENCE")}</strong></div></div>`).join("")}</div>` : '<div class="empty success">当前没有直接组成项缺口。</div>'}</section>`, false);
   } catch (error) { showMessage(error.message); }
 }
 

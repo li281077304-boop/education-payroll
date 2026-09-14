@@ -133,6 +133,7 @@ ACTION_LABELS = {"special": "已确认特殊情况", "payroll_error": "工资表
 # a second calculation engine; the values and statuses below are only joined
 # with the current Run's durable final_fields evidence by av_source_map().
 AV_SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "M": {"business_name": "实际基本工资", "relationship": "(G + H + I + J) / K × L", "source": "真实工资模板与 July/August 最终工资表", "source_type": "PAYROLL_TEMPLATE_FORMULA", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "薪资表模板.xlsx、July/August final payroll（M5 公式）", "can_auto_calculate": True, "needs_manual_input": False, "needs_business_rule": False},
     "AF": {"business_name": "总课时费", "relationship": "MAX(0, (AD - 义务课时) × AE)", "source": "Core 排课计算 + Run 级义务课时政策", "source_type": "CORE_CALCULATION", "category": "DONE", "authoritative_source": "core_calculation / af_policy_confirmation", "can_auto_calculate": True, "needs_manual_input": False, "needs_business_rule": False},
     "AG": {"business_name": "领航伴学课时费", "relationship": "模板列，当前没有已定义计算关系", "source": "未发现明确业务来源或规则", "source_type": "UNKNOWN", "category": "RULE_NOT_DEFINED", "authoritative_source": "NO EVIDENCE", "can_auto_calculate": False, "needs_manual_input": False, "needs_business_rule": True},
     "AH": {"business_name": "续费一对一课时", "relationship": "取已审核 RENEWAL_RESULT 的 one_to_one_hours", "source": "已审核续费最终结果", "source_type": "RENEWAL_RESULT", "category": "SOURCE_MISSING", "authoritative_source": "approved business input bound to Run", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
@@ -149,7 +150,7 @@ AV_SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "AS": {"business_name": "月度激励", "relationship": "模板列，需明确标注 AS 的已审核金额", "source": "OTHER 业务输入（target_field=AS）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input with effective period", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
     "AT": {"business_name": "补发工资", "relationship": "模板列，需明确指向 AT 的已审核金额", "source": "OTHER 业务输入（target_field=AT）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
     "AU": {"business_name": "考勤罚款", "relationship": "模板列，需明确指向 AU 的已审核金额", "source": "OTHER 业务输入（target_field=AU）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
-    "AV": {"business_name": "总工资", "relationship": "M + AF + AG + AK + AL + AN + AO + AP + AQ + AR + AS + AT + AU + AM", "source": "模板公式汇总已确定的最终工资组成项", "source_type": "DERIVED", "category": "MANUAL_INPUT_REQUIRED", "authoritative_source": "template AV formula + all bound component sources", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AV": {"business_name": "总工资", "relationship": "M + AF + AG + AK + AL + AM + AN + AO + AP + AQ + AR + AS + AT + AU", "source": "模板公式汇总 14 个直接组成项", "source_type": "DERIVED_OUTPUT", "category": "DERIVED_OUTPUT", "authoritative_source": "template AV formula + 14 direct component sources", "can_auto_calculate": True, "needs_manual_input": False, "needs_business_rule": False},
 }
 
 
@@ -174,6 +175,7 @@ def _template_av_evidence(path: str | Path | None) -> dict[str, Any]:
         sheet = book.worksheets[0]
         columns: dict[str, int] = {}
         aliases = {
+            "M": ("实际基本工资",),
             "AF": ("总课时费",), "AG": ("领航伴学课时费",), "AH": ("1对1课时",),
             "AI": ("班课&1对2领航伴课次",), "AJ": ("小班领航伴学课次",), "AK": ("推荐续费奖",),
             "AL": ("进步率奖金",), "AM": ("管理团队奖",), "AN": ("退费/拒收学员",),
@@ -791,17 +793,25 @@ class PayrollService(CoreFlow):
                 item["template_formula"] = template["field_formulas"].get(code)
             fields.append({"column": code, **item})
 
-        component_codes = ("AF", "AG", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR", "AS", "AT", "AU")
-        payable = {"DETERMINED", "NOT_APPLICABLE", "ESTIMATED"}
-        complete_count = sum(1 for code in component_codes if statuses.get(code) and statuses[code] <= payable)
-        denominator = len(component_codes)
+        direct_components = ("M", "AF", "AG", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR", "AS", "AT", "AU")
+        payable = {"DETERMINED", "NOT_APPLICABLE"}
+        complete_count = sum(1 for code in direct_components if statuses.get(code) and statuses[code] <= payable)
+        av_blockers = [code for code in direct_components if not statuses.get(code) or not statuses[code] <= payable]
+        av_status = "DETERMINED" if not av_blockers else "BLOCKED_BY_COMPONENTS"
+        for field in fields:
+            if field["column"] == "AV":
+                field["current_system_status"] = av_status
+        denominator = len(direct_components)
         return {
             "version": "AV_SOURCE_MAP/v1",
             "run_id": run_id or None,
             "period": (run or {}).get("period_label") or (run or {}).get("period"),
             "template": template,
             "av_formula": template.get("formula") or AV_SOURCE_DEFINITIONS["AV"]["relationship"],
-            "components": list(component_codes),
+            "direct_components": list(direct_components),
+            "upstream_dependencies": {"AK": ["AH", "AI", "AJ"]},
+            "components": list(direct_components),
+            "av_status_model": {"state": av_status, "blocked_by": av_blockers, "direct_components": list(direct_components)},
             "full_payroll_completeness": {"complete": complete_count, "total": denominator, "label": f"{complete_count} / {denominator}"},
             "fields": fields,
         }
