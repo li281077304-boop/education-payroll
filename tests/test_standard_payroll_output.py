@@ -181,6 +181,7 @@ def test_template_output_keeps_auditable_excel_formulas(tmp_path: Path):
     output = tmp_path / "formula-output.xlsx"
     render_generated_payroll(payroll, output, template_path=template)
     sheet = load_workbook(output, data_only=False)["Sheet1"]
+    assert sheet["H2"].value == payroll.period
     assert sheet["AA5"].value.startswith("=(N5+O5+P5+Q5+R5+S5)")
     assert sheet["AD5"].value == "=AA5+AC5"
     assert sheet["AF5"].value.startswith("=MAX(0,(AD5-")

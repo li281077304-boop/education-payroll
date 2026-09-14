@@ -171,6 +171,14 @@ def _render_with_template(payroll: GeneratedPayroll, rows: tuple[Any, ...], targ
     columns = _template_headers(sheet)
     original_sheetnames = tuple(book.sheetnames)
     original_merges = tuple(sorted(str(item) for item in sheet.merged_cells.ranges))
+    # A reusable template may carry a stale example month (the checked-in
+    # template currently contains an Excel date serial).  Bind the displayed
+    # month to the authoritative Core period while preserving the template's
+    # layout and formatting.
+    for column in range(1, sheet.max_column):
+        if str(sheet.cell(2, column).value or "").strip() in {"月份：", "月份:"}:
+            sheet.cell(2, column + 1).value = payroll.period
+            break
     # Keep the supplied title, merged cells, widths, row heights and styles.
     # Clear only the data area, because formulas in the blank template rows
     # would otherwise display stale values from the template itself.
