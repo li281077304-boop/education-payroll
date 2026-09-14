@@ -254,6 +254,13 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         exceptions=payload.get("exceptions") or {},
                         reason=str(payload.get("reason", "")),
                     ))
+                if action == "base-salary":
+                    return self._json(self.server.service.save_base_salary_inputs(
+                        run_id,
+                        list(payload.get("inputs") or []),
+                        str(payload.get("confirmed_by", "")),
+                        str(payload.get("source", "本次 Run 基本工资确认")),
+                    ))
                 if action == "period":
                     return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
                 if action == "period-check":

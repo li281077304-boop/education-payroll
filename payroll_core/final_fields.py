@@ -30,11 +30,13 @@ FINAL_FIELD_CODES: tuple[str, ...] = (
 # Components used by the documented historical AV total formula.  AH/AI/AJ
 # feed AK, but are not added a second time.
 AV_COMPONENTS: tuple[str, ...] = (
-    "AF", "AG", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR",
+    "M", "AF", "AG", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR",
     "AS", "AT", "AU",
 )
+LEGACY_AV_COMPONENTS: tuple[str, ...] = tuple(code for code in AV_COMPONENTS if code != "M")
 
 FIELD_LABELS: dict[str, str] = {
+    "M": "M 实际基本工资",
     "AG": "AG 未确认工资项目",
     "AH": "AH 续费一对一课时",
     "AI": "AI 续费班课课时",
@@ -54,6 +56,7 @@ FIELD_LABELS: dict[str, str] = {
 }
 
 FIELD_NOTES: dict[str, str] = {
+    "M": "实际基本工资依赖 G 基本工资、H 岗位津贴、I 工龄工资/教师等级、J 其他待遇、K 应出勤、L 实际出勤；缺少任何必需输入时不能按 0 计算。",
     "AG": "仓库现有资料未明确 AG 的业务含义、计算规则和权威来源。",
     "AH": "缺少已审核并绑定的续费最终结果；需要明确 1V1 合计。",
     "AI": "缺少已审核并绑定的续费最终结果；需要明确班课合计。",
@@ -69,7 +72,7 @@ FIELD_NOTES: dict[str, str] = {
     "AS": "缺少已审核、明确标注 AS 的月度激励结果及生效期。",
     "AT": "仓库现有资料未明确 AT 的业务含义、计算规则和权威来源。",
     "AU": "仓库现有资料未明确 AU 的业务含义、计算规则和权威来源。",
-    "AV": "AV 依赖 AF、AG、AK、AL、AM、AN、AO、AP、AQ、AR、AS、AT、AU 全部确定；未知项不能按 0 汇总。",
+    "AV": "AV 依赖 M、AF、AG、AK、AL、AM、AN、AO、AP、AQ、AR、AS、AT、AU 全部确定；未知项不能按 0 汇总。",
 }
 
 RENEWAL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -241,7 +244,7 @@ def _explicit_field_inputs(items: list[Mapping[str, Any]], teacher: str) -> dict
         if raw_field is None:
             continue
         code = str(raw_field).strip().upper()
-        if code not in FINAL_FIELD_CODES or code in {"AH", "AI", "AJ", "AK", "AN", "AV"}:
+        if code not in FINAL_FIELD_CODES or code in {"M", "AH", "AI", "AJ", "AK", "AN", "AV"}:
             continue
         raw_value = _first(payload, ("value", "amount", code))
         if raw_value is None:
@@ -266,15 +269,17 @@ def _explicit_field_inputs(items: list[Mapping[str, Any]], teacher: str) -> dict
 
 def _av_field(fields: Mapping[str, Mapping[str, Any]], teacher: str) -> dict[str, Any]:
     payable_states = {DETERMINED, NOT_APPLICABLE, "ESTIMATED"}
+    components = AV_COMPONENTS if "M" in fields else LEGACY_AV_COMPONENTS
     missing = [
-        code for code in AV_COMPONENTS
+        code for code in components
         if fields.get(code, {}).get("state") not in payable_states
         or (fields.get(code, {}).get("state") in payable_states and fields.get(code, {}).get("value") is None)
     ]
     if missing:
         return _empty("AV", f"{FIELD_NOTES['AV']} 未确定组件：{', '.join(missing)}。")
-    total = sum((Decimal(str(fields[code]["value"])) if fields[code].get("state") in payable_states else Decimal("0") for code in AV_COMPONENTS), Decimal("0"))
-    evidence = [{"kind": "AV_CALCULATION", "formula": "AF + AG + AK + AL + AM + AN + AO + AP + AQ + AR + AS + AT + AU", "inputs": {code: str(fields[code].get("value", 0)) for code in AV_COMPONENTS}}]
+    total = sum((Decimal(str(fields[code]["value"])) if fields[code].get("state") in payable_states else Decimal("0") for code in components), Decimal("0"))
+    formula = "M + AF + AG + AK + AL + AM + AN + AO + AP + AQ + AR + AS + AT + AU" if "M" in fields else "AF + AG + AK + AL + AM + AN + AO + AP + AQ + AR + AS + AT + AU"
+    evidence = [{"kind": "AV_CALCULATION", "formula": formula, "inputs": {code: str(fields[code].get("value", 0)) for code in components}}]
     return {
         "value": _as_float(total),
         "state": DETERMINED,
@@ -319,6 +324,12 @@ def resolve_final_fields(
     if default_zero_missing and not refund_items:
         fields["AN"] = _absent_zero("AN")
     fields.update(_explicit_field_inputs(_source_items(items, "OTHER", teacher), teacher))
+
+    # M is a production input-derived field.  It is supplied by the Run's
+    # immutable base-salary snapshot and is never accepted as an arbitrary
+    # OTHER/manual amount.
+    if isinstance(core_fields.get("M"), Mapping):
+        fields["M"] = dict(core_fields["M"])
 
     # The existing management-award rule names group leaders / teaching
     # owners as its applicable population.  Ordinary teachers therefore have

@@ -446,7 +446,7 @@ function navigation() {
   const checked = ["REVIEW_REQUIRED", "PASS"].includes(current.status);
   const groupCount = (current.issue_groups || []).length;
   const hasPayrollPreview = Boolean(current.generated_payroll || current.core_calculation?.rows?.length);
-  const items = [["materials", "材料准备", true], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["reconciliation", "历史工资对账", Boolean(current.files?.baseline && current.core_calculation?.rows?.length)], ["payroll", "工资预览", hasPayrollPreview], ["management", "管理岗位确认", true]];
+  const items = [["materials", "材料准备", true], ["base-salary", "基本工资", Boolean(current.core_calculation?.rows?.length)], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["reconciliation", "历史工资对账", Boolean(current.files?.baseline && current.core_calculation?.rows?.length)], ["payroll", "工资预览", hasPayrollPreview], ["management", "管理岗位确认", true]];
   return `<nav class="tabs">${items.map(([id, label, enabled]) => `<button class="${tab === id ? "active" : ""}" ${enabled ? `onclick="setTab('${id}')"` : "disabled"}>${label}</button>`).join("")}</nav>`;
 }
 
@@ -479,6 +479,7 @@ function setTab(next) { tab = next; renderRun(); }
 function renderTab() {
   const view = $("#view");
   if (tab === "materials") view.innerHTML = materialsPage();
+  if (tab === "base-salary") view.innerHTML = baseSalaryPage();
   if (tab === "overview") view.innerHTML = overviewPage();
   if (tab === "issues") view.innerHTML = issuesPage();
   if (tab === "payroll") view.innerHTML = payrollPreviewPage();
@@ -487,6 +488,32 @@ function renderTab() {
     view.innerHTML = '<section class="card"><h2>历史工资对账</h2><p class="muted">正在读取历史工资表与当前核心计算的逐教师差异……</p></section>';
     loadHistoricalReconciliation();
   }
+}
+
+function baseSalaryPage() {
+  const rows = current.core_calculation?.rows || current.generated_payroll?.rows || [];
+  const snapshot = current.base_salary_inputs || {};
+  const fields = [["G", "基本工资"], ["H", "岗位津贴"], ["I", "工龄工资/教师等级"], ["J", "其他待遇"], ["K", "应出勤"], ["L", "实际出勤"]];
+  const rowHtml = rows.map((row) => {
+    const entry = snapshot[row.teacher] || {};
+    const values = entry.fields || {};
+    const mState = entry.m?.state || "BLOCKED_BY_INPUT";
+    const stateLabel = mState === "DETERMINED" ? "已确定" : entry.fields ? "待补齐" : "待确认";
+    return `<tr class="base-salary-row" data-teacher="${escapeHtml(row.teacher)}"><td><strong>${escapeHtml(row.teacher)}</strong><input class="base-teacher-id" type="hidden" value="${escapeHtml(entry.teacher_id || row.teacher)}"></td>${fields.map(([code, label]) => `<td><label class="small">${label}<input class="base-${code.toLowerCase()}" type="number" step="0.01" value="${escapeHtml(values[code]?.value ?? "")}" placeholder="${code}"></label></td>`).join("")}<td><strong class="base-m-value">${escapeHtml(entry.m?.value ?? "待填写")}</strong><div class="small muted">M=(G+H+I+J)/K×L，只读计算</div></td><td><span class="status ${mState === "DETERMINED" ? "ok" : "warn"}">${stateLabel}</span></td></tr>`;
+  }).join("");
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">按教师确认 G～L；系统只读计算 M 实际基本工资，不接受直接填写 M。保存后形成当前 Run 的 BASE_SALARY_INPUT_SNAPSHOT。</p></div></div><div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="本次 Run 基本工资确认"></label></div><div class="action-bar"><span class="muted small">缺少任何 G～L 会阻塞该教师的 M，不会自动填 0。</span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存基本工资快照并重新预览</button></div></section>`;
+}
+
+async function saveBaseSalary() {
+  try {
+    const inputs = [...document.querySelectorAll(".base-salary-row")].map((row) => {
+      const fields = {};
+      for (const code of ["G", "H", "I", "J", "K", "L"]) fields[code] = row.querySelector(`.base-${code.toLowerCase()}`).value;
+      return {teacher: row.dataset.teacher, teacher_id: row.querySelector(".base-teacher-id").value, fields};
+    });
+    current = await api(`/api/runs/${current.id}/base-salary`, {method: "POST", body: JSON.stringify({inputs, confirmed_by: $("#base-salary-confirmed-by").value, source: $("#base-salary-source").value})});
+    renderRun(); showMessage("基本工资输入已保存并冻结到当前 Run。", "success");
+  } catch (error) { showMessage(error.message); }
 }
 
 async function avSourceMapPage(runId = current?.id || "") {
@@ -671,7 +698,7 @@ function payrollPreviewPage() {
     return `<section class="card"><h2>工资预览尚未生成</h2><p class="muted">请先完成材料准备并自动核算。</p><div class="action-bar"><button onclick="setTab('materials')">返回材料准备</button></div></section>`;
   }
   const rowHtml = rows.map((row) => {
-    const fields = ["AA", "AC", "AD", "AE", "AF", "AK", "AV", "PART_TIME"].map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code))}</td>`).join("");
+    const fields = ["M", "AA", "AC", "AD", "AE", "AF", "AK", "AV", "PART_TIME"].map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code))}</td>`).join("");
     const starEvidence = (row.fields?.AE?.evidence || []).map((item) => item?.inputs?.rating).find((value) => value != null && value !== "");
     const star = row.star ?? starEvidence ?? "—";
     const blockers = (row.blockers || []).join("、");
@@ -682,7 +709,7 @@ function payrollPreviewPage() {
   const exportNote = current.mode === "GENERATE"
     ? "导出会自动选择不冲突的新文件名，绝不覆盖已有工资表。状态为草稿时仍可导出，但文件会保留待确认标记。"
     : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · 核算周期 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · 核算周期 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>M 实际基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
 }
 
 function overviewPage() {

@@ -27,7 +27,10 @@ CORE_HEADERS = (
     "AE 该档每小时金额", "AF 总课时费", "AV 总工资", "状态", "待确认原因", "兼职按节课时费", "逐项确定性",
     "星级", "核心规则版本",
 )
-FINAL_OUTPUT_CODES = tuple(code for code in FINAL_FIELD_CODES if code != "AV")
+# M is a Core input-derived output and therefore appears in both generated
+# workbooks and the supplied historical template; the remaining codes are the
+# downstream AV fields.
+FINAL_OUTPUT_CODES = ("M",) + tuple(code for code in FINAL_FIELD_CODES if code != "AV")
 FINAL_OUTPUT_HEADERS = tuple(f"{code} {FIELD_LABELS[code].removeprefix(code + ' ')}" for code in FINAL_OUTPUT_CODES)
 HEADERS = CORE_HEADERS + FINAL_OUTPUT_HEADERS
 
@@ -67,6 +70,8 @@ GRADE_COLUMNS = {
 
 
 def _formula_for_row(row: Any, code: str, row_number: int) -> str:
+    if code == "M":
+        return f"=(G{row_number}+H{row_number}+I{row_number}+J{row_number})/K{row_number}*L{row_number}"
     if code == "AA":
         return f"=(N{row_number}+O{row_number}+P{row_number}+Q{row_number}+R{row_number}+S{row_number})/3*2*0.85+(T{row_number}+U{row_number})/3*2*0.9+V{row_number}/3*2*1+W{row_number}/3*2*1.1+X{row_number}/3*2*1.25+Y{row_number}/3*2*1.35+Z{row_number}/3*2*1.5"
     if code == "AD":
@@ -145,6 +150,8 @@ def _template_headers(sheet) -> dict[str, int]:
         "teacher": ("姓名",), "star": ("教师级别",), "aa": ("折算小时数",),
         "ac": ("班课折算小时数",), "ad": ("最终授课小时数据",), "ae": ("该档每小时金额",),
         "af": ("总课时费",), "av": ("总工资数",),
+        "g": ("基本工资",), "h": ("岗位津贴",), "i": ("工龄工资/教师等级",),
+        "j": ("其他待遇",), "k": ("应出勤",), "l": ("实际出勤",), "m": ("实际基本工资",),
     }
     found: dict[str, int] = {}
     for column in range(1, sheet.max_column + 1):
@@ -201,6 +208,14 @@ def _render_with_template(payroll: GeneratedPayroll, rows: tuple[Any, ...], targ
         row_number = first_data_row + index - 1
         sheet.cell(row_number, 1).value = index
         sheet.cell(row_number, columns["teacher"]).value = row.teacher
+        base_inputs = {}
+        m_field = row.final_fields.get("M", {}) if isinstance(getattr(row, "final_fields", None), Mapping) else {}
+        for evidence in m_field.get("evidence", ()) if isinstance(m_field, Mapping) else ():
+            if isinstance(evidence, Mapping) and isinstance(evidence.get("inputs"), Mapping):
+                base_inputs = dict(evidence["inputs"])
+                break
+        for code in ("G", "H", "I", "J", "K", "L"):
+            sheet.cell(row_number, columns[code.lower()]).value = _value(base_inputs.get(code)) if base_inputs else None
         counts = (payroll.formula_inputs.get("one_to_one_counts", {}) if isinstance(payroll.formula_inputs, Mapping) else {}).get(row.teacher, {})
         # The supplied template labels the middle-school columns as 初一/初二/初三,
         # while the normalized schedule may use 七/八/九年级.  They are the same
@@ -224,6 +239,14 @@ def _render_with_template(payroll: GeneratedPayroll, rows: tuple[Any, ...], targ
         # historical rating.  Keep that visible in the payroll column; the
         # evidence/status columns still make clear that it is not final.
         sheet.cell(row_number, columns["af"]).value = _formula_for_row(row, "AF", row_number)
+        # Keep blocked M rows visibly unresolved instead of letting Excel's
+        # blank-cell arithmetic silently display a misleading zero.  Once the
+        # Run snapshot has supplied every G:L input, retain the canonical
+        # template formula verbatim.
+        sheet.cell(row_number, columns["m"]).value = (
+            _formula_for_row(row, "M", row_number)
+            if m_field.get("state") == "DETERMINED" else None
+        )
         sheet.cell(row_number, columns["av"]).value = _formula_for_row(row, "AV", row_number)
         sheet.cell(row_number, 37).value = _formula_for_row(row, "AK", row_number)
         for index, code in enumerate(FINAL_FIELD_CODES):
@@ -280,6 +303,11 @@ def validate_template_payroll_workbook(path: str | Path, payroll: GeneratedPayro
                 continue
             if not _same_output_value(actual, wanted):
                 errors.append(f"{expected.teacher} 的模板 {name} 输出值不一致")
+        if "M" in getattr(expected, "final_fields", {}):
+            actual_m = sheet.cell(offset, mapped["m"]).value
+            wanted_m = golden_formula_for_row(expected, "M", offset) if expected.final_fields.get("M", {}).get("state") == "DETERMINED" else None
+            if actual_m != wanted_m:
+                errors.append(f"{expected.teacher} 的模板 M 公式不一致")
     return {"ok": not errors, "errors": errors, "rows_checked": len(expected_rows), "path": str(target.resolve()), "template_sheet": sheet.title, "template_preserved": not errors}
 
 

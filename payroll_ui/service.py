@@ -4,6 +4,7 @@ import csv
 import copy
 import hashlib
 import io
+import json
 import math
 import re
 import uuid
@@ -602,9 +603,63 @@ class PayrollService(CoreFlow):
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
         window = normalize_period_window(period, period_start, period_end, period_boundary_source)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "field_status": self._field_status([]), "summary": self._summary([])}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "base_salary_inputs": {}, "base_salary_input_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
+        self.store.save(run)
+        return self.render(run)
+
+    def save_base_salary_inputs(self, run_id: str, inputs: list[dict], confirmed_by: str, source: str = "本次 Run 基本工资确认") -> dict:
+        """Persist and freeze the source-backed G:L inputs used to calculate M."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        actor = str(confirmed_by or "").strip()
+        if not actor:
+            raise ValueError("请填写基本工资输入确认人。")
+        if not isinstance(inputs, list) or not inputs:
+            raise ValueError("请至少填写一位教师的 G～L 基本工资输入。")
+        from payroll_core.payroll_generation import BASE_SALARY_FIELDS, base_salary_field
+        now = datetime.now(timezone.utc).isoformat()
+        normalized: dict[str, dict] = {}
+        for item in inputs:
+            teacher = str(item.get("teacher") or item.get("display_name") or "").strip()
+            if not teacher or teacher in normalized:
+                raise ValueError("基本工资输入中的教师不能为空且不能重复。")
+            raw_fields = item.get("fields") or {}
+            if not isinstance(raw_fields, dict):
+                raise ValueError(f"{teacher} 的基本工资输入格式无效。")
+            fields: dict[str, dict] = {}
+            for code in BASE_SALARY_FIELDS:
+                raw = raw_fields.get(code)
+                value = raw.get("value") if isinstance(raw, dict) else raw
+                # Preserve an explicit blank as a blocked input so the Run can
+                # show a teacher-scoped action while other teachers continue.
+                # Missing G:L is never converted to zero.
+                if value in (None, ""):
+                    fields[code] = {"value": None, "source": str((raw or {}).get("source") if isinstance(raw, dict) else source) or source, "provenance": (raw or {}).get("provenance", {}) if isinstance(raw, dict) else {}, "confirmed_at": now, "confirmed_by": actor}
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{teacher} 的 {code} 不是有效数字。") from exc
+                if not math.isfinite(number):
+                    raise ValueError(f"{teacher} 的 {code} 不是有限数字。")
+                fields[code] = {"value": number, "source": str((raw or {}).get("source") if isinstance(raw, dict) else source) or source, "provenance": (raw or {}).get("provenance", {}) if isinstance(raw, dict) else {}, "confirmed_at": now, "confirmed_by": actor}
+            if ((fields["K"]["value"] is not None and fields["K"]["value"] <= 0)
+                    or (fields["L"]["value"] is not None and fields["L"]["value"] < 0)):
+                raise ValueError(f"{teacher} 的出勤输入无效：K 必须大于 0，L 不能为负数。")
+            entry = {"teacher_id": str(item.get("teacher_id") or teacher), "display_name": teacher, "fields": fields, "source": source, "provenance": {"kind": "RUN_BASE_SALARY_INPUT", "confirmed_by": actor, "confirmed_at": now}}
+            entry["m"] = base_salary_field(teacher, {teacher: entry})
+            normalized[teacher] = entry
+        snapshot = {"version": "BASE_SALARY_INPUT_SNAPSHOT/v1", "run_id": run_id, "period": run["period"], "confirmed_by": actor, "confirmed_at": now, "source": source, "inputs": normalized}
+        snapshot["sha256"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        run["base_salary_inputs"] = normalized
+        run["base_salary_input_snapshot"] = snapshot
+        run["business_context_stale"] = True
+        # Validate the complete snapshot before saving it, including the
+        # derived M value for every submitted teacher.
+        for teacher in normalized:
+            base_salary_field(teacher, normalized)
         self.store.save(run)
         return self.render(run)
 
@@ -779,6 +834,7 @@ class PayrollService(CoreFlow):
                 statuses[code].add(str(item.get("state", "NO_EVIDENCE")))
 
         fields: list[dict[str, Any]] = []
+        payable = {"DETERMINED", "NOT_APPLICABLE"}
         for code, definition in AV_SOURCE_DEFINITIONS.items():
             item = copy.deepcopy(definition)
             state_set = statuses.get(code) or set()
@@ -791,10 +847,15 @@ class PayrollService(CoreFlow):
             item["historical_evidence"] = template.get("historical_evidence", "NO EVIDENCE")
             if code in template.get("field_formulas", {}):
                 item["template_formula"] = template["field_formulas"].get(code)
+            # Once this Run has a complete, source-backed G:L snapshot, M is
+            # no longer merely an available-but-unconnected source: it is a
+            # determined production component.  Keep the original source
+            # provenance in the same record while exposing the current state.
+            if code == "M" and state_set and state_set <= payable:
+                item["category"] = "DETERMINED"
             fields.append({"column": code, **item})
 
         direct_components = ("M", "AF", "AG", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR", "AS", "AT", "AU")
-        payable = {"DETERMINED", "NOT_APPLICABLE"}
         complete_count = sum(1 for code in direct_components if statuses.get(code) and statuses[code] <= payable)
         av_blockers = [code for code in direct_components if not statuses.get(code) or not statuses[code] <= payable]
         av_status = "DETERMINED" if not av_blockers else "BLOCKED_BY_COMPONENTS"
@@ -1051,6 +1112,7 @@ class PayrollService(CoreFlow):
             ratings_by_teacher=ratings, confirmed_hours=hours,
             rule_versions={"class_type_rules": rule_version_id, "rating": (rating_version or {}).get("id", "")},
             blocked=bool(run.get("business_context_stale")),
+            base_salary_inputs=run.get("base_salary_inputs") if run.get("base_salary_input_snapshot") else None,
         )
         path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"))
         run["generated_payroll"] = {
@@ -1261,7 +1323,8 @@ class PayrollService(CoreFlow):
         """Build the one canonical final-field result used by preview/export."""
         bindings = checked.get("business_input_bindings", [])
         inputs = [self.store.get_business_input(item["input_id"]) for item in bindings]
-        return generated_from_calculation(checked["core_calculation"], business_inputs=inputs)
+        base_salary = checked.get("base_salary_inputs") if checked.get("base_salary_input_snapshot") else None
+        return generated_from_calculation(checked["core_calculation"], business_inputs=inputs, base_salary_inputs=base_salary)
 
     def writeback_to_generated(self, run_id: str, candidate_ids: list[str], output_path: str, reviewer: str, strategy: str = "APPEND") -> dict:
         """生成模式复用同一套批注机制：同样的预览与回填函数，没有第二套逻辑。"""
@@ -1643,6 +1706,16 @@ class PayrollService(CoreFlow):
         else:
             checks = schedule_field_checks(scoped_schedule, payroll, rules=coefficients)
         checks = self._apply_ac_resolutions(run, scoped_schedule, payroll, checks)
+        # M is a production input-derived component.  In GENERATE mode each
+        # in-scope teacher gets one explicit, grouped check for the Run's G:L
+        # snapshot; missing fields remain actionable instead of becoming zero.
+        if run.get("mode", MODE_AUDIT) == MODE_GENERATE:
+            from payroll_core.payroll_generation import base_salary_field
+            base_inputs = run.get("base_salary_inputs") if run.get("base_salary_input_snapshot") else None
+            for teacher in sorted(scope_teachers):
+                m_result = base_salary_field(teacher, base_inputs)
+                m_status = "DETERMINED" if m_result.get("state") == "DETERMINED" else "MISSING_SOURCE"
+                checks.append(FieldCheck(teacher, "base_salary", m_result.get("value"), m_result.get("value"), m_status, str(m_result.get("reason", "M 的 G～L 输入尚未齐全。"))))
         if configured:
             from payroll_core.calculation import course_record_key
             keys = {schedule_record_id(row): course_record_key(row) for row in scoped_schedule}
@@ -2688,8 +2761,8 @@ class PayrollService(CoreFlow):
             "id": hashlib.sha256(f"{item.teacher}|{item.field}|{item.reason}".encode()).hexdigest()[:16],
             "teacher": item.teacher,
             "field": item.field,
-            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "teaching_hours": "AD 授课小时合计", "part_time": "兼职按节课时费", "ae": "AE 课时单价", "af": "AF（总课时费）", "af_policy": "AF（总课时费）政策", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
-            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "af_policy": "AF（总课时费）政策不一致", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
+            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "teaching_hours": "AD 授课小时合计", "part_time": "兼职按节课时费", "ae": "AE 课时单价", "af": "AF（总课时费）", "af_policy": "AF（总课时费）政策", "base_salary": "M 实际基本工资（G～L 输入）", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
+            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "af_policy": "AF（总课时费）政策不一致", "base_salary": "实际基本工资输入需要补齐", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
             "difference": difference,
             "status_label": ISSUE_LABELS.get(item.status, "需要处理"),
             "severity_rank": severity[0],

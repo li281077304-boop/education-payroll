@@ -10,6 +10,8 @@ from typing import Any, Mapping
 
 
 def golden_formula_for_row(row: Any, code: str, row_number: int) -> str:
+    if code == "M":
+        return f"=(G{row_number}+H{row_number}+I{row_number}+J{row_number})/K{row_number}*L{row_number}"
     if code == "AA":
         return f"=(N{row_number}+O{row_number}+P{row_number}+Q{row_number}+R{row_number}+S{row_number})/3*2*0.85+(T{row_number}+U{row_number})/3*2*0.9+V{row_number}/3*2*1+W{row_number}/3*2*1.1+X{row_number}/3*2*1.25+Y{row_number}/3*2*1.35+Z{row_number}/3*2*1.5"
     if code == "AD":

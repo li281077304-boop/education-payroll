@@ -10,6 +10,7 @@ the whole result is marked NEEDS_CONFIRMATION, never "final payroll correct".
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Iterable, Mapping
 
 from .models.records import ScheduleRecord
@@ -28,6 +29,48 @@ STATUS_NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
 AD_MISSING_SOURCE = "AD_MISSING_SOURCE"
 AE_REQUIRES_RATING_AUTHORITY = "AE_REQUIRES_RATING_AUTHORITY"
 AV_NO_INDEPENDENT_SOURCE = "AV_NO_INDEPENDENT_SOURCE"
+BASE_SALARY_FIELDS = ("G", "H", "I", "J", "K", "L")
+BASE_SALARY_BLOCKED = "BLOCKED_BY_INPUT"
+
+
+def base_salary_field(teacher: str, base_salary_inputs: Mapping[str, object] | None) -> dict:
+    """Calculate M from a Run-scoped, source-backed G:L snapshot."""
+    entry = (base_salary_inputs or {}).get(teacher) if isinstance(base_salary_inputs, Mapping) else None
+    if not isinstance(entry, Mapping):
+        return {"value": None, "state": BASE_SALARY_BLOCKED, "reason": f"{teacher} 的实际基本工资缺少：G、H、I、J、K、L。", "evidence": []}
+    fields = entry.get("fields", entry)
+    if not isinstance(fields, Mapping):
+        fields = {}
+    values: dict[str, Decimal] = {}
+    missing: list[str] = []
+    for code in BASE_SALARY_FIELDS:
+        item = fields.get(code)
+        raw = item.get("value") if isinstance(item, Mapping) else item
+        if raw in (None, ""):
+            missing.append(code)
+            continue
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, ValueError):
+            return {"value": None, "state": BASE_SALARY_BLOCKED, "reason": f"{teacher} 的 {code} 不是有效数字。", "evidence": []}
+        if not value.is_finite():
+            return {"value": None, "state": BASE_SALARY_BLOCKED, "reason": f"{teacher} 的 {code} 不是有限数字。", "evidence": []}
+        values[code] = value
+    if missing:
+        return {"value": None, "state": BASE_SALARY_BLOCKED, "reason": f"{teacher} 的实际基本工资缺少：{', '.join(missing)}。", "evidence": []}
+    if values["K"] <= 0:
+        return {"value": None, "state": BASE_SALARY_BLOCKED, "reason": f"{teacher} 的 K 应出勤必须大于 0。", "evidence": []}
+    if values["L"] < 0:
+        return {"value": None, "state": BASE_SALARY_BLOCKED, "reason": f"{teacher} 的 L 实际出勤不能为负数。", "evidence": []}
+    result = (values["G"] + values["H"] + values["I"] + values["J"]) / values["K"] * values["L"]
+    evidence = {
+        "kind": "BASE_SALARY_CALCULATION",
+        "formula": "M = (G + H + I + J) / K × L",
+        "source": entry.get("source", "") if isinstance(entry, Mapping) else "",
+        "provenance": entry.get("provenance", {}) if isinstance(entry, Mapping) else {},
+        "inputs": {code: str(values[code]) for code in BASE_SALARY_FIELDS},
+    }
+    return {"value": float(result), "state": "DETERMINED", "reason": "M 按 Run 的基本工资输入快照计算。", "evidence": [evidence]}
 
 
 @dataclass(frozen=True)
@@ -51,7 +94,8 @@ class CorePayrollRow:
     @property
     def final(self) -> bool:
         required_fields = set(FINAL_FIELD_CODES) | {"AF"}
-        if self.status != STATUS_FINAL or set(self.final_fields) != required_fields:
+        extra_fields = set(self.final_fields) - required_fields
+        if self.status != STATUS_FINAL or not required_fields.issubset(self.final_fields) or extra_fields - {"M"}:
             return False
         payable_states = {"DETERMINED", "NOT_APPLICABLE", "ESTIMATED"}
         return all(
@@ -89,6 +133,7 @@ def build_legacy_generated_payroll(
     available_amounts: Mapping[str, float] | None = None,
     rule_versions: Mapping[str, str] | None = None,
     business_inputs: Iterable[Mapping[str, object]] = (),
+    base_salary_inputs: Mapping[str, object] | None = None,
     blocked: bool = False,
 ) -> GeneratedPayroll:
     """Render Core results into a standard payroll model.
@@ -129,13 +174,18 @@ def build_legacy_generated_payroll(
             else:
                 ae = expected_hourly_rate(float(ad), star)
                 af = expected_total_fee(float(ad), ae)
+        core_fields = {
+            "AF": {"value": af, "state": "DETERMINED" if af is not None else "NEEDS_INPUT"},
+            "PART_TIME": {"value": None, "state": "NOT_APPLICABLE"},
+        }
+        if base_salary_inputs is not None:
+            core_fields["M"] = base_salary_field(teacher, base_salary_inputs)
         final_fields = resolve_final_fields(
             teacher=teacher,
-            core_fields={
-                "AF": {"value": af, "state": "DETERMINED" if af is not None else "NEEDS_INPUT"},
-                "PART_TIME": {"value": None, "state": "NOT_APPLICABLE"},
-            },
+            core_fields=core_fields,
             business_inputs=business_inputs,
+            # Legacy callers may opt into the same production M snapshot.
+            # The default remains missing rather than silently using zero.
         )
         final_blockers = {
             str(item.get("reason") or item.get("state"))
@@ -164,7 +214,7 @@ def build_legacy_generated_payroll(
     )
 
 
-def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False) -> GeneratedPayroll:
+def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None) -> GeneratedPayroll:
     """Pure presentation adapter. No payroll inputs or second set of formulae."""
     rows = []
     reasons = set()
@@ -185,6 +235,8 @@ def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mappin
             except (TypeError, ValueError):
                 return raw
         core_values = {key: fields.get(key, {}) for key in ("AF", "PART_TIME")}
+        if base_salary_inputs is not None:
+            core_values["M"] = base_salary_field(row["teacher"], base_salary_inputs)
         final_fields = resolve_final_fields(teacher=row["teacher"], core_fields=core_values, business_inputs=inputs, employment_type=str(row.get("employment_type", "FULL_TIME")), default_zero_missing=default_zero_missing)
         final_blockers = {str(item.get("reason") or item.get("state")) for item in final_fields.values() if item.get("state") not in payable_states}
         reasons.update(final_blockers)
@@ -212,7 +264,7 @@ def _star_from_fields(fields: Mapping[str, dict]) -> int | None:
     return None
 
 
-def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleRecord], rules=None, ratings: Iterable = (), profiles: Iterable = (), teacher_contexts: Iterable = (), part_time_rates: Iterable = (), reference_ratings: Mapping | None = None, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False) -> GeneratedPayroll:
+def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleRecord], rules=None, ratings: Iterable = (), profiles: Iterable = (), teacher_contexts: Iterable = (), part_time_rates: Iterable = (), reference_ratings: Mapping | None = None, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None) -> GeneratedPayroll:
     """Public generation entry: exactly the same calculation as audit mode."""
     from .calculation import calculate_payroll, course_record_key
     from .config.core_rules import load_core_rules
@@ -227,4 +279,4 @@ def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleR
         "source": record.source,
         "provenance": {field: asdict(evidence) if hasattr(evidence, "__dataclass_fields__") else dict(evidence) for field, evidence in record.provenance.items()},
     } for record in records]
-    return generated_from_calculation({"period": period, "rows": rows, "rule_versions": {"core": result.rule_version_id}, "source_records": source_records, "formula_inputs": result.as_dict().get("formula_inputs", {})}, business_inputs=business_inputs, default_zero_missing=default_zero_missing)
+    return generated_from_calculation({"period": period, "rows": rows, "rule_versions": {"core": result.rule_version_id}, "source_records": source_records, "formula_inputs": result.as_dict().get("formula_inputs", {})}, business_inputs=business_inputs, default_zero_missing=default_zero_missing, base_salary_inputs=base_salary_inputs)

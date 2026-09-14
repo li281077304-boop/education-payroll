@@ -64,6 +64,28 @@ def test_run_level_af_policy_collapses_default_review_and_supports_exceptions(tm
     assert new_run["af_policy_confirmation"] is None
 
 
+def test_base_salary_snapshot_is_run_scoped_and_calculates_m_without_zero_fallback(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    saved = service.save_base_salary_inputs(run["id"], [{
+        "teacher_id": "t-1", "teacher": "张三",
+        "fields": {code: {"value": value, "source": "真实薪资资料"} for code, value in {
+            "G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18,
+        }.items()},
+    }], "测试确认人", source="真实薪资资料/工资表.xlsx")
+    entry = saved["base_salary_inputs"]["张三"]
+    assert saved["base_salary_input_snapshot"]["version"] == "BASE_SALARY_INPUT_SNAPSHOT/v1"
+    assert saved["base_salary_input_snapshot"]["inputs"]["张三"]["teacher_id"] == "t-1"
+    assert entry["m"]["state"] == "DETERMINED"
+    assert entry["m"]["value"] == 6300.0
+    assert saved["base_salary_input_snapshot"]["sha256"]
+
+    # A fresh Run starts with no inherited base-salary confirmation.
+    fresh = service.create("2026-08", mode="GENERATE")
+    assert fresh["base_salary_input_snapshot"] is None
+    assert fresh["base_salary_inputs"] == {}
+
+
 def test_real_package_template_is_bound_to_run(tmp_path):
     package_dir = tmp_path / "package"
     package_dir.mkdir()

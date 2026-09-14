@@ -16,6 +16,7 @@ FIELD_LABELS = {
     "one_to_one": "AA 一对一", "class_value": "AC 班课", "ae": "AE 课时单价",
     "af": "AF（总课时费）", "af_policy": "AF（总课时费）", "rating": "教师星级",
     "rate": "AE 课时单价", "formula": "公式完整性", "av": "AV 总工资",
+    "base_salary": "M 实际基本工资（G～L 输入）",
 }
 
 
@@ -32,6 +33,8 @@ def root_cause_key(run_id: str, teacher: str, field: str) -> str:
         cause = "compensation_rate_authority"
     elif field in {"af", "af_policy"}:
         cause = "compensation_fee_policy"
+    elif field == "base_salary":
+        cause = "base_salary_input"
     elif field == "formula":
         cause = "formula_integrity"
     else:
@@ -107,6 +110,7 @@ def build_groups(run: dict, records: list[dict], rating_version: dict | None, po
             "compensation_basis": "档位与课时费依据需要处理",
             "compensation_rate_authority": "星级与课时单价依据需要处理",
             "compensation_fee_policy": "总课时费政策依据需要处理",
+            "base_salary_input": "实际基本工资输入需要补齐",
             "schedule_one_to_one": "一对一折算小时需要处理",
             "schedule_class_value": "班课折算小时需要处理",
             "formula_integrity": "工资表公式异常",

@@ -55,3 +55,18 @@ assert(source.includes('BLOCKED_BY_COMPONENTS'));
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_av_source_map_promotes_m_to_determined_after_snapshot(tmp_path):
+    service = PayrollService(tmp_path)
+    run = service.create("2026-08", mode="GENERATE")
+    run["generated_payroll"] = {"rows": [{"teacher": "教师甲", "final_fields": {
+        "M": {"value": 6300, "state": "DETERMINED"},
+        **{code: {"value": 0, "state": "NOT_APPLICABLE"} for code in ("AF", "AG", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR", "AS", "AT", "AU")},
+    }}]}
+    service.store.save(run)
+    result = service.av_source_map(run["id"])
+    m = next(item for item in result["fields"] if item["column"] == "M")
+    assert m["current_system_status"] == "DETERMINED"
+    assert m["category"] == "DETERMINED"
+    assert result["full_payroll_completeness"] == {"complete": 14, "total": 14, "label": "14 / 14"}

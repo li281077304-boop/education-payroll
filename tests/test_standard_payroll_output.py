@@ -18,7 +18,7 @@ from payroll_core.excel.standard_payroll_render import (
     validate_standard_payroll_workbook,
 )
 from payroll_core.models.records import ScheduleRecord
-from payroll_core.payroll_generation import GeneratedPayroll, build_generated_payroll, generated_from_calculation
+from payroll_core.payroll_generation import GeneratedPayroll, base_salary_field, build_generated_payroll, generated_from_calculation
 from payroll_ui.service import PayrollService
 
 
@@ -189,6 +189,29 @@ def test_template_output_keeps_auditable_excel_formulas(tmp_path: Path):
     assert sheet["AV5"].value.startswith("=M5+AF5+AG5+AK5")
 
 
+def test_template_output_writes_base_salary_inputs_and_m_formula(tmp_path: Path):
+    payroll = _generated()
+    payroll = generated_from_calculation(
+        {
+            "period": "2026-08",
+            "rows": [{"teacher": "教师甲", "fields": {
+                "AA": {"value": 2, "state": DETERMINED},
+                "AC": {"value": 0, "state": DETERMINED},
+                "AD": {"value": 2, "state": DETERMINED},
+                "AE": {"value": 0, "state": DETERMINED},
+                "AF": {"value": 0, "state": DETERMINED},
+                "PART_TIME": {"value": None, "state": NOT_APPLICABLE},
+            }}],
+        },
+        base_salary_inputs={"教师甲": {"source": "工资资料包", "fields": {code: {"value": value} for code, value in {"G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18}.items()}}},
+    )
+    output = tmp_path / "base-salary-formula.xlsx"
+    render_generated_payroll(payroll, output, template_path=Path("/Users/macos/Desktop/payroll_read_test/薪资表模板.xlsx"))
+    sheet = load_workbook(output, data_only=False)["Sheet1"]
+    assert [sheet[f"{column}5"].value for column in "GHIJKL"] == [6000, 500, 200, 300, 20, 18]
+    assert sheet["M5"].value == "=(G5+H5+I5+J5)/K5*L5"
+
+
 def test_calculation_derives_template_grade_inputs_from_accepted_one_to_one_courses(tmp_path: Path):
     """Template AA inputs must be populated from the canonical Core result."""
     schedule = [
@@ -250,6 +273,42 @@ def test_management_award_is_not_applicable_only_for_explicitly_non_management_r
 
     assert ordinary["AM"]["state"] == NOT_APPLICABLE
     assert management["AM"]["state"] == HUMAN_REQUIRED
+
+
+def test_base_salary_m_uses_run_snapshot_and_binds_into_av():
+    inputs = {
+        "教师甲": {
+            "teacher_id": "t-1",
+            "display_name": "教师甲",
+            "source": "工资资料包/薪资输入.xlsx",
+            "provenance": {"source_row": 8},
+            "fields": {code: {"value": value, "source": "工资资料包"} for code, value in {
+                "G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18,
+            }.items()},
+        }
+    }
+    result = base_salary_field("教师甲", inputs)
+    assert result["state"] == DETERMINED
+    assert result["value"] == 6300.0
+    assert result["evidence"][0]["formula"] == "M = (G + H + I + J) / K × L"
+
+    payroll = _generated()
+    result = calculate_payroll(
+        "2026-08", [
+            ScheduleRecord(period="2026-08", teacher="教师甲", grade="九年级", subject="数学", class_type="1对1", attended=1, lesson_status="已上课", source="排课.xlsx")
+            for _ in range(16)
+        ], load_core_rules(), ratings=(RatingAuthority("教师甲", 4, "2026-08", "2026-09", "星级.xlsx", "stars-v1"),),
+    ).as_dict()
+    generated = generated_from_calculation({"period": result["period"], "rows": [{"teacher": "教师甲", "fields": {code: {**row[code_key], "value": row[code_key]["value"]} for code_key, code in {"aa": "AA", "ac": "AC", "ad": "AD", "ae": "AE", "af": "AF", "part_time_fee": "PART_TIME"}.items()}} for row in result["rows"]]}, base_salary_inputs=inputs)
+    assert generated.rows[0].final_fields["M"]["value"] == 6300.0
+    assert generated.rows[0].final_fields["AV"]["state"] == HUMAN_REQUIRED
+
+
+def test_base_salary_m_missing_input_is_blocked_never_zero():
+    result = base_salary_field("教师甲", {"教师甲": {"fields": {"G": {"value": 1}}}})
+    assert result["value"] is None
+    assert result["state"] == "BLOCKED_BY_INPUT"
+    assert all(code in result["reason"] for code in ("H", "I", "J", "K", "L"))
 
 
 def test_empty_core_result_cannot_be_published_as_a_standard_payroll(tmp_path: Path):
