@@ -79,3 +79,32 @@ def test_two_approved_results_with_same_display_identity_fail_closed():
     }}
     fields = renewal_fields_from_snapshot(snapshot, "刘雨")
     assert all(item["state"] == "IDENTITY_NOT_STABLE" for item in fields.values())
+
+
+def test_draft_or_submitted_renewal_never_enters_production_fields():
+    item = _approved()
+    item["status"] = "SUBMITTED"
+    fields = resolve_final_fields(
+        teacher="教师甲",
+        core_fields={"AF": {"value": 0, "state": DETERMINED}, "PART_TIME": {"value": None, "state": "NOT_APPLICABLE"}},
+        business_inputs=[item],
+    )
+    assert fields["AH"]["value"] is None
+    assert fields["AH"]["state"] == "HUMAN_REQUIRED"
+
+
+def test_snapshot_values_are_used_even_if_live_payload_is_changed():
+    item = _approved()
+    snapshot = {"entries": {"教师甲": {
+        "teacher_id": "教师甲", "display_name": "教师甲",
+        "AH": {"value": 2, "state": DETERMINED}, "AI": {"value": 3, "state": DETERMINED}, "AJ": {"value": 4, "state": DETERMINED},
+        "source_result_id": item["id"], "source_hash": item["source_file_hash"],
+    }}}
+    item["payload"] = {"one_to_one_hours": 999, "class_hours": 999, "mentor_hours": 999}
+    fields = resolve_final_fields(
+        teacher="教师甲",
+        core_fields={"AF": {"value": 0, "state": DETERMINED}, "PART_TIME": {"value": None, "state": "NOT_APPLICABLE"}},
+        business_inputs=[item], renewal_snapshot=snapshot,
+    )
+    assert fields["AH"]["value"] == 2
+    assert fields["AK"]["value"] == pytest.approx(9.5)
