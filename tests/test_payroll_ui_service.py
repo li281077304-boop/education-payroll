@@ -38,6 +38,22 @@ def test_generate_summary_does_not_count_determined_or_not_applicable_as_manual_
     assert summary["manual_review"] == 0
 
 
+def test_run_history_index_is_available_without_rendering_every_workbook(tmp_path, monkeypatch):
+    """The workbench can resume an old Run without an expensive full render."""
+    service = PayrollService(tmp_path / "app-data")
+    created = service.create("2026-08", mode="GENERATE")
+
+    def fail_render(_run):
+        raise AssertionError("history index must not render archived workbooks")
+
+    monkeypatch.setattr(service, "render", fail_render)
+    index = service.list_index()
+    assert [item["id"] for item in index] == [created["id"]]
+    assert index[0]["period"] == "2026-08"
+    assert index[0]["status"] == "DRAFT"
+    assert index[0]["health"]["ready"] is False
+
+
 def test_run_level_af_policy_collapses_default_review_and_supports_exceptions(tmp_path):
     from payroll_core.models.records import ScheduleRecord
     service = PayrollService(tmp_path / "app-data")
@@ -509,7 +525,8 @@ def test_browser_shell_uses_plain_language_for_core_workflow():
         assert plain_label in source
     home_block = source.split("async function home()", 1)[1].split("async function authorityDashboard", 1)[0]
     assert 'api("/api/runs")' not in home_block
-    assert "最近核算" not in home_block
+    assert 'api("/api/runs/index")' in home_block
+    assert "历史核算" in home_block
 
 
 def test_run_binds_effective_rating_version_and_reports_a_rating_mismatch(tmp_path):

@@ -737,6 +737,45 @@ class PayrollService(CoreFlow):
     def list(self) -> list[dict]:
         return [self.render(self._load(item["id"])) for item in self.store.list()]
 
+    def list_index(self) -> list[dict]:
+        """Return the cheap, resumable projection used by the home page.
+
+        Opening the workbench must not render every archived Run (rendering a
+        Run can parse its source workbooks and build grade help).  The index
+        deliberately contains only persisted metadata and the material
+        readiness that can be derived without reading a workbook.  Opening a
+        selected Run still goes through :meth:`get` and the authoritative
+        render path.
+        """
+        indexed: list[dict] = []
+        for stored in self.store.list():
+            files = stored.get("files") or {}
+            required = self._missing_materials({**stored, "files": files})
+            mode = stored.get("mode", MODE_AUDIT)
+            ready_count = int("schedule" in files) + int(any(key in files for key in SCOPE_ROLES))
+            readiness = 100 if mode == MODE_GENERATE and "schedule" in files else round(100 * ready_count / 2)
+            status = str(stored.get("status", "DRAFT"))
+            summary = dict(stored.get("summary") or {})
+            indexed.append({
+                "id": stored["id"],
+                "period": stored.get("period", ""),
+                "period_label": stored.get("period_label", stored.get("period", "")),
+                "created_at": stored.get("created_at"),
+                "updated_at": stored.get("updated_at", stored.get("created_at")),
+                "mode": mode,
+                "status": status,
+                "status_label": STATUS.get(status, status),
+                "summary": summary,
+                "issue_groups": list(stored.get("issue_groups") or []),
+                "user_actions": list(stored.get("user_actions") or []),
+                "health": {
+                    "ready": not required and status != "STALE",
+                    "missing": required,
+                    "readiness": readiness,
+                },
+            })
+        return sorted(indexed, key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+
     def get(self, run_id: str) -> dict:
         return self.render(self._load(run_id))
 

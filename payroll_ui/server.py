@@ -98,6 +98,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
         try:
             if parsed.path == "/api/runs":
                 return self._json(self.server.service.list())
+            if parsed.path == "/api/runs/index":
+                return self._json(self.server.service.list_index())
             if parsed.path == "/api/business-inputs":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
