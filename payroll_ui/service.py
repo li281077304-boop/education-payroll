@@ -29,6 +29,7 @@ from payroll_core.models.class_type_rules import (
     structured_rules,
 )
 from payroll_core.payroll_generation import build_legacy_generated_payroll, generated_from_calculation
+from payroll_core.final_fields import renewal_snapshot_entry, renewal_fields_from_snapshot
 from payroll_core.excel.standard_payroll_render import render_generated_payroll
 from payroll_core.excel.output_paths import default_output_dir, describe_location, safe_output_path
 from payroll_core.excel.inspect import inspect_workbook
@@ -90,7 +91,7 @@ MANUAL_REVIEW_STATUSES = frozenset({
     "MISSING_TARGET", "MISSING_PAYROLL_VALUE", "NEEDS_MANUAL_REVIEW",
     "NEEDS_INPUT", "NEEDS_CONFIRMATION", "NEEDS_RECONFIRMATION",
     "CONFLICT_NEEDS_CONFIRMATION", "GRADE_UNRESOLVED", "RULE_NOT_FOUND",
-    "MULTIPLE_RULES_MATCHED", "MISSING_AUTHORITY", "NOT_PROVIDED",
+    "MULTIPLE_RULES_MATCHED", "MISSING_AUTHORITY", "IDENTITY_NOT_STABLE", "NOT_PROVIDED",
 })
 
 
@@ -116,6 +117,7 @@ ISSUE_LABELS = {
     "RATE_MATCH": "档位金额一致",
     "RATE_MISMATCH": "档位金额不一致",
     "MISSING_AUTHORITY": "缺少权威资料",
+    "IDENTITY_NOT_STABLE": "教师身份无法稳定绑定",
     "MISSING_PAYROLL_VALUE": "工资表缺少值",
     "RULE_NOT_FOUND": "未找到适用规则",
     "MULTIPLE_RULES_MATCHED": "规则冲突",
@@ -434,12 +436,37 @@ class PayrollService(CoreFlow):
         run = self._load(run_id)
         self._require_fresh(run)
         run, item = self.inputs.bind_to_run(input_id, run, persist=False)
+        if item.get("input_type") == "RENEWAL_RESULT":
+            self._bind_renewal_snapshot(run, item)
         run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
         run["business_context_stale"] = True
         invalidate_business_decisions(run.setdefault("business_decisions", []))
         self.store.save_run_and_business_input(run, item)
         self.inputs._event(item, "BOUND_TO_RUN", "系统", f"绑定核算 {run['id']}")
         return self.render(run)
+
+    def _bind_renewal_snapshot(self, run: dict, item: dict) -> None:
+        """Freeze approved renewal results at the Run boundary.
+
+        The live business-input row remains auditable, but generation reads
+        this snapshot so a later source edit cannot alter an existing Run.
+        Duplicate approved results for one identity are rejected rather than
+        silently summed.
+        """
+        snapshot = run.get("run_renewal_result_snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = {"version": "RUN_RENEWAL_RESULT_SNAPSHOT/v1", "run_id": run["id"], "period_label": run["period"], "created_at": datetime.now(timezone.utc).isoformat(), "entries": {}}
+        entries = snapshot.setdefault("entries", {})
+        teacher_id = str(item.get("teacher_id", "")).strip()
+        if not teacher_id:
+            raise ValueError("续费结果缺少稳定教师标识，不能绑定到工资核算。")
+        if teacher_id in entries and entries[teacher_id].get("source_result_id") != item.get("id"):
+            raise ValueError("同一教师已有另一条已绑定续费结果；请先明确替代版本，不能静默合并。")
+        entry = renewal_snapshot_entry(item, run_id=run["id"], period=run["period"], display_name=str((item.get("payload") or {}).get("teacher") or teacher_id))
+        entries[teacher_id] = entry
+        unsigned = {key: value for key, value in snapshot.items() if key != "sha256"}
+        snapshot["sha256"] = hashlib.sha256(json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        run["run_renewal_result_snapshot"] = snapshot
 
     def comment_candidates(self, run_id: str = "") -> list[dict]:
         values = self.store.list_comment_candidates()
@@ -603,7 +630,7 @@ class PayrollService(CoreFlow):
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
         window = normalize_period_window(period, period_start, period_end, period_boundary_source)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "base_salary_inputs": {}, "base_salary_input_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "base_salary_inputs": {}, "base_salary_input_snapshot": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
         self.store.save(run)
@@ -851,7 +878,7 @@ class PayrollService(CoreFlow):
             # no longer merely an available-but-unconnected source: it is a
             # determined production component.  Keep the original source
             # provenance in the same record while exposing the current state.
-            if code == "M" and state_set and state_set <= payable:
+            if code in {"M", "AK"} and state_set and state_set <= payable:
                 item["category"] = "DETERMINED"
             fields.append({"column": code, **item})
 
@@ -1113,6 +1140,7 @@ class PayrollService(CoreFlow):
             rule_versions={"class_type_rules": rule_version_id, "rating": (rating_version or {}).get("id", "")},
             blocked=bool(run.get("business_context_stale")),
             base_salary_inputs=run.get("base_salary_inputs") if run.get("base_salary_input_snapshot") else None,
+            renewal_snapshot=run.get("run_renewal_result_snapshot"),
         )
         path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"))
         run["generated_payroll"] = {
@@ -1324,7 +1352,7 @@ class PayrollService(CoreFlow):
         bindings = checked.get("business_input_bindings", [])
         inputs = [self.store.get_business_input(item["input_id"]) for item in bindings]
         base_salary = checked.get("base_salary_inputs") if checked.get("base_salary_input_snapshot") else None
-        return generated_from_calculation(checked["core_calculation"], business_inputs=inputs, base_salary_inputs=base_salary)
+        return generated_from_calculation(checked["core_calculation"], business_inputs=inputs, base_salary_inputs=base_salary, renewal_snapshot=checked.get("run_renewal_result_snapshot"))
 
     def writeback_to_generated(self, run_id: str, candidate_ids: list[str], output_path: str, reviewer: str, strategy: str = "APPEND") -> dict:
         """生成模式复用同一套批注机制：同样的预览与回填函数，没有第二套逻辑。"""
@@ -1716,6 +1744,20 @@ class PayrollService(CoreFlow):
                 m_result = base_salary_field(teacher, base_inputs)
                 m_status = "DETERMINED" if m_result.get("state") == "DETERMINED" else "MISSING_SOURCE"
                 checks.append(FieldCheck(teacher, "base_salary", m_result.get("value"), m_result.get("value"), m_status, str(m_result.get("reason", "M 的 G～L 输入尚未齐全。"))))
+        # A bound renewal snapshot is the production authority for AH/AI/AJ.
+        # Surface one grouped, teacher-scoped action only when that frozen
+        # source is incomplete; determined/no-event rows remain quiet.
+        renewal_snapshot = run.get("run_renewal_result_snapshot")
+        if renewal_snapshot is not None:
+            for teacher in sorted(scope_teachers):
+                renewal = renewal_fields_from_snapshot(renewal_snapshot, teacher)
+                if renewal is None:
+                    checks.append(FieldCheck(teacher, "renewal_result", None, None, "MISSING_SOURCE", "本期没有可绑定的已审核续费最终结果；不能把缺少来源当作 0。"))
+                    continue
+                missing_codes = [code for code, field in renewal.items() if field.get("state") not in {"DETERMINED", "NOT_APPLICABLE"}]
+                if missing_codes:
+                    state = "IDENTITY_NOT_STABLE" if any(renewal[code].get("state") == "IDENTITY_NOT_STABLE" for code in missing_codes) else "MISSING_SOURCE"
+                    checks.append(FieldCheck(teacher, "renewal_result", None, None, state, f"已审核续费结果缺少或无法稳定绑定：{', '.join(missing_codes)}。"))
         if configured:
             from payroll_core.calculation import course_record_key
             keys = {schedule_record_id(row): course_record_key(row) for row in scoped_schedule}

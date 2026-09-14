@@ -698,7 +698,7 @@ function payrollPreviewPage() {
     return `<section class="card"><h2>工资预览尚未生成</h2><p class="muted">请先完成材料准备并自动核算。</p><div class="action-bar"><button onclick="setTab('materials')">返回材料准备</button></div></section>`;
   }
   const rowHtml = rows.map((row) => {
-    const fields = ["M", "AA", "AC", "AD", "AE", "AF", "AK", "AV", "PART_TIME"].map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code))}</td>`).join("");
+    const fields = ["M", "AA", "AC", "AD", "AE", "AF", "AH", "AI", "AJ", "AK", "AV", "PART_TIME"].map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code))}</td>`).join("");
     const starEvidence = (row.fields?.AE?.evidence || []).map((item) => item?.inputs?.rating).find((value) => value != null && value !== "");
     const star = row.star ?? starEvidence ?? "—";
     const blockers = (row.blockers || []).join("、");
@@ -709,7 +709,9 @@ function payrollPreviewPage() {
   const exportNote = current.mode === "GENERATE"
     ? "导出会自动选择不冲突的新文件名，绝不覆盖已有工资表。状态为草稿时仍可导出，但文件会保留待确认标记。"
     : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · 核算周期 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>M 实际基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
+  const renewal = current.run_renewal_result_snapshot;
+  const renewalNote = renewal ? `<div class="banner info"><strong>续费结果快照</strong><span>AH 续费一对一 · AI 续费班课 · AJ 领航续费 · AK = AH×1 + AI×1.5 + AJ×0.75；来源已冻结在本次 Run（${escapeHtml(Object.keys(renewal.entries || {}).length)} 位教师）。</span></div>` : "";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · 核算周期 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>M 实际基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AH 续费一对一</th><th>AI 续费班课</th><th>AJ 领航续费</th><th>AK 推荐续费奖</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
 }
 
 function overviewPage() {

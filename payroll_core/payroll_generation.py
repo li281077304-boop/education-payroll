@@ -134,6 +134,7 @@ def build_legacy_generated_payroll(
     rule_versions: Mapping[str, str] | None = None,
     business_inputs: Iterable[Mapping[str, object]] = (),
     base_salary_inputs: Mapping[str, object] | None = None,
+    renewal_snapshot: Mapping[str, object] | None = None,
     blocked: bool = False,
 ) -> GeneratedPayroll:
     """Render Core results into a standard payroll model.
@@ -184,6 +185,7 @@ def build_legacy_generated_payroll(
             teacher=teacher,
             core_fields=core_fields,
             business_inputs=business_inputs,
+            renewal_snapshot=renewal_snapshot,
             # Legacy callers may opt into the same production M snapshot.
             # The default remains missing rather than silently using zero.
         )
@@ -214,7 +216,7 @@ def build_legacy_generated_payroll(
     )
 
 
-def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None) -> GeneratedPayroll:
+def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None, renewal_snapshot: Mapping[str, object] | None = None) -> GeneratedPayroll:
     """Pure presentation adapter. No payroll inputs or second set of formulae."""
     rows = []
     reasons = set()
@@ -237,7 +239,7 @@ def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mappin
         core_values = {key: fields.get(key, {}) for key in ("AF", "PART_TIME")}
         if base_salary_inputs is not None:
             core_values["M"] = base_salary_field(row["teacher"], base_salary_inputs)
-        final_fields = resolve_final_fields(teacher=row["teacher"], core_fields=core_values, business_inputs=inputs, employment_type=str(row.get("employment_type", "FULL_TIME")), default_zero_missing=default_zero_missing)
+        final_fields = resolve_final_fields(teacher=row["teacher"], core_fields=core_values, business_inputs=inputs, employment_type=str(row.get("employment_type", "FULL_TIME")), default_zero_missing=default_zero_missing, renewal_snapshot=renewal_snapshot)
         final_blockers = {str(item.get("reason") or item.get("state")) for item in final_fields.values() if item.get("state") not in payable_states}
         reasons.update(final_blockers)
         blockers = tuple(sorted(set(blockers) | final_blockers))
@@ -264,7 +266,7 @@ def _star_from_fields(fields: Mapping[str, dict]) -> int | None:
     return None
 
 
-def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleRecord], rules=None, ratings: Iterable = (), profiles: Iterable = (), teacher_contexts: Iterable = (), part_time_rates: Iterable = (), reference_ratings: Mapping | None = None, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None) -> GeneratedPayroll:
+def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleRecord], rules=None, ratings: Iterable = (), profiles: Iterable = (), teacher_contexts: Iterable = (), part_time_rates: Iterable = (), reference_ratings: Mapping | None = None, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None, renewal_snapshot: Mapping[str, object] | None = None) -> GeneratedPayroll:
     """Public generation entry: exactly the same calculation as audit mode."""
     from .calculation import calculate_payroll, course_record_key
     from .config.core_rules import load_core_rules
@@ -279,4 +281,4 @@ def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleR
         "source": record.source,
         "provenance": {field: asdict(evidence) if hasattr(evidence, "__dataclass_fields__") else dict(evidence) for field, evidence in record.provenance.items()},
     } for record in records]
-    return generated_from_calculation({"period": period, "rows": rows, "rule_versions": {"core": result.rule_version_id}, "source_records": source_records, "formula_inputs": result.as_dict().get("formula_inputs", {})}, business_inputs=business_inputs, default_zero_missing=default_zero_missing, base_salary_inputs=base_salary_inputs)
+    return generated_from_calculation({"period": period, "rows": rows, "rule_versions": {"core": result.rule_version_id}, "source_records": source_records, "formula_inputs": result.as_dict().get("formula_inputs", {})}, business_inputs=business_inputs, default_zero_missing=default_zero_missing, base_salary_inputs=base_salary_inputs, renewal_snapshot=renewal_snapshot)

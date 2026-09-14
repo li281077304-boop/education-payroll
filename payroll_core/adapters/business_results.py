@@ -19,6 +19,7 @@ class ImportedBusinessResult:
 
 ALIASES = {
     "teacher": ("教师", "老师", "任课老师", "责任教师", "责任老师", "charge_teacher", "teacher"),
+    "teacher_id": ("teacher_id", "教师ID", "教师编号", "工号", "员工编号", "teacher id"),
     "student": ("学生", "学生姓名", "学员", "student"),
     "amount": ("退费金额", "金额", "退款金额", "amount", "headcount_amount", "performance_amount"),
     "note": ("说明", "备注", "退费原因", "备注说明", "note"),
@@ -39,6 +40,8 @@ def _row_payload(row: dict[str, Any], mapping: dict[str, str]) -> tuple[str, dic
         raise ValueError("结果表缺少可识别的教师列或教师值。")
     payload = {str(key): value for key, value in row.items() if key is not None and value not in (None, "")}
     payload["teacher"] = teacher
+    if mapping.get("teacher_id") and row.get(mapping["teacher_id"]) not in (None, ""):
+        payload["teacher_id"] = str(row[mapping["teacher_id"]]).strip()
     for key in ("student", "amount", "note"):
         if mapping[key] and mapping[key] in row:
             payload[key] = row[mapping[key]]
@@ -59,15 +62,14 @@ def read_business_result(path: str | Path) -> list[ImportedBusinessResult]:
         if not rows:
             return []
         mapping = _header_map(list(rows[0]))
-        return [
-            ImportedBusinessResult(
-                teacher_id=(teacher := _row_payload(row, mapping)[0]),
-                row=str(index),
-                payload=_row_payload(row, mapping)[1],
-                evidence={"source_file": source.name, "sheet": "CSV", "row": str(index), "headers": list(row)},
-            )
-            for index, row in enumerate(rows, start=2)
-        ]
+        output: list[ImportedBusinessResult] = []
+        for index, row in enumerate(rows, start=2):
+            teacher, payload = _row_payload(row, mapping)
+            output.append(ImportedBusinessResult(
+                teacher_id=str(payload.get("teacher_id") or teacher), row=str(index), payload=payload,
+                evidence={"source_file": source.name, "sheet": "CSV", "row": str(index), "headers": list(row), "display_name": teacher},
+            ))
+        return output
     if suffix not in {".xlsx", ".xlsm"}:
         raise ValueError("目前只支持 CSV、.xlsx 或 .xlsm 的最终结果表。")
     workbook = load_workbook(source, data_only=False, read_only=True, keep_links=True)
@@ -85,7 +87,7 @@ def read_business_result(path: str | Path) -> list[ImportedBusinessResult]:
             if not any(value not in (None, "") for value in row.values()):
                 continue
             teacher, payload = _row_payload(row, mapping)
-            records.append(ImportedBusinessResult(teacher, str(row_number), payload, {"source_file": source.name, "sheet": sheet.title, "row": str(row_number), "headers": headers}))
+            records.append(ImportedBusinessResult(str(payload.get("teacher_id") or teacher), str(row_number), payload, {"source_file": source.name, "sheet": sheet.title, "row": str(row_number), "headers": headers, "display_name": teacher}))
     if not records:
         raise ValueError("结果表没有可识别的教师列或有效记录。")
     return records

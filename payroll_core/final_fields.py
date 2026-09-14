@@ -76,10 +76,14 @@ FIELD_NOTES: dict[str, str] = {
 }
 
 RENEWAL_ALIASES: dict[str, tuple[str, ...]] = {
-    "AH": ("AH", "one_to_one_hours", "1V1合计", "一对一合计", "续费一对一", "续费1V1"),
-    "AI": ("AI", "class_hours", "班课合计", "续费班课", "续费班课课时"),
-    "AJ": ("AJ", "mentor_hours", "小班领航合计", "领航合计", "领航续费"),
+    "AH": ("AH", "one_to_one_hours", "1V1合计", "一对一合计", "续费一对一", "续费1V1", "续费一对一课时", "一对一课时"),
+    "AI": ("AI", "class_hours", "班课合计", "续费班课", "续费班课课时", "续费班课课次"),
+    "AJ": ("AJ", "mentor_hours", "小班领航合计", "领航合计", "领航续费", "领航续费课时", "领航课时"),
 }
+
+NO_EVENT_ALIASES: tuple[str, ...] = (
+    "no_event", "NO_EVENT", "renewal_status", "result_status", "event_status", "status", "续费状态", "结果状态", "是否续费",
+)
 
 
 def _empty(code: str, reason: str | None = None) -> dict[str, Any]:
@@ -149,6 +153,20 @@ def _evidence(item: Mapping[str, Any], *, field: str, inputs: Mapping[str, objec
     }
 
 
+def _is_explicit_no_event(payload: Mapping[str, Any]) -> bool:
+    """Recognise only an explicit authoritative no-renewal declaration."""
+    for key in NO_EVENT_ALIASES:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if value is True:
+            return True
+        normalized = str(value or "").strip().upper().replace(" ", "")
+        if normalized in {"NO_EVENT", "NO_RENEWAL", "NONE", "NOEVENT", "无续费", "本期无续费", "无"}:
+            return True
+    return False
+
+
 def _source_items(items: Iterable[Mapping[str, Any]], input_type: str, teacher: str) -> list[Mapping[str, Any]]:
     return [
         item for item in items
@@ -167,6 +185,16 @@ def _renewal_fields(items: list[Mapping[str, Any]], teacher: str) -> dict[str, d
         return {code: _empty(code, reason) for code in output}
     item = items[0]
     payload = _payload(item)
+    if _is_explicit_no_event(payload):
+        return {
+            code: {
+                "value": 0.0,
+                "state": DETERMINED,
+                "reason": "已审核续费结果明确声明本期无续费事件（NO_EVENT）。",
+                "evidence": [_evidence(item, field=code, inputs={"reason": "NO_EVENT"})],
+            }
+            for code in ("AH", "AI", "AJ")
+        }
     for code, aliases in RENEWAL_ALIASES.items():
         match = _first(payload, aliases)
         if match is None:
@@ -187,6 +215,69 @@ def _renewal_fields(items: list[Mapping[str, Any]], teacher: str) -> dict[str, d
             "evidence": [_evidence(item, field=code, inputs={key: value})],
         }
     return output
+
+
+def renewal_snapshot_entry(item: Mapping[str, Any], *, run_id: str, period: str, display_name: str | None = None) -> dict[str, Any]:
+    """Freeze one approved renewal result for a Run.
+
+    The snapshot is deliberately made from the reviewed record, including
+    its source hash and reviewer metadata.  Later edits to the source row do
+    not change a generated payroll result.
+    """
+    if item.get("status") != "APPROVED":
+        raise ValueError("只有已审核通过的续费结果才能生成 Run 快照。")
+    if str(item.get("period", "")) != str(period):
+        raise ValueError("续费结果月份与当前工资核算月份不一致。")
+    teacher_id = str(item.get("teacher_id", "")).strip()
+    if not teacher_id:
+        raise ValueError("续费结果缺少稳定教师标识。")
+    teacher = str(display_name or _payload(item).get("teacher") or teacher_id).strip()
+    fields = _renewal_fields([item], teacher)
+    for code, field in fields.items():
+        if field.get("state") == HUMAN_REQUIRED:
+            fields[code] = {**field, "state": "MISSING_SOURCE", "reason": field.get("reason") or "已审核续费结果缺少该字段。"}
+    return {
+        "teacher_id": teacher_id,
+        "display_name": teacher,
+        "period_label": str(period),
+        "AH": fields["AH"],
+        "AI": fields["AI"],
+        "AJ": fields["AJ"],
+        "source_result_id": str(item.get("id", "")),
+        "source_status": str(item.get("status", "")),
+        "source_hash": str(item.get("source_file_hash", "")),
+        "source_ref": str(item.get("source_ref", "")),
+        "source_row": str(item.get("source_row", "")),
+        "reviewed_at": item.get("reviewed_at", ""),
+        "reviewed_by": item.get("reviewed_by", ""),
+        "provenance": copy_mapping(item.get("evidence") or {}),
+    }
+
+
+def copy_mapping(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def renewal_fields_from_snapshot(snapshot: Mapping[str, Any] | None, teacher: str) -> dict[str, dict[str, Any]] | None:
+    """Read frozen AH/AI/AJ fields for a display teacher, if available."""
+    if not isinstance(snapshot, Mapping):
+        return None
+    entries = snapshot.get("entries")
+    if not isinstance(entries, Mapping):
+        return None
+    candidates = []
+    for key, entry in entries.items():
+        if not isinstance(entry, Mapping):
+            continue
+        if str(key) == teacher or str(entry.get("teacher_id", "")) == teacher or str(entry.get("display_name", "")) == teacher:
+            candidates.append(entry)
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        reason = "同一教师命中多个不同续费身份，无法安全绑定。"
+        return {code: {"value": None, "state": "IDENTITY_NOT_STABLE", "reason": reason, "evidence": []} for code in ("AH", "AI", "AJ")}
+    entry = candidates[0]
+    return {code: dict(entry.get(code) or _empty(code)) for code in ("AH", "AI", "AJ")}
 
 
 def _refund_field(items: list[Mapping[str, Any]], teacher: str) -> dict[str, Any]:
@@ -295,6 +386,7 @@ def resolve_final_fields(
     business_inputs: Iterable[Mapping[str, Any]] = (),
     employment_type: str = "FULL_TIME",
     default_zero_missing: bool = False,
+    renewal_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve downstream final fields for one teacher.
 
@@ -305,8 +397,17 @@ def resolve_final_fields(
     items = [item for item in business_inputs if isinstance(item, Mapping)]
     fields = {code: (_absent_zero(code) if default_zero_missing and code in ZERO_WHEN_ABSENT_CODES else _empty(code)) for code in FINAL_FIELD_CODES}
     renewal_items = _source_items(items, "RENEWAL_RESULT", teacher)
-    renewal = _renewal_fields(renewal_items, teacher)
-    if default_zero_missing and not renewal_items:
+    renewal = renewal_fields_from_snapshot(renewal_snapshot, teacher)
+    if renewal is None:
+        renewal = _renewal_fields(renewal_items, teacher)
+        if renewal_snapshot is not None and not renewal_items:
+            # A snapshot is authoritative for this Run.  An absent entry is
+            # not permission to invent a zero: the source is missing.
+            renewal = {
+                code: {"value": None, "state": "MISSING_SOURCE", "reason": "本期没有可绑定的已审核续费最终结果。", "evidence": []}
+                for code in ("AH", "AI", "AJ")
+            }
+    if default_zero_missing and not renewal_items and renewal_snapshot is None:
         renewal = {code: _absent_zero(code) for code in ("AH", "AI", "AJ")}
     fields.update(renewal)
     fields["AK"] = _empty("AK")
