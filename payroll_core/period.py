@@ -95,6 +95,8 @@ class CoverageReport:
     last_date: str | None
     months: tuple[str, ...]
     lesson_count: int
+    period_start: str | None = None
+    period_end: str | None = None
 
     @property
     def cross_month(self) -> bool:
@@ -102,6 +104,8 @@ class CoverageReport:
 
     @property
     def month_end(self) -> str | None:
+        if self.period_end:
+            return self.period_end
         if not self.period:
             return None
         year, month = _parse_period(self.period)
@@ -118,6 +122,14 @@ class CoverageReport:
 
     @property
     def outside_period(self) -> bool:
+        if self.period_start and self.period_end:
+            return bool(
+                self.first_date
+                and (self.first_date < self.period_start or self.first_date > self.period_end)
+            ) or bool(
+                self.last_date
+                and (self.last_date < self.period_start or self.last_date > self.period_end)
+            )
         return bool(self.months) and self.period not in self.months
 
     def as_dict(self) -> dict:
@@ -131,10 +143,18 @@ class CoverageReport:
             "incomplete_tail": self.incomplete_tail,
             "outside_period": self.outside_period,
             "month_end": self.month_end,
+            "period_start": self.period_start,
+            "period_end": self.period_end,
         }
 
 
-def coverage_for(period: str, dates: Iterable[str]) -> CoverageReport:
+def coverage_for(
+    period: str,
+    dates: Iterable[str],
+    *,
+    period_start: str | None = None,
+    period_end: str | None = None,
+) -> CoverageReport:
     """Summarise which days the uploaded lessons actually cover."""
     cleaned = sorted(item for item in (month_of_day(value) for value in dates) if item)
     months = sorted({item[:7] for item in cleaned})
@@ -144,6 +164,8 @@ def coverage_for(period: str, dates: Iterable[str]) -> CoverageReport:
         last_date=cleaned[-1] if cleaned else None,
         months=tuple(months),
         lesson_count=len(cleaned),
+        period_start=period_start,
+        period_end=period_end,
     )
 
 

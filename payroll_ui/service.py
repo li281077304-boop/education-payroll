@@ -1075,10 +1075,10 @@ class PayrollService(CoreFlow):
                 dates = [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in all_rows.records]
         source_month = dominant_month(dates) or dominant_month([getattr(record, "period", "") for record in records])
         file_month, file_has_year = month_from_filename(file_name)
-        coverage = coverage_for(run["period"], dates)
+        start, end = self._period_window(run)
+        coverage = coverage_for(run["period"], dates, period_start=start, period_end=end)
         mismatch = bool(source_month and source_month != run["period"])
         filename_disagrees = bool(file_month and source_month and (file_month != source_month if file_has_year else file_month != source_month[5:7]))
-        start, end = self._period_window(run)
         return {"run_month": run["period"], "period_start": start, "period_end": end,
                 "period_boundary_source": run.get("period_boundary_source", "LEGACY_CALENDAR_DEFAULT"),
                 "source_month": source_month, "mismatch": mismatch,
