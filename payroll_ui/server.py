@@ -140,6 +140,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 run_id = parsed.path.split("/")[3]
                 issue = parse_qs(parsed.query).get("issue", [""])[0]
                 return self._json(self.server.service.evidence(run_id, issue))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/historical-reconciliation"):
+                return self._json(self.server.service.historical_reconciliation(parsed.path.split("/")[3]))
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/grade-help"):
                 return self._json(self.server.service.grade_help(parsed.path.split("/")[3]))
             if parsed.path.startswith("/api/runs/") and "/resolutions/" in parsed.path:

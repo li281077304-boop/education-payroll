@@ -440,7 +440,7 @@ function navigation() {
   const checked = ["REVIEW_REQUIRED", "PASS"].includes(current.status);
   const groupCount = (current.issue_groups || []).length;
   const hasPayrollPreview = Boolean(current.generated_payroll || current.core_calculation?.rows?.length);
-  const items = [["materials", "材料准备", true], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["payroll", "工资预览", hasPayrollPreview], ["management", "管理岗位确认", true]];
+  const items = [["materials", "材料准备", true], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["reconciliation", "历史工资对账", Boolean(current.files?.baseline && current.core_calculation?.rows?.length)], ["payroll", "工资预览", hasPayrollPreview], ["management", "管理岗位确认", true]];
   return `<nav class="tabs">${items.map(([id, label, enabled]) => `<button class="${tab === id ? "active" : ""}" ${enabled ? `onclick="setTab('${id}')"` : "disabled"}>${label}</button>`).join("")}</nav>`;
 }
 
@@ -477,7 +477,48 @@ function renderTab() {
   if (tab === "issues") view.innerHTML = issuesPage();
   if (tab === "payroll") view.innerHTML = payrollPreviewPage();
   if (tab === "management") view.innerHTML = managementPage();
+  if (tab === "reconciliation") {
+    view.innerHTML = '<section class="card"><h2>历史工资对账</h2><p class="muted">正在读取历史工资表与当前核心计算的逐教师差异……</p></section>';
+    loadHistoricalReconciliation();
+  }
 }
+
+async function loadHistoricalReconciliation() {
+  try {
+    const data = await api(`/api/runs/${current.id}/historical-reconciliation`);
+    if (tab === "reconciliation") $("#view").innerHTML = historicalReconciliationPage(data);
+  } catch (error) {
+    if (tab === "reconciliation") $("#view").innerHTML = `<section class="card"><h2>历史工资对账</h2><div class="empty">${escapeHtml(error.message)}</div></section>`;
+  }
+}
+
+function historicalReconciliationPage(data) {
+  const labels = {AA: "AA", AC: "AC", AD: "AD", AE: "AE", AF: "AF（总课时费）"};
+  const stats = Object.entries(data.field_stats || {}).map(([field, stat]) => `<div class="metric"><span>${labels[field] || field}</span><strong>${stat.matches}/${stat.comparable}</strong><small>可比教师一致</small></div>`).join("");
+  const rows = (data.rows || []).map((row) => {
+    const fields = Object.entries(row.fields || {}).map(([field, value]) => {
+      const courseEvidence = (value.evidence || []).find((item) => Array.isArray(item.course_contributions));
+      const courseRows = courseEvidence?.course_contributions || [];
+      const courseTable = courseRows.length ? `<details class="evidence-details"><summary>查看逐课证据（${courseRows.length} 条）</summary><div class="table-wrap"><table class="table"><thead><tr><th>日期</th><th>课程/学生</th><th>状态</th><th>实到</th><th>年级/班型</th><th>贡献</th><th>来源行</th></tr></thead><tbody>${courseRows.map((course) => `<tr><td>${escapeHtml(course.date || "—")}</td><td>${escapeHtml([course.class_name, course.student].filter(Boolean).join(" / ") || "—")}</td><td>${escapeHtml(course.lesson_status || "—")}</td><td>${escapeHtml(String(course.attended ?? "—"))}</td><td>${escapeHtml([course.grade, course.class_type].filter(Boolean).join(" / ") || "—")}</td><td>${formatNumber(course.contribution)}</td><td>${escapeHtml(course.source_row || "—")}</td></tr>`).join("")}</tbody></table></div></details>` : "";
+      return `<tr><td><strong>${labels[field] || field}</strong></td><td>${formatNumber(value.historical)}</td><td>${formatNumber(value.current)}</td><td class="warn-text">${formatNumber(value.diff)}</td><td><span class="field-state">${escapeHtml(value.difference_category)}</span><div class="small muted">${historicalEvidenceText(value.evidence)}</div>${courseTable}</td></tr>`;
+    }).join("");
+    return `<details class="reconciliation-row"><summary><strong>${escapeHtml(row.teacher)}</strong><span class="status warn">${escapeHtml(row.difference_category)}</span><span class="small muted">${Object.keys(row.fields || {}).length} 个字段差异</span></summary><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>历史值</th><th>当前值</th><th>差异</th><th>证据分类</th></tr></thead><tbody>${fields}</tbody></table></div></details>`;
+  }).join("");
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">真实 July Run · ${escapeHtml(data.period_start || "—")} ～ ${escapeHtml(data.period_end || "—")}</p><h2>历史工资对账</h2><p class="muted">仅比较同时存在历史工资字段与当前计算值的教师；历史工资表是 oracle，当前值来自本次 Run 的版本化计算。</p></div><span class="status ${data.unexplained ? "bad" : "ok"}">${data.unexplained ? `${data.unexplained} 个未解释` : "未解释差异：0"}</span></div><div class="metric-grid">${stats}</div><div class="banner ${data.difference_teachers ? "info" : "success"}"><strong>待解释差异：${data.difference_teachers} 人</strong><span>可比教师：${data.teachers_compared} 人；分类均保留原始来源与课程证据。</span></div>${rows || '<div class="empty success">所有可比教师字段一致。</div>'}</section>`;
+}
+
+function historicalEvidenceText(items) {
+  const course = (items || []).find((item) => item.course_contributions);
+  const base = (items || []).find((item) => item.course_contribution_count || item.historical_formula || item.reason);
+  const parts = [];
+  if (base?.historical_formula) parts.push(`历史公式：${base.historical_formula}`);
+  if (base?.historical_obligation_hours != null || base?.current_obligation_hours != null) parts.push(`义务课时：历史 ${base.historical_obligation_hours ?? "未知"} / 当前 ${base.current_obligation_hours ?? "未知"}`);
+  if (course?.course_contribution_count != null) parts.push(`逐课证据 ${course.course_contribution_count} 条`);
+  else if (base?.course_contribution_count != null) parts.push(`逐课证据 ${base.course_contribution_count} 条`);
+  return escapeHtml(parts.join("；") || "已保留来源与差异证据");
+}
+
+function formatNumber(value) { return value == null ? "—" : Number(value).toFixed(2); }
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];

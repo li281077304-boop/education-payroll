@@ -55,6 +55,7 @@ from payroll_core.reconcile.ac_resolution import (
 from payroll_core.excel.reconciliation_bridge import GRADE_COEFFICIENTS
 from payroll_core.comments import render_comment
 from payroll_core.excel.writeback import preview as preview_writeback, sha256 as workbook_sha256, write_new_workbook
+from payroll_core.calculation import course_record_key
 from payroll_ui.assessment_flow import AssessmentService
 from payroll_ui.submissions import PayrollSubmissionService
 
@@ -856,6 +857,130 @@ class PayrollService(CoreFlow):
             raise ValueError("当前核算记录尚未启用完整工资计算链。")
         checked = self.check(run_id)
         return self._with_generated_preview(checked)
+
+    def historical_reconciliation(self, run_id: str) -> dict:
+        """Build an auditable, read-only July-style historical ledger.
+
+        The historical workbook remains an oracle only.  Current values come
+        from the run's configured calculation and every difference carries
+        source/formula evidence; no value is rounded into a match.
+        """
+        run = self._load(run_id)
+        self._require_fresh(run)
+        baseline_item = run.get("files", {}).get("baseline")
+        core = run.get("core_calculation") or {}
+        if not baseline_item or not core.get("rows"):
+            raise ValueError("当前记录缺少可用于历史工资对账的基准工资表或核心计算结果。")
+        baseline_result = self._read_for_run("baseline", Path(baseline_item["path"]), run)
+        historical = {row.teacher: row for row in baseline_result.records if getattr(row, "teacher", "")}
+        current = {row.get("teacher"): row for row in core.get("rows", []) if row.get("teacher")}
+        common = sorted(set(historical) & set(current))
+        schedule_result = self._read_for_run("schedule", Path(run["files"]["schedule"]["path"]), run) if run.get("files", {}).get("schedule") else None
+        schedule = self._apply_schedule_grade_resolutions(schedule_result.records, run) if schedule_result else []
+        by_key = {course_record_key(record): record for record in schedule}
+        contributions = [item for item in core.get("course_contributions", []) if item.get("teacher") in common]
+        fields = (("AA", "one_to_one"), ("AC", "class_value"), ("AD", "teaching_hours"), ("AE", "ae"), ("AF", "af"))
+        stats = {field: {"matches": 0, "comparable": 0} for field, _ in fields}
+        differences = []
+        category_counts = {name: 0 for name in ("INPUT_SCOPE", "MISSING_SOURCE", "COURSE_CONTRIBUTION", "PERSONAL_EXCEPTION", "RULE_DIFFERENCE", "DATA_QUALITY", "UNEXPLAINED")}
+        for teacher in common:
+            old = historical[teacher]
+            new = current[teacher]
+            field_output = {}
+            teacher_categories = []
+            teacher_evidence = []
+            for field, old_name in fields:
+                historical_value = getattr(old, old_name, None)
+                current_value = (new.get("fields", {}).get(field) or {}).get("value")
+                difference = None if historical_value is None or current_value is None else round(float(current_value) - float(historical_value), 6)
+                comparable = historical_value is not None and current_value is not None
+                if comparable:
+                    stats[field]["comparable"] += 1
+                    if abs(difference or 0) <= 1e-6:
+                        stats[field]["matches"] += 1
+                if difference is None or abs(difference) <= 1e-6:
+                    continue
+                category, evidence = self._historical_difference_evidence(
+                    field, old, new, difference, contributions, by_key, run,
+                )
+                category_counts[category] += 1
+                teacher_categories.append(category)
+                teacher_evidence.extend(evidence)
+                field_output[field] = {
+                    "historical": historical_value,
+                    "current": current_value,
+                    "diff": difference,
+                    "status": "DIFFERENCE",
+                    "difference_category": category,
+                    "evidence": evidence,
+                }
+            if field_output:
+                primary = next((item for item in ("MISSING_SOURCE", "PERSONAL_EXCEPTION", "COURSE_CONTRIBUTION", "RULE_DIFFERENCE", "DATA_QUALITY", "INPUT_SCOPE", "UNEXPLAINED") if item in teacher_categories), "DATA_QUALITY")
+                differences.append({"teacher": teacher, "fields": field_output, "status": "DIFFERENCE", "difference_category": primary, "evidence": teacher_evidence})
+        return {
+            "run_id": run["id"],
+            "period_label": run.get("period_label", run.get("period")),
+            "period_start": run.get("period_start"),
+            "period_end": run.get("period_end"),
+            "historical_source": baseline_item.get("path"),
+            "current_source": run.get("files", {}).get("schedule", {}).get("path"),
+            "teachers_compared": len(common),
+            "field_stats": stats,
+            "difference_teachers": len(differences),
+            "category_counts": category_counts,
+            "unexplained": category_counts["UNEXPLAINED"],
+            "rows": differences,
+        }
+
+    @staticmethod
+    def _historical_obligation(formula: object) -> float | None:
+        text = str(formula or "").upper().replace("$", "")
+        if re.search(r"AD\d*\s*\*\s*AE", text):
+            return 0.0
+        match = re.search(r"AD\d*\s*[-−]\s*(\d+(?:\.\d+)?)", text)
+        return float(match.group(1)) if match else None
+
+    def _historical_difference_evidence(self, field: str, old: object, new: dict, difference: float, contributions: list[dict], by_key: dict, run: dict) -> tuple[str, list[dict]]:
+        old_provenance = getattr(old, "provenance", {}) or {}
+        af_fact = old_provenance.get("af")
+        historical_formula = getattr(af_fact, "raw_value", "") if af_fact else ""
+        current_fact = (new.get("fields", {}).get(field) or {})
+        evidence: list[dict] = [{"source": getattr(old, "source", ""), "historical_formula": historical_formula, "difference": difference}]
+        if field in {"AC", "AD"}:
+            course_rows = []
+            for item in contributions:
+                if item.get("teacher") != new.get("teacher") or item.get("field") != "ac" or item.get("value") is None:
+                    continue
+                record = by_key.get(item.get("record_key"))
+                if record is None:
+                    continue
+                locations = [value for value in (getattr(record, "provenance", {}) or {}).values() if getattr(value, "coordinate", "")]
+                inputs = (item.get("evidence") or [{}])[0].get("inputs", {})
+                course_rows.append({"record_key": item.get("record_key"), "date": getattr(record, "lesson_date", ""), "class_name": getattr(record, "class_name", ""), "student": getattr(record, "student", ""), "lesson_status": getattr(record, "lesson_status", ""), "attended": getattr(record, "attended", None), "grade": getattr(record, "grade", ""), "class_type": getattr(record, "class_type", ""), "coefficient": inputs, "contribution": item.get("value"), "source_row": ", ".join(f"{getattr(value, 'sheet', '')}!{getattr(value, 'coordinate', '')}" for value in locations)})
+            evidence.append({"course_contributions": course_rows, "course_contribution_count": len(course_rows), "note": "当前 AC/AD 差异由逐课贡献与历史工资表字段对照；历史逐课公式未存入工资表，保留原始 AC 公式作为依据。"})
+            return "COURSE_CONTRIBUTION", evidence
+        if field == "AF":
+            historical_obligation = self._historical_obligation(historical_formula)
+            current_obligation = None
+            for item in current_fact.get("evidence", []):
+                try:
+                    current_obligation = float((item.get("inputs") or {}).get("obligation_hours"))
+                    break
+                except (TypeError, ValueError):
+                    continue
+            if historical_obligation is not None and current_obligation is not None and abs(historical_obligation - current_obligation) > 1e-6:
+                evidence.append({"historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "historical_formula": historical_formula, "current_formula": current_fact.get("reason", "")})
+                return "PERSONAL_EXCEPTION", evidence
+            if historical_obligation is not None and abs(float(getattr(old, "teaching_hours", 0) or 0) - float((new.get("fields", {}).get("AD") or {}).get("value") or 0)) > 1e-6:
+                evidence.append({"historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "reason": "AF 差异由 AD 课程贡献差异传导。"})
+                return "COURSE_CONTRIBUTION", evidence
+            if historical_obligation is None:
+                evidence.append({"reason": "历史 AF 公式未引用 AD/AE，无法从工资表恢复义务课时；该教师历史来源缺少可复算字段。", "historical_formula": historical_formula})
+                return "MISSING_SOURCE", evidence
+            evidence.append({"historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "historical_formula": historical_formula, "current_formula": current_fact.get("reason", "")})
+            return "RULE_DIFFERENCE", evidence
+        evidence.append({"reason": "历史字段与当前版本化规则结果不同，保留双方来源供后续规则对账。", "current_reason": current_fact.get("reason", "")})
+        return "RULE_DIFFERENCE", evidence
 
     def _with_generated_preview(self, checked: dict) -> dict:
         """Attach the canonical final-field preview without writing a file."""

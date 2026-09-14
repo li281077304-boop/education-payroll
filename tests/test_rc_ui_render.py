@@ -121,3 +121,25 @@ assert(html.indexOf('audit-only') >= 0 || html.includes('来源审计记录'));
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_historical_reconciliation_page_shows_real_field_totals_and_categories():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;}}, window:{}, console};
+vm.createContext(context); vm.runInContext(source, context);
+const html = vm.runInContext(`historicalReconciliationPage({
+ period_start:'2026-06-29', period_end:'2026-08-02', teachers_compared:30, difference_teachers:2, unexplained:0,
+ field_stats:{AA:{matches:27,comparable:27},AC:{matches:25,comparable:27},AD:{matches:25,comparable:27},AE:{matches:27,comparable:27},AF:{matches:24,comparable:30}},
+ rows:[{teacher:'任勇',difference_category:'PERSONAL_EXCEPTION',fields:{AF:{historical:5491,current:4381.17,diff:-1110,difference_category:'PERSONAL_EXCEPTION',evidence:[{historical_formula:'=AD7*AE7',historical_obligation_hours:0,current_obligation_hours:30}]}}},
+ {teacher:'刘文剑',difference_category:'COURSE_CONTRIBUTION',fields:{AC:{historical:240.31,current:239.11,diff:-1.2,difference_category:'COURSE_CONTRIBUTION',evidence:[{course_contribution_count:101}]}}}]
+})`, context);
+for (const text of ['历史工资对账','27/27','25/27','24/30','待解释差异：2 人','任勇','PERSONAL_EXCEPTION','刘文剑','COURSE_CONTRIBUTION','历史公式：=AD7*AE7','逐课证据 101 条']) assert(html.includes(text), text);
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
