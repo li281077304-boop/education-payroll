@@ -1874,8 +1874,8 @@ class PayrollService(CoreFlow):
             for field in ("one_to_one", "class_value", "teaching_hours", "ae", "af"):
                 value = target.provenance.get(field)
                 if value:
-                    target_items.append({"字段": {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "teaching_hours": "AD 最终授课小时", "ae": "AE 课时单价", "af": "AF 总课时费"}[field], "实际值": value.normalized_value, "来源文件": Path(value.source_file).name, "来源工作表": value.sheet, "来源位置": value.coordinate, "读取情况": self._cell_state(value.state.value)})
-        audit_names = {"rate": "AE 课时单价", "ae": "AE 课时单价", "af_policy": "AF 总课时费", "af": "AF 总课时费"}
+                    target_items.append({"字段": {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "teaching_hours": "AD 最终授课小时", "ae": "AE 课时单价", "af": "AF（总课时费）"}[field], "实际值": value.normalized_value, "来源文件": Path(value.source_file).name, "来源工作表": value.sheet, "来源位置": value.coordinate, "读取情况": self._cell_state(value.state.value)})
+        audit_names = {"rate": "AE 课时单价", "ae": "AE 课时单价", "af_policy": "AF（总课时费）", "af": "AF（总课时费）"}
         audit_items = [{"字段": audit_names.get(row["field"], row["field_label"]), "状态": row["status_label"], "期望值": row["expected"], "实际值": row["actual"], "差异": row["difference"], "审计说明": row["reason"]} for row in records]
         authority = []
         if rating:
@@ -2259,8 +2259,8 @@ class PayrollService(CoreFlow):
             "id": hashlib.sha256(f"{item.teacher}|{item.field}|{item.reason}".encode()).hexdigest()[:16],
             "teacher": item.teacher,
             "field": item.field,
-            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "teaching_hours": "AD 授课小时合计", "part_time": "兼职按节课时费", "ae": "AE 课时单价", "af": "AF 总课时费", "af_policy": "AF 课时费政策", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
-            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "af_policy": "AF 课时费政策不一致", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
+            "field_label": {"one_to_one": "AA 一对一", "class_value": "AC 班课", "teaching_hours": "AD 授课小时合计", "part_time": "兼职按节课时费", "ae": "AE 课时单价", "af": "AF（总课时费）", "af_policy": "AF（总课时费）政策", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}.get(item.field, "其他项目"),
+            "title": {"one_to_one": "一对一折算小时需要处理", "class_value": "班课折算小时需要处理", "ae": "课时单价需要确认", "af": "总课时费需要确认", "af_policy": "AF（总课时费）政策不一致", "rating": "教师星级不一致", "rate": "档位金额需要处理", "formula": "工资表公式异常"}.get(item.field, "需要人工处理"),
             "difference": difference,
             "status_label": ISSUE_LABELS.get(item.status, "需要处理"),
             "severity_rank": severity[0],
