@@ -64,6 +64,20 @@ def test_run_level_af_policy_collapses_default_review_and_supports_exceptions(tm
     assert new_run["af_policy_confirmation"] is None
 
 
+def test_real_package_template_is_bound_to_run(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    copyfile(FIXTURES / "fake_schedule.xlsx", package_dir / "排课列表.xlsx")
+    copyfile(FIXTURES / "fake_payroll.xlsx", package_dir / "薪资表模板.xlsx")
+
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    imported = service.import_package(run["id"], str(package_dir))["run"]
+
+    assert imported["template_path"] == str((package_dir / "薪资表模板.xlsx").resolve())
+    assert imported["template"]["source"] == "资料包自动识别的工资模板"
+
+
 def _star_package_book(path: Path, rows: list[tuple[str, str]]) -> Path:
     book = load_workbook(FIXTURES / "fake_payroll.xlsx")
     sheet = book.active
