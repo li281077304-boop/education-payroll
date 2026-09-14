@@ -277,7 +277,13 @@ def renewal_fields_from_snapshot(snapshot: Mapping[str, Any] | None, teacher: st
         reason = "同一教师命中多个不同续费身份，无法安全绑定。"
         return {code: {"value": None, "state": "IDENTITY_NOT_STABLE", "reason": reason, "evidence": []} for code in ("AH", "AI", "AJ")}
     entry = candidates[0]
-    return {code: dict(entry.get(code) or _empty(code)) for code in ("AH", "AI", "AJ")}
+    output: dict[str, dict[str, Any]] = {}
+    for code in ("AH", "AI", "AJ"):
+        field = dict(entry.get(code) or {})
+        if not field:
+            field = {"value": None, "state": "MISSING_SOURCE", "reason": f"续费快照缺少 {code}。", "evidence": []}
+        output[code] = field
+    return output
 
 
 def _refund_field(items: list[Mapping[str, Any]], teacher: str) -> dict[str, Any]:
