@@ -618,3 +618,26 @@ def test_current_payroll_import_saves_snapshot_but_not_student_grade_fact(tmp_pa
     service.import_file(run["id"], "schedule", str(schedule))
     assert service.store.list_student_grade_evidence() == []
     assert service.store.list_course_export_snapshots()
+
+
+def test_august_ordinary_class_rollover_matches_accepted_payroll_rule():
+    from payroll_core.excel.common import resolve_schedule_grade
+
+    assert resolve_schedule_grade(
+        "高三小班物理(04-物理)", "", period="2026-08", class_type="小班", course_date="2026-08-17",
+        direct_grade="高三",
+    )[0] == "高二"
+    assert resolve_schedule_grade(
+        "九年级小班物理(04-物理)", "", period="2026-08", class_type="小班", course_date="2026-08-17",
+        direct_grade="九年级",
+    )[0] == "八年级"
+    # Incoming high-one classes are already the new school-year grade.
+    assert resolve_schedule_grade(
+        "高一小班物理(04-物理)", "", period="2026-08", class_type="小班", course_date="2026-08-17",
+        direct_grade="高一",
+    )[0] == "高一"
+    # Bridge classes retain their explicit in-study grade.
+    assert resolve_schedule_grade(
+        "七升八物理衔接班", "", period="2026-08", class_type="小班", course_date="2026-08-17",
+        direct_grade="七年级",
+    )[0] == "七年级"

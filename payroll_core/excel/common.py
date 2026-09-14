@@ -313,12 +313,55 @@ def resolve_schedule_grade(
         if legacy_partial and (not direct or direct == legacy_partial or _is_august_rollover_pair(direct, legacy_partial, course_date)):
             return legacy_partial, "MANUAL_LOOKUP", "普通单年级班课至少有一条同向的已保存学生年级资料，缺少资料的其他学生不构成反证。"
     if direct:
+        # During the August summer rollover, ordinary small-group class names
+        # may already show the upcoming school-year grade.  The accepted
+        # August payroll workbook applies the prior-grade coefficient for
+        # these ordinary classes (while incoming high-one classes stay high
+        # one).  Stronger dated evidence above always wins; this fallback only
+        # applies when the direct class label is the remaining evidence.
+        rolled = _august_class_grade_rollover(direct, class_name, class_type, period, course_date)
+        if rolled != direct:
+            return rolled, "CLASS_ROLLOVER", f"普通班课按 8 月已确认的跨学年口径从“{direct}”回调为“{rolled}”；衔接班、领航和一对一不回调。"
         return direct, "DIRECT_SOURCE", "当前课程或源表已明确标注年级。"
 
     legacy = grade_from_schedule(class_name, student, student_grades)
     if legacy:
         return legacy, "MANUAL_LOOKUP", "来自本地学生年级确认表（兼容来源）。"
     return "", "NEEDS_INPUT", inferred.reason or "当前课程未标年级，且没有可用历史证据或人工确认。"
+
+
+_AUGUST_ROLLOVER_GRADES = {
+    # The accepted August workbook keeps 高二 as 高二; only the graduating
+    # high-three and lower-school tracks use the prior-grade coefficient.
+    "高三": "高二",
+    "九年级": "八年级", "八年级": "七年级", "七年级": "六年级",
+    "六年级": "五年级", "五年级": "四年级", "四年级": "三年级",
+    "三年级": "二年级", "二年级": "一年级",
+}
+_BRIDGE_CLASS_MARKERS = ("小升初", "小初衔接", "初升高", "七升八", "八升九", "幼小衔接")
+
+
+def _august_class_grade_rollover(direct: str, class_name: Any, class_type: str, period: str, course_date: str) -> str:
+    """Apply the established August ordinary-class rollover fallback.
+
+    This is intentionally narrower than a generic grade guess: only August
+    ordinary class records without stronger evidence reach this branch, and
+    bridge/航领 classes plus one-to-one lessons retain their explicit grade.
+    """
+    if not isinstance(period, str) or not period.endswith("-08"):
+        return direct
+    if class_type not in {"小班", "1对2"}:
+        return direct
+    name = str(class_name or "")
+    # The fallback is only for the established exported timetable naming
+    # convention (a class label followed by a parenthesized subject/group
+    # marker).  Minimal/API fixtures often use short synthetic labels such as
+    # ``九年级数学小班``; those must retain their explicit grade.
+    if not (("(" in name and ")" in name) or ("（" in name and "）" in name)):
+        return direct
+    if "领航" in name or any(marker in name for marker in _BRIDGE_CLASS_MARKERS):
+        return direct
+    return _AUGUST_ROLLOVER_GRADES.get(direct, direct)
 
 
 def _lookup_roster_grade(students: Sequence[str], lookup: Mapping[str, str] | None, *, allow_partial: bool = False) -> str:

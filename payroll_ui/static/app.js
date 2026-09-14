@@ -625,8 +625,17 @@ function issuesPage() {
   const rows = groups.filter((group) => !filters.teacher || String(group.teacher || "").includes(filters.teacher.trim()));
   const actions = (current.user_actions || []).filter((action) => !filters.teacher || (action.teachers || []).some((teacher) => String(teacher).includes(filters.teacher.trim())));
   const fieldCount = current.issues?.length || groups.reduce((total, group) => total + (group.count || group.field_records?.length || 0), 0);
-  const actionSummary = actions.length ? `<div class="action-summary"><strong>需要完成 ${actions.length} 个核查动作</strong><span class="muted">后台保留 ${rows.length} 个业务问题和 ${fieldCount} 条审计记录，便于逐项查看证据。</span><div class="small">${actions.map((action) => `${escapeHtml(action.title)}：${action.teacher_count} 位教师`).join(" · ")}</div></div>` : '<div class="empty success">当前没有需要人工处理的核算异常。</div>';
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${actionSummary}<div class="result-count">显示 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 项）</div>${rows.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>问题</th><th>教师</th><th>影响字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>${rows.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>'}<div id="issue-detail"></div></section>`;
+  const issueTable = (items) => items.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>问题</th><th>教师</th><th>影响字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>${items.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>';
+  const groupsById = new Map(rows.map((group) => [group.id, group]));
+  const actionBlocks = actions.map((action) => {
+    const members = (action.group_ids || []).map((id) => groupsById.get(id)).filter(Boolean);
+    return `<details class="user-action"><summary>${escapeHtml(action.title)}：${action.teacher_count} 位教师</summary><p class="small muted">展开后查看对应教师级问题和证据入口。</p>${issueTable(members)}</details>`;
+  }).join("");
+  const actionSummary = actions.length
+    ? `<div class="action-summary"><strong>需要完成 ${actions.length} 个核查动作</strong><span class="muted">先处理以下业务动作；教师级问题只在展开动作后显示。</span><div class="action-list">${actionBlocks}</div></div>`
+    : '<div class="empty success">当前没有需要人工处理的核算异常。</div>';
+  const auditDetails = rows.length ? `<details class="audit-details"><summary>查看审计明细（${rows.length} 个业务问题，${fieldCount} 条字段记录）</summary><p class="small muted">审计明细仅用于追溯，不代表需要逐条人工处理。</p>${issueTable(rows)}</details>` : "";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${actionSummary}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 项）</div>${auditDetails}<div id="issue-detail"></div></section>`;
 }
 
 function issueRow(group) {

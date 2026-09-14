@@ -87,3 +87,37 @@ assert(!html.includes('undefined'));
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_issue_center_puts_user_actions_above_collapsed_audit_details():
+    """Teacher-level issue groups remain available, but are not top-level tasks."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;}}, window:{}, console};
+vm.createContext(context);
+vm.runInContext(source, context);
+vm.runInContext(`current={
+  user_actions:[{id:'action-af',title:'确认 AF 默认政策',teacher_count:2,teachers:['教师甲','教师乙'],group_ids:['g1','g2']}],
+  issue_groups:[
+    {id:'g1',teacher:'教师甲',title:'AF 政策需要确认',severity_rank:1,severity_label:'重要',fields:['AF'],expected:30,actual:null,difference:null},
+    {id:'g2',teacher:'教师乙',title:'AF 政策需要确认',severity_rank:1,severity_label:'重要',fields:['AF'],expected:30,actual:null,difference:null},
+    {id:'audit-only',teacher:'教师丙',title:'来源审计记录',severity_rank:3,severity_label:'提示',fields:['rating'],expected:2,actual:2,difference:0}
+  ], issues:[{id:'f1'},{id:'f2'},{id:'f3'}]
+}`, context);
+const html = vm.runInContext('issuesPage()', context);
+assert(html.includes('class="user-action"'));
+assert(html.includes('确认 AF 默认政策：2 位教师'));
+assert(html.includes('class="audit-details"'));
+assert(html.includes('查看审计明细'));
+const firstDetails = html.indexOf('<details');
+const firstIssueTable = html.indexOf('<table class="table issues">');
+assert(firstDetails >= 0 && firstIssueTable > firstDetails, 'issue table must be inside a collapsed details section');
+assert(html.indexOf('audit-only') >= 0 || html.includes('来源审计记录'));
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

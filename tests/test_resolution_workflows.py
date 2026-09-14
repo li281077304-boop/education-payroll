@@ -87,7 +87,10 @@ def test_source_correction_preserves_fact_and_closes_issue(tmp_path):
     result = service.create_resolution(run["id"], group["id"], "SOURCE_DATA_CORRECTION", course["id"], {"field": "grade", "corrected_value": "高三", "reason_code": "GRADE_ROLLOVER_NOT_UPDATED", "reason": "脱敏的年级修正"}, "审核人", group["fingerprint"])
     assert not any(item["teacher"] == "李四" and item["field"] == "class_value" for item in result["issues"])
     saved = service.store.get(run["id"])["resolutions"][0]
-    assert saved["original_value"] == "八年级"
+    # August ordinary-class fallback resolves the explicit incoming grade to
+    # the accepted prior-grade coefficient before a source correction is
+    # recorded; the correction still preserves that resolved source fact.
+    assert saved["original_value"] == "七年级"
     assert saved["corrected_value"] == "高三"
     assert saved["outcome"] == "RESOLVED_BY_SOURCE_CORRECTION"
 
