@@ -54,11 +54,18 @@ def read_refund_report(path: str | Path, period: str) -> list[RefundReportRecord
         header_index, sheet = 0, "CSV"
     else:
         rows = _load_rows(source)
-        found = next((
+        header_candidates = [
             (index, sheet, [_text(value) for value in row])
             for index, (sheet, row) in enumerate(rows)
             if _has_refund_header(row)
-        ), None)
+        ]
+        # A yearly workbook contains one identically-shaped sheet per month;
+        # bind the report to the Run period instead of silently taking the
+        # first (usually January) sheet.
+        month = str(int(period[5:])) if len(period) == 7 and period[4] == "-" else ""
+        preferred_sheets = {f"{month}月份", f"{month}月份 ", f"{month}月", f"{month}月 ", period}
+        found = next((item for item in header_candidates if item[1].strip() in {name.strip() for name in preferred_sheets}), None)
+        found = found or (header_candidates[0] if header_candidates else None)
         if found is None:
             return []
         header_index, sheet, headers = found
@@ -107,8 +114,14 @@ def _exact_column(headers: list[str], *names: str) -> int | None:
 def _has_refund_header(row: list[Any]) -> bool:
     values = {_normalized(value) for value in row if _text(value)}
     identity = {"扣款教师", "教师", "任课老师", "姓名"}
-    refund = {"退费", "退款", "退费日期", "金额", "退费金额", "扣款金额", "状态", "退费原因", "原因"}
-    return bool(values & identity) and bool(values & refund)
+    # Real monthly sheets commonly use compound labels such as
+    # ``退费校区``/``退费总金额`` rather than a standalone ``退费`` header.
+    # Match the normalized token as a bounded substring while retaining the
+    # exact identity-column check above (to avoid treating assessment sheets
+    # as refund sources).
+    refund_tokens = ("退费", "退款", "退费日期", "金额", "扣款金额", "状态", "退费原因", "原因")
+    has_refund = any(any(token in value for token in refund_tokens) for value in values)
+    return bool(values & identity) and has_refund
 
 
 def _column_letter(number: int) -> str:

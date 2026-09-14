@@ -8,6 +8,7 @@ from payroll_core.calculation import calculate_payroll
 from payroll_core.config.core_rules import load_core_rules
 from payroll_core.models.records import ScheduleRecord
 from payroll_core.adapters.renewal_report import read_renewal_report
+from payroll_core.adapters.refund import read_refund_report
 from payroll_core.adapters.business_results import read_business_result
 from payroll_core.adapters.weekly_report import read_weekly_report
 from payroll_core.excel.package import discover_payroll_package
@@ -69,6 +70,29 @@ def test_ooxml_content_with_xls_suffix_is_read_without_manual_rename(tmp_path):
     renewal = read_renewal_report(source, "2026-08")
     assert not renewal.errors
     assert renewal.records[0].renewal_rate == 2 / 6
+
+
+def test_refund_report_detects_compound_real_monthly_headers(tmp_path):
+    """Monthly refund sheets use labels such as 退费校区/退费总金额."""
+    source = tmp_path / "refund.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "8月份 "
+    sheet.append(["2026年8月退费统计表"])
+    sheet.append(["周", "退费校区", "退费总金额", "教师", "备注"])
+    sheet.append(["第一周", "二校", -100, "教师甲", "已确认"])
+    other = book.create_sheet("1月份")
+    other.append(["2026年1月退费统计表"])
+    other.append(["周", "退费校区", "退费总金额", "教师", "备注"])
+    other.append(["第一周", "二校", -50, "教师乙", "已确认"])
+    book.save(source)
+
+    records = read_refund_report(source, "2026-08")
+
+    assert len(records) == 1
+    assert records[0].teacher == "教师甲"
+    assert records[0].amount == -100
+    assert records[0].sheet == "8月份 "
 
 
 def test_star_adapter_reads_wide_tier_table_with_cell_evidence(tmp_path):
