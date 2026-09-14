@@ -177,7 +177,11 @@ class PayrollHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._payload(); path = urlparse(self.path).path
             if path == "/api/runs":
-                return self._json(self.server.service.create(str(payload.get("period", "")), str(payload.get("mode", "AUDIT"))), HTTPStatus.CREATED)
+                return self._json(self.server.service.create(
+                    str(payload.get("period", "")), str(payload.get("mode", "AUDIT")),
+                    period_start=str(payload.get("period_start", "")), period_end=str(payload.get("period_end", "")),
+                    period_boundary_source=str(payload.get("period_boundary_source", "")),
+                ), HTTPStatus.CREATED)
             if path == "/api/core-rules":
                 return self._json(self.server.service.save_core_rule_version(payload.get("rules", {}), str(payload.get("source", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)
             if path == "/api/part-time-rates":

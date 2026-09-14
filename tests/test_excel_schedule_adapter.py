@@ -70,6 +70,21 @@ def test_schedule_adapter_keeps_zero_attendance_and_excludes_out_of_period_rows(
     assert any(issue.code == "OUT_OF_PERIOD_ROWS_EXCLUDED" for issue in result.warnings)
 
 
+def test_schedule_adapter_accepts_explicit_cross_month_accounting_window(tmp_path):
+    path = tmp_path / "cross-month.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(REQUIRED_HEADERS)
+    for day in ("2026-06-29", "2026-07-15", "2026-08-02", "2026-08-03"):
+        sheet.append([{"上课班级": "八年级数学一对一", "教学形式": "一对一", "上课时间": f"{day} 09:00", "上课状态": "已上课", "实到": 1, "上课学员": "学生甲", "上课科目": "数学", "任课老师": "张三"}.get(header, "") for header in REQUIRED_HEADERS])
+    workbook.save(path)
+
+    result = read_schedule_excel(path, period="2026-07", period_start="2026-06-29", period_end="2026-08-02")
+
+    assert [record.lesson_date for record in result.records] == ["2026-06-29", "2026-07-15", "2026-08-02"]
+    assert any(issue.code == "OUT_OF_PERIOD_ROWS_EXCLUDED" for issue in result.warnings)
+
+
 def test_schedule_adapter_uses_explicit_student_grade_authority_only_after_direct_extraction(tmp_path):
     path = tmp_path / "gift-course.xlsx"
     workbook = Workbook()

@@ -144,7 +144,7 @@ async function home() {
     current = null;
     const today = new Date();
     const defaultPeriod = defaultPayrollPeriod(today);
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">选择月份后，导入排课数据和本次提交表；如有基准最终工资表，系统以它作为工资结果依据。</p></div><div class="create-box"><label for="period">核算月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">工资月份用于规则与模板；核算周期用于排课和生产数据。两者可以不同。</p></div><div class="create-box"><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">不填写时使用该月份自然月，并标记为 LEGACY_CALENDAR_DEFAULT。</p><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -409,7 +409,7 @@ function duplicateHint() {
 async function createRun() {
   try {
     const mode = $("#mode") ? $("#mode").value : "AUDIT";
-    current = await api("/api/runs", { method: "POST", body: JSON.stringify({ period: $("#period").value, mode }) });
+    current = await api("/api/runs", { method: "POST", body: JSON.stringify({ period: $("#period").value, mode, period_start: $("#period-start")?.value || "", period_end: $("#period-end")?.value || "", period_boundary_source: $("#period-start")?.value || $("#period-end")?.value ? "USER_CONFIRMED" : "LEGACY_CALENDAR_DEFAULT" }) });
     tab = "materials";
     renderRun();
   } catch (error) { showMessage(error.message); }
@@ -452,7 +452,8 @@ function reconfirmationBanner(run) {
 function renderRun() {
   const stale = reconfirmationBanner(current) + (current.status === "STALE" ? '<div class="banner error"><strong>原始文件已发生变化</strong><span>请重新选择标记为“已变化”的材料，再重新核对。旧结果不会继续显示为有效。</span></div>' : "");
   const lastError = current.last_error ? `<div class="banner error"><strong>上次核对未完成</strong><span>${escapeHtml(current.last_error)}</span></div>` : "";
-  shell(`<div class="run-title"><div><p class="eyebrow">${escapeHtml(current.period)}</p><h1>工资核对</h1><div class="small muted">记录编号 ${escapeHtml(current.id)}</div></div>${statusBadge(current)}</div>${runSteps()}${stale}${lastError}${authoritySummary()}${navigation()}<section id="view"></section>`);
+    const periodBanner = `<div class="banner info"><strong>本次核算范围</strong><span>工资月份：${escapeHtml(current.period_label || current.period)} · 实际核算周期：${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")}</span></div>`;
+    shell(`<div class="run-title"><div><p class="eyebrow">工资月份 ${escapeHtml(current.period_label || current.period)}</p><h1>工资核对</h1><div class="small muted">核算周期 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · 记录编号 ${escapeHtml(current.id)}</div></div>${statusBadge(current)}</div>${periodBanner}${runSteps()}${stale}${lastError}${authoritySummary()}${navigation()}<section id="view"></section>`);
   renderTab();
 }
 
@@ -605,7 +606,7 @@ function payrollPreviewPage() {
   const exportNote = current.mode === "GENERATE"
     ? "导出会自动选择不冲突的新文件名，绝不覆盖已有工资表。状态为草稿时仍可导出，但文件会保留待确认标记。"
     : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">${escapeHtml(current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · 核算周期 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
 }
 
 function overviewPage() {

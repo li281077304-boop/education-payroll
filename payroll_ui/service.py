@@ -13,7 +13,7 @@ from typing import Any
 
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.excel.package import discover_payroll_package
-from payroll_core.period import coverage_for, dominant_month, month_from_filename
+from payroll_core.period import coverage_for, dominant_month, month_from_filename, normalize_period_window
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.mapping.schedule import read_schedule_with_mapping
 from payroll_core.models.evidence import AdapterIssue
@@ -203,7 +203,7 @@ class PayrollService(CoreFlow):
         Source workbooks are never copied into the store.
         """
         run = self._load(run_id)
-        package = discover_payroll_package(package_path, run["period"])
+        package = discover_payroll_package(package_path, run["period"], period_start=self._period_window(run)[0], period_end=self._period_window(run)[1])
         for evidence in package.grade_evidence:
             identifier = hashlib.sha256(
                 f"package-grade|{evidence.source_hash}|{evidence.coordinate}|{evidence.student}|{evidence.lesson_date}|{evidence.grade}".encode()
@@ -502,14 +502,14 @@ class PayrollService(CoreFlow):
             self.store.save_comment_candidate(item)
 
     def _verify_comment_target(self, run: dict, role: str, sheet: str, cell: str, teacher_id: str) -> None:
-        records = self._read(role, Path(run["files"][role]["path"]), run["period"]).records
+        records = self._read_for_run(role, Path(run["files"][role]["path"]), run).records
         matching = [record for record in records if getattr(record, "teacher", "") == teacher_id]
         if not matching:
             raise ValueError("目标工资表没有该教师，不能写入其他教师单元格。")
         if not any(any(item.sheet == sheet and item.coordinate == cell for item in record.provenance.values()) for record in matching):
             raise ValueError("目标单元格不属于该教师的已识别工资表字段。")
 
-    def create(self, period: str, mode: str = MODE_AUDIT) -> dict:
+    def create(self, period: str, mode: str = MODE_AUDIT, *, period_start: str = "", period_end: str = "", period_boundary_source: str = "") -> dict:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
             raise ValueError("请选择有效月份。")
         if mode not in (MODE_AUDIT, MODE_GENERATE):
@@ -518,7 +518,8 @@ class PayrollService(CoreFlow):
         policies = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "field_status": self._field_status([]), "summary": self._summary([])}
+        window = normalize_period_window(period, period_start, period_end, period_boundary_source)
+        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         self.store.save(run)
         return self.render(run)
@@ -824,7 +825,7 @@ class PayrollService(CoreFlow):
             raise ValueError("请先导入：" + "、".join(missing))
         self._require_fresh(run)
         coefficients, rule_version_id = self._class_type_rules_for_run(run)
-        reads = self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"])
+        reads = self._read_for_run("schedule", Path(run["files"]["schedule"]["path"]), run)
         if reads.errors:
             raise ValueError("排课数据重新读取失败，请返回材料页重新选择。")
         schedule = self._apply_schedule_grade_resolutions(reads.records, run)
@@ -1007,7 +1008,7 @@ class PayrollService(CoreFlow):
                 profiles = self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name)
                 result, analysis = resolve_schedule_import(
                     source, run["period"], profiles=profiles, confirmed=mapping,
-                    course_export_snapshots=self._stored_course_export_snapshots(),
+                    course_export_snapshots=self._stored_course_export_snapshots(), period_start=self._period_window(run)[0], period_end=self._period_window(run)[1],
                 )
                 if analysis is not None and not analysis.ready:
                     raise ValueError(self._mapping_error(analysis))
@@ -1016,7 +1017,7 @@ class PayrollService(CoreFlow):
                 ):
                     raise ValueError("这份排课表没有识别到有效课程记录，请检查是否选错了工作表或文件。")
             else:
-                result = self._read(role, source, run["period"])
+                result = self._read_for_run(role, source, run)
         except OSError as exc:
             raise ValueError(self._file_error(exc)) from exc
         if result.errors:
@@ -1077,7 +1078,10 @@ class PayrollService(CoreFlow):
         coverage = coverage_for(run["period"], dates)
         mismatch = bool(source_month and source_month != run["period"])
         filename_disagrees = bool(file_month and source_month and (file_month != source_month if file_has_year else file_month != source_month[5:7]))
-        return {"run_month": run["period"], "source_month": source_month, "mismatch": mismatch,
+        start, end = self._period_window(run)
+        return {"run_month": run["period"], "period_start": start, "period_end": end,
+                "period_boundary_source": run.get("period_boundary_source", "LEGACY_CALENDAR_DEFAULT"),
+                "source_month": source_month, "mismatch": mismatch,
                 "file_name_month": file_month, "file_name_has_year": file_has_year,
                 "filename_disagrees": filename_disagrees, "coverage": coverage.as_dict(),
                 "decision": "" if not mismatch else "PENDING"}
@@ -1089,6 +1093,8 @@ class PayrollService(CoreFlow):
         if period == run["period"]:
             return self.render(run)
         run["period"] = period
+        window = normalize_period_window(period)
+        run.update(window)
         for role, item in run.get("files", {}).items():
             path = Path(item["path"])
             if not path.is_file():
@@ -1144,7 +1150,7 @@ class PayrollService(CoreFlow):
             raise ValueError("请选择修正上游事实或特殊核算口径。")
         if not confirmed_by.strip() or not course_record_id:
             raise ValueError("请选择具体课程并填写确认人。")
-        schedule = self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"]).records
+        schedule = self._read_for_run("schedule", Path(run["files"]["schedule"]["path"]), run).records
         record = next((item for item in schedule if schedule_record_id(item) == course_record_id), None)
         if record is None or record.teacher != group["teacher"] or record.period != run["period"]:
             raise ValueError("所选课程不属于当前教师、月份或当前排课来源。")
@@ -1214,7 +1220,7 @@ class PayrollService(CoreFlow):
             raise
 
     def _perform_check(self, run: dict) -> dict:
-        reads = {key: self._read(key, Path(item["path"]), run["period"]) for key, item in run["files"].items()}
+        reads = {key: self._read_for_run(key, Path(item["path"]), run) for key, item in run["files"].items()}
         if not self._fresh(run):
             raise ValueError("原文件在核对时发生变化，请重新导入。")
         if any(result.errors for result in reads.values()):
@@ -1534,11 +1540,11 @@ class PayrollService(CoreFlow):
             raise ValueError("未找到问题。")
         records = [item for item in run.get("field_records", []) if item["id"] in group["field_record_ids"]]
         schedule = self._apply_schedule_grade_resolutions(
-            self._read("schedule", Path(run["files"]["schedule"]["path"]), run["period"]).records,
+            self._read_for_run("schedule", Path(run["files"]["schedule"]["path"]), run).records,
             run,
         )
         reads = {
-            role: self._read(role, Path(item["path"]), run["period"])
+            role: self._read_for_run(role, Path(item["path"]), run)
             for role, item in run["files"].items()
             if role in {"math", "science", "baseline"}
         }
@@ -1912,7 +1918,20 @@ class PayrollService(CoreFlow):
         sections.append({"title": "独立性边界", "items": [{"星级": "独立权威" if teacher_rating else "权威缺失", "档位规则": "独立规则表，按生效期匹配", "教师工资政策": "独立权威" if profile else "权威缺失", "AD": "仍来自工资表自身，AE/AF 尚未完全独立闭环"}]})
         return sections
 
-    def _read(self, role: str, path: Path, period: str):
+    @staticmethod
+    def _period_window(run: dict) -> tuple[str, str]:
+        window = normalize_period_window(run["period"], run.get("period_start"), run.get("period_end"), run.get("period_boundary_source"))
+        return window["period_start"], window["period_end"]
+
+    def _read_for_run(self, role: str, path: Path, run: dict):
+        """Read a run-bound source while keeping legacy test/provider seams."""
+        start, end = self._period_window(run)
+        from payroll_core.period import calendar_bounds
+        if (start, end) == calendar_bounds(run["period"]):
+            return self._read(role, path, run["period"])
+        return self._read(role, path, run["period"], period_start=start, period_end=end)
+
+    def _read(self, role: str, path: Path, period: str, *, period_start: str | None = None, period_end: str | None = None):
         """Read one material. Schedule falls back to its confirmed mapping.
 
         The check phase must see the same rows the import produced, so a layout
@@ -1927,7 +1946,7 @@ class PayrollService(CoreFlow):
             result, analysis = resolve_schedule_import(
                 path, period, profiles=self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name), student_grades=lookup,
                 manual_grade_evidence=manual, historical_grade_evidence=history,
-                course_export_snapshots=self._stored_course_export_snapshots(),
+                course_export_snapshots=self._stored_course_export_snapshots(), period_start=period_start, period_end=period_end,
             )
             if analysis is not None and not analysis.ready:
                 result.errors.append(AdapterIssue("NEEDS_FIELD_CONFIRMATION", self._mapping_error(analysis)))
@@ -2018,7 +2037,7 @@ class PayrollService(CoreFlow):
         if not schedule_file:
             return {"available": False, "count": 0, "students": [], "message": "请先导入本月排课表。"}
         try:
-            result = self._read("schedule", Path(schedule_file["path"]), run["period"])
+            result = self._read_for_run("schedule", Path(schedule_file["path"]), run)
         except (OSError, ValueError):
             return {"available": False, "count": 0, "students": [], "message": "排课表暂时无法重新读取。"}
         groups: dict[str, dict] = {}
@@ -2393,6 +2412,7 @@ class PayrollService(CoreFlow):
 
     def render(self, run: dict) -> dict:
         required = PayrollService._missing_materials(run)
+        window = normalize_period_window(run["period"], run.get("period_start"), run.get("period_end"), run.get("period_boundary_source"))
         summary = run.get("summary", PayrollService._summary([]))
         status_label = STATUS[run["status"]]
         if run["status"] == "REVIEW_REQUIRED":
@@ -2409,7 +2429,8 @@ class PayrollService(CoreFlow):
         schedule = run.get("files", {}).get("schedule")
         class_rules, class_rule_version_id = self._class_type_rules_for_run(run)
         return {
-            **run,
+            **run, **window,
+            "period_display": {"label": window["period_label"], "start": window["period_start"], "end": window["period_end"], "boundary_source": window["period_boundary_source"]},
             "status_label": status_label,
             "materials": materials,
             "health": {

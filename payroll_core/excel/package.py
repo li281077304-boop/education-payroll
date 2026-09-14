@@ -168,7 +168,7 @@ def _is_weekly_report_file(path: Path) -> bool:
     return bool(re.search(r"第\d+周|周报|周数据|weekly", text, flags=re.IGNORECASE))
 
 
-def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
+def discover_payroll_package(root: str | Path, period: str, *, period_start: str | None = None, period_end: str | None = None) -> PayrollPackage:
     """Discover a package by workbook content and extract safe source facts."""
     directory = Path(root).expanduser().resolve()
     if not directory.is_dir():
@@ -242,7 +242,7 @@ def discover_payroll_package(root: str | Path, period: str) -> PayrollPackage:
             continue
         if layout == "SCHEDULE_EXPORT_V1":
             try:
-                parsed = read_schedule_excel(path, period)
+                parsed = read_schedule_excel(path, period, period_start=period_start, period_end=period_end)
                 count = len(parsed.records)
                 schedule_teacher_names.update(record.teacher for record in parsed.records if record.teacher)
                 schedule_candidates.append((count, path))

@@ -39,6 +39,8 @@ def read_schedule_excel(
     manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
     historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
     course_export_snapshots: Sequence[CourseExportSnapshot] = (),
+    period_start: str | None = None,
+    period_end: str | None = None,
 ) -> AdapterResult[ScheduleRecord]:
     result: AdapterResult[ScheduleRecord] = AdapterResult()
     try:
@@ -73,7 +75,7 @@ def read_schedule_excel(
             continue
         lesson_time = sheet.cell(row, columns["上课时间"]).value
         lesson_date = date_from_time(lesson_time)
-        if _is_period(period) and lesson_date and not lesson_date.startswith(period):
+        if not _date_in_window(lesson_date, period, period_start, period_end):
             continue
         class_name = sheet.cell(row, columns["上课班级"]).value
         course_name = sheet.cell(row, columns.get("上课课程", columns["上课班级"])).value
@@ -119,7 +121,7 @@ def read_schedule_excel(
         lesson_date = date_from_time(evidence["lesson_time"].normalized_value)
         # The run period is the salary period, never the calendar day when the
         # program happens to run.  A source export may span two months.
-        if _is_period(period) and lesson_date and not lesson_date.startswith(period):
+        if not _date_in_window(lesson_date, period, period_start, period_end):
             out_of_period += 1
             continue
         subject = subject_from_source(evidence["subject"].normalized_value)
@@ -188,3 +190,11 @@ def read_schedule_excel(
 
 def _is_period(value: str) -> bool:
     return len(value) == 7 and value[4] == "-" and value[:4].isdigit() and value[5:].isdigit() and 1 <= int(value[5:]) <= 12
+
+
+def _date_in_window(lesson_date: str | None, period: str, start: str | None, end: str | None) -> bool:
+    if not lesson_date:
+        return True
+    if start and end:
+        return start <= lesson_date <= end
+    return not _is_period(period) or lesson_date.startswith(period)

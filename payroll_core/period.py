@@ -9,7 +9,7 @@ import re
 from calendar import monthrange
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Iterable
 
 #: 每月 20 日及以后默认核算当前月；20 日之前默认核算上一个自然月。
@@ -37,6 +37,32 @@ def previous_period(period: str) -> str:
     if month == 0:
         month, year = 12, year - 1
     return f"{year:04d}-{month:02d}"
+
+
+def calendar_bounds(period_label: str) -> tuple[str, str]:
+    """Return the legacy natural-month bounds for a salary label."""
+    year, month = _parse_period(period_label)
+    last = monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{last:02d}"
+
+
+def normalize_period_window(period_label: str, period_start: str | None = None,
+                            period_end: str | None = None, source: str | None = None) -> dict[str, str]:
+    """Validate an explicit accounting window while preserving legacy defaults."""
+    start_default, end_default = calendar_bounds(period_label)
+    start, end = (str(period_start or start_default), str(period_end or end_default))
+    try:
+        start_date = datetime.strptime(start, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError("核算周期必须使用 YYYY-MM-DD。") from exc
+    if start_date > end_date:
+        raise ValueError("核算周期开始日期不能晚于结束日期。")
+    boundary_source = str(source or "").strip() or (
+        "LEGACY_CALENDAR_DEFAULT" if (start, end) == (start_default, end_default) else "USER_CONFIRMED"
+    )
+    return {"period_label": period_label, "period_start": start, "period_end": end,
+            "period_boundary_source": boundary_source}
 
 
 def month_of(value: str) -> str | None:

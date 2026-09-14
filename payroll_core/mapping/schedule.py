@@ -47,6 +47,8 @@ def read_schedule_with_mapping(
     manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
     historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
     course_export_snapshots: Sequence[CourseExportSnapshot] = (),
+    period_start: str | None = None,
+    period_end: str | None = None,
 ) -> AdapterResult[ScheduleRecord]:
     """Parse a schedule sheet using an explicit field-to-column mapping."""
     result: AdapterResult[ScheduleRecord] = AdapterResult()
@@ -98,7 +100,7 @@ def read_schedule_with_mapping(
                 continue
             lesson_time = sheet.cell(row, context_columns["lesson_time"]).value
             lesson_date = date_from_time(lesson_time)
-            if _is_period(period) and lesson_date and not lesson_date.startswith(period):
+            if not _date_in_window(lesson_date, period, period_start, period_end):
                 continue
             class_name = sheet.cell(row, context_columns["class_name"]).value if context_columns.get("class_name") else ""
             course_name = sheet.cell(row, mapping["course_name"]).value if mapping.get("course_name") else class_name
@@ -135,7 +137,7 @@ def read_schedule_with_mapping(
         class_name = text("class_name")
         lesson_time = text("lesson_time")
         lesson_date = date_from_time(lesson_time)
-        if _is_period(period) and lesson_date and not lesson_date.startswith(period):
+        if not _date_in_window(lesson_date, period, period_start, period_end):
             out_of_period += 1
             continue
         subject = subject_from_source(text("subject"))
@@ -201,26 +203,28 @@ def resolve_schedule_import(
     manual_grade_evidence: Sequence[StudentGradeEvidence] = (),
     historical_grade_evidence: Sequence[StudentGradeEvidence] = (),
     course_export_snapshots: Sequence[CourseExportSnapshot] = (),
+    period_start: str | None = None,
+    period_end: str | None = None,
 ) -> tuple[AdapterResult[ScheduleRecord], MappingAnalysis | None]:
     """Try the known adapter; only fall back to semantic mapping when it fails.
 
     ``confirmed`` carries a mapping the user has already approved, in which
     case parsing happens directly and no question is asked again.
     """
-    known = read_schedule_excel(path, period, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots)
+    known = read_schedule_excel(path, period, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots, period_start=period_start, period_end=period_end)
     if known.ok and known.records:
         return known, None
     if confirmed:
         result = read_schedule_with_mapping(
             path, period, mapping=confirmed.get("mapping", {}), requirement=requirement,
-            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0), student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots,
+            sheet_name=str(confirmed.get("sheet", "")), header_row=int(confirmed.get("header_row", 0) or 0), student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots, period_start=period_start, period_end=period_end,
         )
         return result, None
     analysis = analyze_mapping(path, requirement, profiles=profiles)
     if analysis.ready:
         result = read_schedule_with_mapping(
             path, period, mapping=analysis.mapping, requirement=requirement,
-            sheet_name=analysis.sheet, header_row=analysis.header_row, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots,
+            sheet_name=analysis.sheet, header_row=analysis.header_row, student_grades=student_grades, manual_grade_evidence=manual_grade_evidence, historical_grade_evidence=historical_grade_evidence, course_export_snapshots=course_export_snapshots, period_start=period_start, period_end=period_end,
         )
         return result, analysis
     return known, analysis
@@ -249,3 +253,11 @@ def _detect_header_row(sheet, mapping: Mapping[str, int]) -> int:
 
 def _is_period(value: str) -> bool:
     return len(value) == 7 and value[4] == "-" and value[:4].isdigit() and value[5:].isdigit() and 1 <= int(value[5:]) <= 12
+
+
+def _date_in_window(lesson_date: str | None, period: str, start: str | None, end: str | None) -> bool:
+    if not lesson_date:
+        return True
+    if start and end:
+        return start <= lesson_date <= end
+    return not _is_period(period) or lesson_date.startswith(period)
