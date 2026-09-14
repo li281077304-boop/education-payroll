@@ -575,7 +575,7 @@ function coreCalculationSection() {
   const fieldKey = (row, key) => row.fields?.[key] || row.fields?.[key.toLowerCase()] || row[key] || null;
   const rendered = rows.map((row) => `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong></td><td>${coreCalculationCell(fieldKey(row, "AA"))}</td><td>${coreCalculationCell(fieldKey(row, "AC"))}</td><td>${coreCalculationCell(fieldKey(row, "AD"))}</td><td>${coreCalculationCell(fieldKey(row, "AE"))}</td><td>${coreCalculationCell(fieldKey(row, "AF"))}</td><td>${coreCalculationCell(fieldKey(row, "PART_TIME"))}</td></tr>`).join("");
   const versionNote = [current.core_rule_version_id ? `核心规则 ${current.core_rule_version_id}` : "", current.part_time_rate_version_id ? `兼职单价 ${current.part_time_rate_version_id}` : ""].filter(Boolean).join(" · ");
-  return `<section class="card core-calculation-card"><div class="section-head"><div><p class="eyebrow">核心计算结果</p><h2>每位教师的核心字段</h2><p class="muted">状态为“估算”“缺资料”或“不适用”的项目不会冒充全薪通过。${escapeHtml(versionNote)}</p></div></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>兼职按节课时费</th></tr></thead><tbody>${rendered}</tbody></table></div></section>`;
+  return `<section class="card core-calculation-card"><div class="section-head"><div><p class="eyebrow">核心计算结果</p><h2>每位教师的核心字段</h2><p class="muted">状态为“估算”“缺资料”或“不适用”的项目不会冒充全薪通过。${escapeHtml(versionNote)}</p></div></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>兼职按节课时费</th></tr></thead><tbody>${rendered}</tbody></table></div></section>`;
 }
 
 function payrollPreviewField(row, code, fallback = null) {
@@ -605,7 +605,7 @@ function payrollPreviewPage() {
   const exportNote = current.mode === "GENERATE"
     ? "导出会自动选择不冲突的新文件名，绝不覆盖已有工资表。状态为草稿时仍可导出，但文件会保留待确认标记。"
     : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">${escapeHtml(current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">${escapeHtml(current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AK</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
 }
 
 function overviewPage() {
@@ -635,7 +635,11 @@ function issuesPage() {
     ? `<div class="action-summary"><strong>需要完成 ${actions.length} 个核查动作</strong><span class="muted">先处理以下业务动作；教师级问题只在展开动作后显示。</span><div class="action-list">${actionBlocks}</div></div>`
     : '<div class="empty success">当前没有需要人工处理的核算异常。</div>';
   const auditDetails = rows.length ? `<details class="audit-details"><summary>查看审计明细（${rows.length} 个业务问题，${fieldCount} 条字段记录）</summary><p class="small muted">审计明细仅用于追溯，不代表需要逐条人工处理。</p>${issueTable(rows)}</details>` : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${actionSummary}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 项）</div>${auditDetails}<div id="issue-detail"></div></section>`;
+  const afAction = actions.find((action) => action.cause === "compensation_fee_policy");
+  const afPolicyBlock = current.mode === "GENERATE" && afAction && !current.af_policy_confirmation
+    ? `<section class="action-first af-policy-confirmation"><h3>确认本月义务课时政策</h3><p class="muted">普通全职教师默认按 30 小时扣除；如有特殊人员，可在确认后单独设置例外。</p><label>确认人<input id="af-policy-confirmed-by" placeholder="填写姓名"></label><div class="action-bar"><button onclick="confirmAfPolicy()">确认没有特殊情况，全部按30小时扣除</button></div></section>`
+    : "";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${actionSummary}${afPolicyBlock}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 条）</div>${auditDetails}<div id="issue-detail"></div></section>`;
 }
 
 function issueRow(group) {
@@ -648,6 +652,15 @@ function updateFilters() {
   const scroll = window.scrollY;
   renderTab();
   window.scrollTo(0, scroll);
+}
+
+async function confirmAfPolicy() {
+  try {
+    const person = $("#af-policy-confirmed-by")?.value?.trim();
+    if (!person) throw new Error("请填写确认人。");
+    current = await api(`/api/runs/${current.id}/af-policy`, { method: "POST", body: JSON.stringify({ default_obligation_hours: 30, confirmed_by: person, reason: "本月没有义务课时特殊情况。" }) });
+    renderRun(); showMessage("已确认本月普通全职教师按30小时扣除，特殊人员可另设例外。", "success");
+  } catch (error) { showMessage(error.message); }
 }
 
 async function evidence(id) {

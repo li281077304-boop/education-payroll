@@ -109,6 +109,30 @@ def test_user_actions_collapse_repeated_cause_without_discarding_audit_groups():
     assert len(actions) == 2
 
 
+def test_default_af_policy_is_one_run_level_action_for_all_teachers():
+    run = _run()
+    groups = [
+        {
+            "id": f"af-{index}",
+            "root_cause_key": f"{run['id']}:教师{index}:compensation_fee_policy",
+            "teacher": f"教师{index}",
+            "title": "总课时费政策依据需要处理",
+            "affected_fields": ["af_policy"],
+            "severity_rank": 2,
+            "field_records": 1,
+            "group_ids": [],
+        }
+        for index in range(45)
+    ]
+
+    actions = build_user_actions(run, groups)
+
+    assert len(actions) == 1
+    assert actions[0]["cause"] == "compensation_fee_policy"
+    assert actions[0]["teacher_count"] == 45
+    assert actions[0]["title"] == "确认本月义务课时政策 · 45 位普通全职教师"
+
+
 def test_rate_and_af_policy_only_merge_when_both_sides_imply_same_billable_hours():
     matching = _groups(_run())
     assert any(set(group["affected_fields"]) >= {"rate", "af_policy"} for group in matching)

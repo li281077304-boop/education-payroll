@@ -14,7 +14,7 @@ from typing import Any
 
 FIELD_LABELS = {
     "one_to_one": "AA 一对一", "class_value": "AC 班课", "ae": "AE 课时单价",
-    "af": "AF 总课时费", "af_policy": "AF 总课时费", "rating": "教师星级",
+    "af": "AF（总课时费）", "af_policy": "AF（总课时费）", "rating": "教师星级",
     "rate": "AE 课时单价", "formula": "公式完整性", "av": "AV 总工资",
 }
 
@@ -145,10 +145,13 @@ def build_user_actions(run: dict, groups: list[dict]) -> list[dict]:
         members = sorted(members, key=lambda item: (item.get("severity_rank", 9), item.get("teacher", ""), item.get("id", "")))
         teachers = sorted({str(item.get("teacher", "")) for item in members if item.get("teacher")})
         fields = sorted({field for item in members for field in item.get("affected_fields", [])})
+        title = members[0].get("title", "需要处理")
+        if key.rsplit(":", 1)[-1] == "compensation_fee_policy":
+            title = f"确认本月义务课时政策 · {len(teachers)} 位普通全职教师"
         actions.append({
             "id": "action-" + hashlib.sha256(key.encode()).hexdigest()[:16],
             "cause": key.rsplit(":", 1)[-1],
-            "title": members[0].get("title", "需要处理"),
+            "title": title,
             "count": len(members),
             "teacher_count": len(teachers),
             "teachers": teachers,

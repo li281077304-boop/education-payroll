@@ -234,6 +234,14 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.check(run_id))
                 if action == "preview":
                     return self._json(self.server.service.preview_payroll(run_id))
+                if action == "af-policy":
+                    return self._json(self.server.service.confirm_af_policy(
+                        run_id,
+                        str(payload.get("confirmed_by", "")),
+                        default_obligation_hours=payload.get("default_obligation_hours", 30),
+                        exceptions=payload.get("exceptions") or {},
+                        reason=str(payload.get("reason", "")),
+                    ))
                 if action == "period":
                     return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
                 if action == "period-check":

@@ -445,7 +445,10 @@ def _ae_af_for_period(teacher: str, period: str, ad: CalculatedValue, rules: Cor
             raise ValueError("profile obligation_hours must be non-negative")
         if not deduction_enabled:
             obligation = Decimal("0")
-        policy_state, policy_reason, policy_evidence = ValueState.DETERMINED, "使用个人有效期 AF 政策。", (Evidence("PERSONAL_AF_POLICY", str(_get(profile, "source", ""))),)
+        if _get(profile, "run_level_confirmation", False):
+            policy_state, policy_reason, policy_evidence = ValueState.DETERMINED, "使用本次核算已确认的默认义务课时政策。", (Evidence("RUN_LEVEL_AF_POLICY_CONFIRMATION", str(_get(profile, "source", ""))),)
+        else:
+            policy_state, policy_reason, policy_evidence = ValueState.DETERMINED, "使用个人有效期 AF 政策。", (Evidence("PERSONAL_AF_POLICY", str(_get(profile, "source", ""))),)
     elif rules.default_af_policy_candidate is not None:
         obligation = rules.default_af_policy_candidate.obligation_hours
         policy_state, policy_reason, policy_evidence = ValueState.ESTIMATED, "缺个人 AF 政策；使用配置中显式默认候选，仍需确认。", (Evidence("DEFAULT_AF_POLICY_CANDIDATE", rules.default_af_policy_candidate.source, rules.default_af_policy_candidate.label),)

@@ -628,6 +628,10 @@ def test_august_ordinary_class_rollover_matches_accepted_payroll_rule():
         direct_grade="高三",
     )[0] == "高二"
     assert resolve_schedule_grade(
+        "高二小班物理(04-物理)", "", period="2026-08", class_type="小班", course_date="2026-08-17",
+        direct_grade="高二",
+    )[0] == "高一"
+    assert resolve_schedule_grade(
         "九年级小班物理(04-物理)", "", period="2026-08", class_type="小班", course_date="2026-08-17",
         direct_grade="九年级",
     )[0] == "八年级"

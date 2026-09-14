@@ -38,6 +38,32 @@ def test_generate_summary_does_not_count_determined_or_not_applicable_as_manual_
     assert summary["manual_review"] == 0
 
 
+def test_run_level_af_policy_collapses_default_review_and_supports_exceptions(tmp_path):
+    from payroll_core.models.records import ScheduleRecord
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    schedule = [ScheduleRecord("2026-08", "张三", "高一", "数学", "小班", 4, lesson_status="已上课", lesson_date="2026-08-10", class_name="高一小班数学(02-数学)") for _ in range(20)]
+    before = service._configured_calculation(run, schedule, [])
+    assert before["rows"][0]["fields"]["AF"]["state"] == "ESTIMATED"
+
+    confirmed = service.confirm_af_policy(
+        run["id"], "确认人", exceptions={"张三": {"obligation_hours": 0, "reason": "不扣义务课时"}},
+    )
+    assert confirmed["af_policy_confirmation"]["default_obligation_hours"] == 30
+    after = service._configured_calculation(confirmed, schedule, [])
+    assert after["rows"][0]["fields"]["AF"]["state"] == "DETERMINED"
+    assert "RUN_LEVEL_AF_POLICY_CONFIRMATION" in {item["kind"] for item in after["rows"][0]["fields"]["AF"]["evidence"]}
+
+    ten_hour = service.confirm_af_policy(run["id"], "确认人", exceptions={"张三": {"obligation_hours": 10, "reason": "扣除10小时"}})
+    ten_result = service._configured_calculation(ten_hour, schedule, [])
+    # Reducing the deduction from 0 to 10 hours lowers the payable total,
+    # while still exercising an explicit per-teacher exception override.
+    assert ten_result["rows"][0]["fields"]["AF"]["value"] < after["rows"][0]["fields"]["AF"]["value"]
+
+    new_run = service.create("2026-08", mode="GENERATE")
+    assert new_run["af_policy_confirmation"] is None
+
+
 def _star_package_book(path: Path, rows: list[tuple[str, str]]) -> Path:
     book = load_workbook(FIXTURES / "fake_payroll.xlsx")
     sheet = book.active

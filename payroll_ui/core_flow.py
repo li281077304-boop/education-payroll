@@ -30,11 +30,53 @@ class CoreFlow:
         if run.get("mode") == "GENERATE":
             teachers.update(p["teacher"] for p in (policy or {}).get("profiles", []))
         profiles, contexts = [], []
+        af_confirmation = run.get("af_policy_confirmation") or {}
+        af_exceptions = af_confirmation.get("exceptions") or {}
+        af_confirmed = bool(af_confirmation.get("confirmed"))
+        try:
+            af_default_hours = float(af_confirmation.get("default_obligation_hours", 30))
+        except (TypeError, ValueError):
+            af_default_hours = 30.0
+        af_source = str(af_confirmation.get("source") or "本次核算义务课时确认")
+        af_effective_from = str(af_confirmation.get("effective_from") or run["period"])
+        af_effective_to = str(af_confirmation.get("effective_to") or run["period"])
         for teacher in sorted(teachers):
             matching = [p for p in (policy or {}).get("profiles", []) if p["teacher"] == teacher]
             if len(matching) > 1:
                 raise ValueError("个人工资政策同一教师存在重复记录，请先确认权威版本。")
             profile = matching[0] if matching else {}
+            # A confirmed Run-level default supplies the missing full-time
+            # policy without replacing an existing dated personal profile.
+            # Explicit exceptions intentionally override that profile for this
+            # Run only; the immutable policy version remains untouched.
+            exception = af_exceptions.get(teacher)
+            if af_confirmed and exception is not None:
+                profile = {
+                    **profile,
+                    "teacher": teacher,
+                    "role": profile.get("role", "教师"),
+                    "employment_type": profile.get("employment_type", "FULL_TIME"),
+                    "obligation_hours": float(exception.get("obligation_hours", af_default_hours)),
+                    "obligation_hours_deduction_enabled": bool(exception.get("deduction_enabled", True)),
+                    "source": af_source,
+                    "effective_from": af_effective_from,
+                    "effective_to": af_effective_to,
+                    "note": str(exception.get("reason", "")),
+                    "run_level_confirmation": True,
+                }
+            elif af_confirmed and not profile:
+                profile = {
+                    "teacher": teacher,
+                    "role": "教师",
+                    "employment_type": "FULL_TIME",
+                    "obligation_hours": af_default_hours,
+                    "obligation_hours_deduction_enabled": True,
+                    "source": af_source,
+                    "effective_from": af_effective_from,
+                    "effective_to": af_effective_to,
+                    "note": str(af_confirmation.get("reason", "")),
+                    "run_level_confirmation": True,
+                }
             metadata = {k: policy[k] for k in ("effective_from", "effective_to", "source")} if policy else {}
             context = {"teacher": teacher, "employment_type": profile.get("employment_type", "FULL_TIME"), "allow_no_teaching": profile.get("allow_no_teaching", False), **metadata}
             # Management is a teaching-activity context, not a deduction rule.
@@ -42,7 +84,8 @@ class CoreFlow:
                 context["employment_type"] = "MANAGEMENT"
             contexts.append(context)
             if profile:
-                profiles.append({**profile, **metadata, "version": policy["id"], "approved_by": profile.get("approved_by", profile.get("special_approval", "")), "approved_at": profile.get("approved_at", policy.get("created_at", ""))})
+                normalized_profile = {**metadata, **profile}
+                profiles.append({**normalized_profile, "version": policy["id"] if policy else "run-af-policy", "approved_by": profile.get("approved_by", profile.get("special_approval", af_confirmation.get("confirmed_by", ""))), "approved_at": profile.get("approved_at", af_confirmation.get("confirmed_at", policy.get("created_at", "") if policy else ""))})
         ratings = [{**p, "effective_from": rating["effective_from"], "effective_to": rating["effective_to"], "source": rating["source"], "source_version": rating.get("source_version", rating["id"])} for p in (rating or {}).get("ratings", []) if p["teacher"] in teachers]
         rates = [{**p, "grade": p["grade_scope"], "rate_per_lesson": p["rate_per_session"], "effective_from": part_time["effective_from"], "effective_to": part_time["effective_to"], "source": part_time["source"], "version": part_time["id"], "approved_by": part_time["actor"], "approved_at": part_time["created_at"]} for p in (part_time or {}).get("profiles", [])]
         if not rule_version:
@@ -124,7 +167,7 @@ class CoreFlow:
     @staticmethod
     def _core_field_status(result: dict, checks: list) -> list[dict]:
         names = {"AA": "one_to_one", "AC": "class_value", "AD": "teaching_hours", "AE": "rate", "AF": "af_policy", "PART_TIME": "part_time"}
-        labels = {"AA": "AA 一对一折算小时", "AC": "AC 班课折算小时", "AD": "AD 授课小时合计", "AE": "AE 课时单价", "AF": "AF 总课时费", "PART_TIME": "兼职按节课时费"}
+        labels = {"AA": "AA 一对一折算小时", "AC": "AC 班课折算小时", "AD": "AD 授课小时合计", "AE": "AE 课时单价", "AF": "AF（总课时费）", "PART_TIME": "兼职按节课时费"}
         output = []
         for code, field in names.items():
             values = [row["fields"][code] for row in result["rows"] if code in row["fields"]]
@@ -139,7 +182,7 @@ class CoreFlow:
     def _calculation_context(self, run: dict) -> dict | None:
         if run.get("calculation_engine") != "CONFIGURED_V1":
             return None
-        return {"engine": "CONFIGURED_V1", "rules": self._calculation_version(run, "core"), "part_time": self._calculation_version(run, "part_time")}
+        return {"engine": "CONFIGURED_V1", "rules": self._calculation_version(run, "core"), "part_time": self._calculation_version(run, "part_time"), "af_policy_confirmation": run.get("af_policy_confirmation")}
 
     def core_rule_catalog(self) -> dict:
         from payroll_core.config.core_rules import load_core_rules

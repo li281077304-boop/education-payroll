@@ -331,9 +331,12 @@ def resolve_schedule_grade(
 
 
 _AUGUST_ROLLOVER_GRADES = {
-    # The accepted August workbook keeps 高二 as 高二; only the graduating
-    # high-three and lower-school tracks use the prior-grade coefficient.
+    # The accepted August workbook applies the prior-grade coefficient to
+    # ordinary classes whose exported label has already advanced, including
+    # 高二→高一.  Incoming high-one classes remain high one because they are
+    # already in the new school-year track.
     "高三": "高二",
+    "高二": "高一",
     "九年级": "八年级", "八年级": "七年级", "七年级": "六年级",
     "六年级": "五年级", "五年级": "四年级", "四年级": "三年级",
     "三年级": "二年级", "二年级": "一年级",

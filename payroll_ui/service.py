@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import math
 import re
 import uuid
 from dataclasses import asdict, replace
@@ -517,10 +518,54 @@ class PayrollService(CoreFlow):
         policies = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "field_status": self._field_status([]), "summary": self._summary([])}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         self.store.save(run)
         return self.render(run)
+
+    def confirm_af_policy(self, run_id: str, confirmed_by: str, *, default_obligation_hours: float = 30, exceptions: dict | None = None, reason: str = "") -> dict:
+        """Confirm this Run's default obligation-hours policy once.
+
+        The decision is Run-scoped and never mutates the dated compensation
+        policy version.  Personal exceptions override the Run default only for
+        the named teacher; a later Run starts with no confirmation.
+        """
+        run = self._load(run_id)
+        self._require_fresh(run)
+        actor = str(confirmed_by or "").strip()
+        try:
+            default_hours = float(default_obligation_hours)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("默认义务课时必须是非负有限数值。") from exc
+        if not actor or not math.isfinite(default_hours) or default_hours < 0:
+            raise ValueError("请填写确认人和有效的默认义务课时。")
+        cleaned: dict[str, dict] = {}
+        for teacher, item in (exceptions or {}).items():
+            name = str(teacher or "").strip()
+            if not name or not isinstance(item, dict):
+                raise ValueError("义务课时特殊情况格式无效。")
+            try:
+                hours = float(item.get("obligation_hours"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("特殊教师义务课时必须是非负有限数值。") from exc
+            if not math.isfinite(hours) or hours < 0:
+                raise ValueError("特殊教师义务课时必须是非负有限数值。")
+            cleaned[name] = {"obligation_hours": hours, "deduction_enabled": bool(item.get("deduction_enabled", True)), "reason": str(item.get("reason", "")).strip()}
+        timestamp = datetime.now(timezone.utc).isoformat()
+        run["af_policy_confirmation"] = {
+            "default_obligation_hours": default_hours,
+            "confirmed": True,
+            "confirmed_by": actor,
+            "confirmed_at": timestamp,
+            "effective_from": run["period"],
+            "effective_to": run["period"],
+            "source": "本次核算义务课时确认",
+            "reason": str(reason or "普通全职教师按默认义务课时扣除；特殊人员按例外配置。"),
+            "exceptions": cleaned,
+        }
+        invalidate_business_decisions(run.setdefault("business_decisions", []))
+        self.store.save(run)
+        return self.check(run_id) if self._materials_ready(run) else self.render(run)
 
     def list(self) -> list[dict]:
         return [self.render(self._load(item["id"])) for item in self.store.list()]
@@ -1623,6 +1668,7 @@ class PayrollService(CoreFlow):
             "default_compensation_bands": bands,
             "schedule_grade_resolutions": run.get("schedule_grade_resolutions", []),
             "business_input_bindings": run.get("business_input_bindings", []),
+            "af_policy_confirmation": run.get("af_policy_confirmation"),
             **({"calculation_versions": self._calculation_context(run)} if run.get("calculation_engine") == "CONFIGURED_V1" else {}),
         }
 
@@ -2280,7 +2326,7 @@ class PayrollService(CoreFlow):
 
     @staticmethod
     def _field_status(checks: list[FieldCheck]) -> list[dict]:
-        labels = {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "ae": "AE 该档每小时金额", "af": "AF 总课时费", "af_policy": "AF 课时费政策", "av": "AV 总工资", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}
+        labels = {"one_to_one": "AA 一对一折算小时", "class_value": "AC 班课折算小时", "ae": "AE 该档每小时金额", "af": "AF（总课时费）", "af_policy": "AF（总课时费）政策", "av": "AV 总工资", "rating": "教师星级", "rate": "档位金额", "formula": "公式完整性"}
         output = []
         for field in ("one_to_one", "class_value", "rating", "rate", "formula", "af_policy", "ae", "af", "av"):
             rows = [row for row in checks if row.field == field]
