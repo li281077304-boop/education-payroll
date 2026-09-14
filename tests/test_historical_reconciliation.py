@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from payroll_core.models.evidence import CommentRecord
 from payroll_ui.service import PayrollService
 
 
@@ -88,3 +89,38 @@ def test_historical_reconciliation_marks_personal_af_exception(tmp_path):
     service._read_for_run = lambda _role, _path, _run: SimpleNamespace(records=[baseline])
     result = service.historical_reconciliation("run-2")
     assert result["rows"][0]["fields"]["AF"]["difference_category"] == "PERSONAL_EXCEPTION"
+
+
+def test_historical_reconciliation_recovers_named_part_time_rate_from_af_comment(tmp_path):
+    service = PayrollService(tmp_path / "store")
+    baseline = SimpleNamespace(
+        teacher="刘雨", source="july.xlsx", one_to_one=None, class_value=None,
+        teaching_hours=None, ae=None, af=840.0,
+        provenance={"af": SimpleNamespace(raw_value="=140*6")},
+    )
+    current_row = {
+        "teacher": "刘雨",
+        "fields": {
+            "AA": {"value": 0.0}, "AC": {"value": 0.0}, "AD": {"value": 0.0},
+            "AE": {"value": 0.0}, "AF": {"value": 0.0, "evidence": []},
+        },
+    }
+    run = {
+        "id": "run-3", "period": "2026-07", "period_label": "2026-07",
+        "files": {"baseline": {"path": "july.xlsx"}},
+        "core_calculation": {"rows": [current_row], "course_contributions": []},
+    }
+    comment = CommentRecord("july.xlsx", "教学部", "AF32", "刘雨", "af", "macos：高一生物 140/节\n合计840", "macos")
+    service._load = lambda _run_id: run
+    service._require_fresh = lambda _run: None
+    service._read_for_run = lambda _role, _path, _run: SimpleNamespace(records=[baseline], comments=[comment])
+
+    result = service.historical_reconciliation("run-3")
+
+    field = result["rows"][0]["fields"]["AF"]
+    assert result["category_counts"]["MISSING_SOURCE"] == 0
+    assert result["category_counts"]["PART_TIME_RATE"] == 1
+    assert field["difference_category"] == "PART_TIME_RATE"
+    assert field["evidence"][-1]["teacher"] == "刘雨"
+    assert field["evidence"][-1]["period"] == "2026-07"
+    assert field["evidence"][-1]["rate"] == 140.0

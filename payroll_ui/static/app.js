@@ -504,17 +504,20 @@ function historicalReconciliationPage(data) {
     }).join("");
     return `<details class="reconciliation-row"><summary><strong>${escapeHtml(row.teacher)}</strong><span class="status warn">${escapeHtml(row.difference_category)}</span><span class="small muted">${Object.keys(row.fields || {}).length} 个字段差异</span></summary><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>历史值</th><th>当前值</th><th>差异</th><th>证据分类</th></tr></thead><tbody>${fields}</tbody></table></div></details>`;
   }).join("");
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">真实 July Run · ${escapeHtml(data.period_start || "—")} ～ ${escapeHtml(data.period_end || "—")}</p><h2>历史工资对账</h2><p class="muted">仅比较同时存在历史工资字段与当前计算值的教师；历史工资表是 oracle，当前值来自本次 Run 的版本化计算。</p></div><span class="status ${data.unexplained ? "bad" : "ok"}">${data.unexplained ? `${data.unexplained} 个未解释` : "未解释差异：0"}</span></div><div class="metric-grid">${stats}</div><div class="banner ${data.difference_teachers ? "info" : "success"}"><strong>待解释差异：${data.difference_teachers} 人</strong><span>可比教师：${data.teachers_compared} 人；分类均保留原始来源与课程证据。</span></div>${rows || '<div class="empty success">所有可比教师字段一致。</div>'}</section>`;
+  const differenceLabel = data.unexplained ? `待解释差异：${data.difference_teachers} 人` : `已分类差异：${data.difference_teachers} 人`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">真实 July Run · ${escapeHtml(data.period_start || "—")} ～ ${escapeHtml(data.period_end || "—")}</p><h2>历史工资对账</h2><p class="muted">仅比较同时存在历史工资字段与当前计算值的教师；历史工资表是 oracle，当前值来自本次 Run 的版本化计算。</p></div><span class="status ${data.unexplained ? "bad" : "ok"}">${data.unexplained ? `${data.unexplained} 个未解释` : "未解释差异：0"}</span></div><div class="metric-grid">${stats}</div><div class="banner ${data.difference_teachers ? "info" : "success"}"><strong>${differenceLabel}</strong><span>可比教师：${data.teachers_compared} 人；分类均保留原始来源与课程证据。</span></div>${rows || '<div class="empty success">所有可比教师字段一致。</div>'}</section>`;
 }
 
 function historicalEvidenceText(items) {
   const course = (items || []).find((item) => item.course_contributions);
   const base = (items || []).find((item) => item.course_contribution_count || item.historical_formula || item.reason);
+  const policy = (items || []).find((item) => item.source_classification === "PART_TIME_RATE");
   const parts = [];
   if (base?.historical_formula) parts.push(`历史公式：${base.historical_formula}`);
   if (base?.historical_obligation_hours != null || base?.current_obligation_hours != null) parts.push(`义务课时：历史 ${base.historical_obligation_hours ?? "未知"} / 当前 ${base.current_obligation_hours ?? "未知"}`);
   if (course?.course_contribution_count != null) parts.push(`逐课证据 ${course.course_contribution_count} 条`);
   else if (base?.course_contribution_count != null) parts.push(`逐课证据 ${base.course_contribution_count} 条`);
+  if (policy) parts.push(`兼职政策：${policy.rate} 元/节 × ${policy.lesson_count} 节；来源：${policy.source_cell || policy.source || "—"}`);
   return escapeHtml(parts.join("；") || "已保留来源与差异证据");
 }
 

@@ -873,6 +873,10 @@ class PayrollService(CoreFlow):
             raise ValueError("当前记录缺少可用于历史工资对账的基准工资表或核心计算结果。")
         baseline_result = self._read_for_run("baseline", Path(baseline_item["path"]), run)
         historical = {row.teacher: row for row in baseline_result.records if getattr(row, "teacher", "")}
+        historical_comments = {}
+        for comment in getattr(baseline_result, "comments", []) or []:
+            if comment.target in historical:
+                historical_comments.setdefault((comment.target, str(comment.field).upper()), []).append(comment)
         current = {row.get("teacher"): row for row in core.get("rows", []) if row.get("teacher")}
         common = sorted(set(historical) & set(current))
         schedule_result = self._read_for_run("schedule", Path(run["files"]["schedule"]["path"]), run) if run.get("files", {}).get("schedule") else None
@@ -882,7 +886,7 @@ class PayrollService(CoreFlow):
         fields = (("AA", "one_to_one"), ("AC", "class_value"), ("AD", "teaching_hours"), ("AE", "ae"), ("AF", "af"))
         stats = {field: {"matches": 0, "comparable": 0} for field, _ in fields}
         differences = []
-        category_counts = {name: 0 for name in ("INPUT_SCOPE", "MISSING_SOURCE", "COURSE_CONTRIBUTION", "PERSONAL_EXCEPTION", "RULE_DIFFERENCE", "DATA_QUALITY", "UNEXPLAINED")}
+        category_counts = {name: 0 for name in ("INPUT_SCOPE", "MISSING_SOURCE", "PART_TIME_RATE", "COURSE_CONTRIBUTION", "PERSONAL_EXCEPTION", "RULE_DIFFERENCE", "DATA_QUALITY", "UNEXPLAINED")}
         for teacher in common:
             old = historical[teacher]
             new = current[teacher]
@@ -902,6 +906,7 @@ class PayrollService(CoreFlow):
                     continue
                 category, evidence = self._historical_difference_evidence(
                     field, old, new, difference, contributions, by_key, run,
+                    historical_comments.get((teacher, field), []),
                 )
                 category_counts[category] += 1
                 teacher_categories.append(category)
@@ -915,8 +920,17 @@ class PayrollService(CoreFlow):
                     "evidence": evidence,
                 }
             if field_output:
-                primary = next((item for item in ("MISSING_SOURCE", "PERSONAL_EXCEPTION", "COURSE_CONTRIBUTION", "RULE_DIFFERENCE", "DATA_QUALITY", "INPUT_SCOPE", "UNEXPLAINED") if item in teacher_categories), "DATA_QUALITY")
+                primary = next((item for item in ("PART_TIME_RATE", "MISSING_SOURCE", "PERSONAL_EXCEPTION", "COURSE_CONTRIBUTION", "RULE_DIFFERENCE", "DATA_QUALITY", "INPUT_SCOPE", "UNEXPLAINED") if item in teacher_categories), "DATA_QUALITY")
                 differences.append({"teacher": teacher, "fields": field_output, "status": "DIFFERENCE", "difference_category": primary, "evidence": teacher_evidence})
+        source_classifications = {name: [] for name in ("PART_TIME_RATE", "PERSONAL_POLICY", "FIXED_HISTORICAL_VALUE", "MISSING_SOURCE")}
+        for row in differences:
+            for field in row["fields"].values():
+                for item in field.get("evidence", []):
+                    classification = item.get("source_classification")
+                    if classification in source_classifications and row["teacher"] not in source_classifications[classification]:
+                        source_classifications[classification].append(row["teacher"])
+        for teachers in source_classifications.values():
+            teachers.sort()
         return {
             "run_id": run["id"],
             "period_label": run.get("period_label", run.get("period")),
@@ -928,6 +942,7 @@ class PayrollService(CoreFlow):
             "field_stats": stats,
             "difference_teachers": len(differences),
             "category_counts": category_counts,
+            "source_classifications": source_classifications,
             "unexplained": category_counts["UNEXPLAINED"],
             "rows": differences,
         }
@@ -940,7 +955,7 @@ class PayrollService(CoreFlow):
         match = re.search(r"AD\d*\s*[-−]\s*(\d+(?:\.\d+)?)", text)
         return float(match.group(1)) if match else None
 
-    def _historical_difference_evidence(self, field: str, old: object, new: dict, difference: float, contributions: list[dict], by_key: dict, run: dict) -> tuple[str, list[dict]]:
+    def _historical_difference_evidence(self, field: str, old: object, new: dict, difference: float, contributions: list[dict], by_key: dict, run: dict, comments: list[object] | None = None) -> tuple[str, list[dict]]:
         old_provenance = getattr(old, "provenance", {}) or {}
         af_fact = old_provenance.get("af")
         historical_formula = getattr(af_fact, "raw_value", "") if af_fact else ""
@@ -960,6 +975,10 @@ class PayrollService(CoreFlow):
             evidence.append({"course_contributions": course_rows, "course_contribution_count": len(course_rows), "note": "当前 AC/AD 差异由逐课贡献与历史工资表字段对照；历史逐课公式未存入工资表，保留原始 AC 公式作为依据。"})
             return "COURSE_CONTRIBUTION", evidence
         if field == "AF":
+            part_time = self._historical_part_time_policy(old, comments or [], run)
+            if part_time is not None:
+                evidence.append(part_time)
+                return "PART_TIME_RATE", evidence
             historical_obligation = self._historical_obligation(historical_formula)
             current_obligation = None
             for item in current_fact.get("evidence", []):
@@ -975,12 +994,50 @@ class PayrollService(CoreFlow):
                 evidence.append({"historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "reason": "AF 差异由 AD 课程贡献差异传导。"})
                 return "COURSE_CONTRIBUTION", evidence
             if historical_obligation is None:
-                evidence.append({"reason": "历史 AF 公式未引用 AD/AE，无法从工资表恢复义务课时；该教师历史来源缺少可复算字段。", "historical_formula": historical_formula})
+                evidence.append({"source_classification": "MISSING_SOURCE", "reason": "历史 AF 公式未引用 AD/AE，且没有可绑定的兼职/个人政策证据；该教师历史来源缺少可复算字段。", "historical_formula": historical_formula})
                 return "MISSING_SOURCE", evidence
             evidence.append({"historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "historical_formula": historical_formula, "current_formula": current_fact.get("reason", "")})
             return "RULE_DIFFERENCE", evidence
         evidence.append({"reason": "历史字段与当前版本化规则结果不同，保留双方来源供后续规则对账。", "current_reason": current_fact.get("reason", "")})
         return "RULE_DIFFERENCE", evidence
+
+    @staticmethod
+    def _historical_part_time_policy(old: object, comments: list[object], run: dict) -> dict | None:
+        """Extract an explicit historical per-lesson policy from a payroll comment.
+
+        A fixed AF formula alone is not enough to infer employment type.  The
+        July workbook's AF comments explicitly record a per-lesson rate and
+        count; require both that wording and a matching ``rate * count``
+        formula before classifying the source as PART_TIME_RATE.
+        """
+        formula = str(getattr((getattr(old, "provenance", {}) or {}).get("af"), "raw_value", "") or "")
+        factors = re.search(r"=\s*(\d+(?:\.\d+)?)\s*\*\s*(\d+(?:\.\d+)?)", formula)
+        if not factors:
+            return None
+        rate, lessons = float(factors.group(1)), float(factors.group(2))
+        for comment in comments:
+            text = str(getattr(comment, "text", "") or "")
+            rate_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元\s*)?/\s*节", text)
+            if not rate_match or abs(float(rate_match.group(1)) - rate) > 1e-6 or "节" not in text:
+                continue
+            source_file = str(getattr(comment, "source_file", "") or "")
+            source_sheet = str(getattr(comment, "sheet", "") or "")
+            coordinate = str(getattr(comment, "coordinate", "") or "")
+            return {
+                "source_classification": "PART_TIME_RATE",
+                "employment_type": "PART_TIME",
+                "teacher": getattr(old, "teacher", ""),
+                "period": run.get("period_label", run.get("period", "")),
+                "rate": rate,
+                "unit": "CNY_PER_LESSON",
+                "lesson_count": lessons,
+                "formula": formula,
+                "source": source_file,
+                "source_cell": f"{source_sheet}!{coordinate}" if source_sheet or coordinate else source_file,
+                "source_text": text,
+                "author": getattr(comment, "author", None),
+            }
+        return None
 
     def _with_generated_preview(self, checked: dict) -> dict:
         """Attach the canonical final-field preview without writing a file."""
