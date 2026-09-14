@@ -103,7 +103,7 @@ class CoreFlow:
             return {**item, "value": None if item["value"] is None else float(item["value"])}
         names = {"aa": "AA", "ac": "AC", "ad": "AD", "ae": "AE", "af": "AF", "part_time_fee": "PART_TIME"}
         rows = [{"teacher": row["teacher"], "employment_type": row.get("employment_type", "FULL_TIME"), "fields": {code: value(row[key]) for key, code in names.items()}} for row in raw["rows"]]
-        return {"period": run["period"], "rows": rows, "course_contributions": [value(c) for c in raw["course_contributions"]], "rule_versions": {"core": rule_version["id"], "rating": (rating or {}).get("id", ""), "policy": (policy or {}).get("id", ""), "part_time": (part_time or {}).get("id", "")}}
+        return {"period": run["period"], "rows": rows, "course_contributions": [value(c) for c in raw["course_contributions"]], "formula_inputs": raw.get("formula_inputs", {}), "rule_versions": {"core": rule_version["id"], "rating": (rating or {}).get("id", ""), "policy": (policy or {}).get("id", ""), "part_time": (part_time or {}).get("id", "")}}
 
     def _configured_contribution(self, run: dict):
         from payroll_core.calculation import calculate_course

@@ -188,6 +188,28 @@ def test_template_output_keeps_auditable_excel_formulas(tmp_path: Path):
     assert sheet["AV5"].value.startswith("=M5+AF5+AG5+AK5")
 
 
+def test_calculation_derives_template_grade_inputs_from_accepted_one_to_one_courses(tmp_path: Path):
+    """Template AA inputs must be populated from the canonical Core result."""
+    schedule = [
+        ScheduleRecord(
+            period="2026-08", teacher="教师甲", grade="九年级", subject="数学",
+            class_type="1对1", attended=1, lesson_status="已上课", source="脱敏排课.xlsx",
+        )
+        for _ in range(2)
+    ]
+    generated = build_generated_payroll(
+        period="2026-08", schedule_records=schedule, rules=load_core_rules(),
+        ratings=(RatingAuthority("教师甲", 4, "2026-08", "2026-09", "脱敏星级权威", "stars-v1"),),
+        profiles=(CompensationProfile("教师甲", 30, "2026-08", "2026-09", "脱敏个人政策", True),),
+    )
+    assert generated.formula_inputs["one_to_one_counts"]["教师甲"]["九年级"] == 6
+    output = tmp_path / "formula-inputs.xlsx"
+    render_generated_payroll(generated, output, template_path=Path("/Users/macos/Desktop/payroll_read_test/薪资表模板.xlsx"))
+    sheet = load_workbook(output, data_only=False)["Sheet1"]
+    # 九年级 maps to V; two accepted lessons become six count units (2 * 3).
+    assert sheet["V5"].value == 6
+
+
 def test_approved_star_override_is_carried_even_when_zero_tier_needs_no_star_for_rate():
     schedule = [
         ScheduleRecord(

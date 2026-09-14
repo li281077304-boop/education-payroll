@@ -150,6 +150,11 @@ class PayrollResult:
     rule_version_id: str
     rows: tuple[PayrollRow, ...]
     course_contributions: tuple[CourseContribution, ...]
+    # Deterministic inputs for the historical template's grade-count AA
+    # formula.  These are derived from the same accepted one-to-one course
+    # contributions above; they are presentation inputs, not a second
+    # calculation path.
+    formula_inputs: Mapping[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         """Return a JSON-safe structure while preserving Decimal exactness."""
@@ -550,4 +555,27 @@ def calculate_payroll(period: str, schedule: Iterable[object], rules: CoreRules 
         else:
             ae, af = _ae_af_for_period(teacher, period, ad, core, ratings, profiles, references)
         rows.append(PayrollRow(teacher, aa, ac, ad, ae, af, _value(None, ValueState.NOT_APPLICABLE, "非兼职不适用按节兼职费。"), employment_type=employment))
-    return PayrollResult(period, core.rule_version_id, tuple(rows), tuple(all_contributions))
+    # The supplied standard payroll template expresses AA in terms of the
+    # grade-count columns N:Z.  Each accepted one-to-one lesson contributes
+    # three count units (the template divides by 3 before applying its
+    # two-hour lesson factor), so derive those cells from the exact
+    # contribution set rather than leaving them blank/zero.
+    accepted_aa = {
+        item.record_key
+        for item in all_contributions
+        if item.field == "aa" and item.state == ValueState.DETERMINED and item.value is not None
+    }
+    grade_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for record in records:
+        key = course_record_key(record)
+        if key not in accepted_aa:
+            continue
+        grade = str(_get(record, "grade", ""))
+        try:
+            attended = int(_get(record, "attended", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if attended > 0 and grade:
+            grade_counts[str(_get(record, "teacher", ""))][grade] += attended * 3
+    formula_inputs = {"one_to_one_counts": {teacher: dict(counts) for teacher, counts in grade_counts.items()}}
+    return PayrollResult(period, core.rule_version_id, tuple(rows), tuple(all_contributions), formula_inputs)

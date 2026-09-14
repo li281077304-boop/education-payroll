@@ -227,4 +227,4 @@ def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleR
         "source": record.source,
         "provenance": {field: asdict(evidence) if hasattr(evidence, "__dataclass_fields__") else dict(evidence) for field, evidence in record.provenance.items()},
     } for record in records]
-    return generated_from_calculation({"period": period, "rows": rows, "rule_versions": {"core": result.rule_version_id}, "source_records": source_records}, business_inputs=business_inputs, default_zero_missing=default_zero_missing)
+    return generated_from_calculation({"period": period, "rows": rows, "rule_versions": {"core": result.rule_version_id}, "source_records": source_records, "formula_inputs": result.as_dict().get("formula_inputs", {})}, business_inputs=business_inputs, default_zero_missing=default_zero_missing)
