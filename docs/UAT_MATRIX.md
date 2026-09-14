@@ -12,7 +12,7 @@
 | UAT-06 | 核心课时工资 AA/AC/AD/AE/AF | PASS | DATA | AA/AC/AD/AE/AF 51/51 DETERMINED；unexplained=0 | 核心计算链通过 | 真实 Run + 导出复核通过 | NO | NO |
 | UAT-07 | 兼职定价 | NOT_TESTED | SOURCE_GAP | 本期无可核验的 ACTIVE 兼职政策目标 | 不用历史价格自动填充 | 待本期兼职政策来源 | NO | YES |
 | UAT-08 | 续费与 AK | BLOCKED | SOURCE_GAP | August 续费表无 APPROVED/NO_EVENT 标记且无稳定 teacher_id | 不能把历史表直接当生产审核结果 | 待审核结果与身份绑定 | YES | YES |
-| UAT-09 | 退费 AN | NOT_TESTED | SOURCE_GAP | 真实 `宣城二校退费统计表2026年.xls` 可见，但未绑定审核身份 | 需审核/绑定后才可进入工资 | 待审核退费来源 | NO | YES |
+| UAT-09 | 退费 AN | BLOCKED | SOURCE_GAP | 真实 `宣城二校退费统计表2026年.xls` 已按 2026-08 读取 31 行；表内无审核状态字段 | 需审核/绑定后才可进入工资，不能把行金额直接计入 AN | 待审核退费来源 | YES | YES |
 | UAT-10 | 其它 AV 组成项 | BLOCKED | SOURCE_GAP | AG/AL/AM/AO/AP/AQ/AR/AS/AT/AU 无权威来源或规则 | 保留 UNKNOWN/MISSING_SOURCE，不静默计算 | 待来源/规则 | YES | YES |
 | UAT-11 | 待办中心 | PASS | UX | core summary automatic_required=102、manual_review=0、user_actions=0；聚合层保留 | 顶层只呈现真正动作 | 真实 Run 页面复核通过 | NO | NO |
 | UAT-12 | 批注/回填 | PASS_WITH_WARNING | UX | 现有 comment-candidates/writeback API 与回归测试 | 技术链可用；业务批注仍按来源逐条保留 | 测试通过 | NO | 仅具体批注需确认时 |
@@ -26,7 +26,7 @@
 
 - PASS: 8
 - PASS_WITH_WARNING: 4
-- BLOCKED: 3
-- NOT_TESTED: 2
+- BLOCKED: 4
+- NOT_TESTED: 1
 - 技术问题已修复：真实月度续费表按 period/公式缓存导入；历史 Run 导航与恢复入口。
 - 当前仍需业务来源或明确口径：M 的 G～L、审核且可绑定的续费/退费结果、其余 AV 外围字段规则。
