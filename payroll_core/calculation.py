@@ -106,6 +106,13 @@ class PartTimeRateProfile:
     approved_by: str
     approved_at: str
     source: str = ""
+    pricing_mode: str = "FIXED_GRADE_RATE"
+    base_rate: Decimal | str | int | float | None = None
+    fixed_rate: Decimal | str | int | float | None = None
+    teacher_id: str = ""
+    student_id: str = ""
+    class_id: str = ""
+    override_rate: Decimal | str | int | float | None = None
 
 
 @dataclass(frozen=True)
@@ -476,17 +483,93 @@ def _part_time_contributions(records: Iterable[object], teacher: str, period: st
         if status != "已上课":
             result.append(CourseContribution(None, ValueState.NEEDS_INPUT, f"兼职排课上课状态“{status or '空'}”未知，不能静默跳过或计费。", (), key, teacher, "part_time_fee"))
             continue
-        exact = [rate for rate in rates if _get(rate, "teacher") == teacher and _get(rate, "grade") == grade and _applies(rate, period)]
-        matches = exact or [rate for rate in rates if _get(rate, "teacher") == teacher and _get(rate, "grade") == "*" and _applies(rate, period)]
-        if len(matches) != 1:
-            reason = "缺少该兼职教师/年级的每节费率。" if not matches else "命中多条兼职教师/年级每节费率。"
+        # A target override is deliberately keyed by stable IDs only.  The
+        # legacy student/class display strings are not silently promoted to
+        # identity keys.
+        overrides = [rate for rate in rates if _get(rate, "teacher") == teacher and _get(rate, "grade", "*") in {grade, "*"} and _applies(rate, period) and _get(rate, "override_rate") not in (None, "") and ((_get(rate, "student_id") and _get(record, "student_id") == _get(rate, "student_id")) or (_get(rate, "class_id") and _get(record, "class_id") == _get(rate, "class_id")))]
+        if len(overrides) > 1:
+            result.append(CourseContribution(None, ValueState.NEEDS_INPUT, "同一课程命中多个目标覆盖价，不能任意选择。", (), key, teacher, "part_time_fee"))
+            continue
+        exact = [rate for rate in rates if _get(rate, "teacher") == teacher and _get(rate, "grade", "*") == grade and _applies(rate, period)]
+        wildcard = [rate for rate in rates if _get(rate, "teacher") == teacher and _get(rate, "grade", "*") == "*" and _applies(rate, period)]
+        # Prefer a real grade rule over wildcard rules.  If a UI row carries
+        # both a grade rule and one target override, the same row remains a
+        # usable base rule for other students; override-only rows are not
+        # allowed to hide a separate base rule.
+        exact_base = [rate for rate in exact if _get(rate, "override_rate") in (None, "")]
+        wildcard_base = [rate for rate in wildcard if _get(rate, "override_rate") in (None, "")]
+        matches = exact_base or wildcard_base
+        if not matches:
+            matches = exact or wildcard
+        # A matching target override is complete on its own.  Its row may
+        # also carry the grade rule's base/fixed fields, so do not require a
+        # second duplicate base row before accepting the override.
+        if overrides:
+            matches = []
+        else:
+            matches = [rate for rate in matches if _get(rate, "override_rate") in (None, "")]
+            if not matches:
+                # An override row may also be the only persisted expression
+                # of its grade rule.  Reuse its base/fixed value for targets
+                # without an override, while retaining ambiguity checks.
+                matches = [rate for rate in (exact or wildcard) if any(
+                    _get(rate, field) not in (None, "")
+                    for field in ("base_rate", "fixed_rate", "rate_per_lesson", "rate_per_session")
+                )]
+        if len(matches) > 1:
+            policy_priority = {"PERSONAL_POLICY": 0, "PART_TIME_RATE": 1}
+            best = min(policy_priority.get(str(_get(item, "policy_type", "PART_TIME_RATE")), 1) for item in matches)
+            matches = [item for item in matches if policy_priority.get(str(_get(item, "policy_type", "PART_TIME_RATE")), 1) == best]
+        if not overrides and len(matches) != 1:
+            reason = "缺少该兼职教师/年级的每节费率。" if not matches else "命中多条兼职教师/年级定价规则。"
             result.append(CourseContribution(None, ValueState.NEEDS_INPUT, reason, (), key, teacher, "part_time_fee"))
             continue
-        rate = _decimal(_get(matches[0], "rate_per_lesson"), "part-time rate_per_lesson")
-        if rate < 0:
-            raise ValueError("part-time rate_per_lesson must be non-negative")
-        result.append(CourseContribution(rate, ValueState.DETERMINED, "兼职：本条已上课排课记录计一节 × 该教师/年级确认单价。", (Evidence("PART_TIME_RATE", str(_get(matches[0], "source", "")), record_key=key),), key, teacher, "part_time_fee"))
+        selected = overrides[0] if overrides else matches[0]
+        mode = str(_get(selected, "pricing_mode", "FIXED_GRADE_RATE")).strip() or "FIXED_GRADE_RATE"
+        if mode not in {"COEFFICIENT_BASED", "FIXED_GRADE_RATE"}:
+            raise ValueError("unsupported part-time pricing_mode")
+        if overrides:
+            final_rate = _decimal(_get(selected, "override_rate"), "target override_rate")
+            coefficient = Decimal("1")
+            reason = "兼职：使用目标覆盖价，优先于教师×年级规则。"
+            evidence_kind = "PART_TIME_TARGET_OVERRIDE"
+        elif mode == "COEFFICIENT_BASED":
+            base = _decimal(_get(selected, "base_rate", _get(selected, "rate_per_lesson")), "part-time base_rate")
+            coefficient = _part_time_class_coefficient(record, rules)
+            if coefficient is None:
+                result.append(CourseContribution(None, ValueState.NEEDS_INPUT, "当前班型/实到人数没有已确认的 Core 系数，不能计算兼职单价。", (), key, teacher, "part_time_fee"))
+                continue
+            final_rate = base * coefficient
+            reason = "兼职：教师×年级基础价 × 现有 Core 班型/人数系数。"
+            evidence_kind = "PART_TIME_COEFFICIENT_RULE"
+        else:
+            final_rate = _decimal(_get(selected, "fixed_rate", _get(selected, "rate_per_lesson")), "part-time fixed_rate")
+            coefficient = Decimal("1")
+            reason = "兼职：教师×年级统一固定价，不受班型/人数系数影响。"
+            evidence_kind = "PART_TIME_FIXED_GRADE_RATE"
+        if final_rate < 0:
+            raise ValueError("part-time rate must be non-negative")
+        evidence = Evidence(evidence_kind, str(_get(selected, "source", "")), record_key=key, detail=reason, formula="override_rate" if overrides else ("base_rate × existing_class_coefficient" if mode == "COEFFICIENT_BASED" else "fixed_rate"), inputs={"pricing_mode": mode, "base_rate": str(_get(selected, "base_rate", "")), "fixed_rate": str(_get(selected, "fixed_rate", _get(selected, "rate_per_lesson", ""))), "override_rate": str(_get(selected, "override_rate", "")), "coefficient": str(coefficient), "final_rate": str(final_rate), "lesson_count": "1", "student_id": str(_get(record, "student_id", "")), "class_id": str(_get(record, "class_id", ""))})
+        result.append(CourseContribution(final_rate, ValueState.DETERMINED, reason, (evidence,), key, teacher, "part_time_fee"))
     return result
+
+
+def _part_time_class_coefficient(record: object, rules: CoreRules) -> Decimal | None:
+    """Reuse the Core class/headcount coefficient table for pricing."""
+    class_type = str(_get(record, "class_type", "")).strip()
+    try:
+        attended = int(_get(record, "attended"))
+    except (TypeError, ValueError):
+        return None
+    if class_type in {"1对1", "一对一", "1v1", "1V1"}:
+        return Decimal("1")
+    rule = rules.course_rule(class_type) if hasattr(rules, "course_rule") else None
+    if rule is not None:
+        multiplier = rule.multiplier_for(attended)
+        return None if multiplier is None else Decimal(str(multiplier))
+    from .models.class_type_rules import ORDINARY_SMALL_GROUP_HEADCOUNT_COEFFICIENTS
+    value = ORDINARY_SMALL_GROUP_HEADCOUNT_COEFFICIENTS.get(attended)
+    return None if value is None else Decimal(str(value))
 
 
 def calculate_payroll(period: str, schedule: Iterable[object], rules: CoreRules | Mapping[str, Any], ratings: Iterable[object] = (), profiles: Iterable[object] = (), reference_ratings: Mapping[str, object] | None = None, teacher_contexts: Iterable[object] = (), part_time_rates: Iterable[object] = (), effective_ac: Mapping[str, object] | None = None) -> PayrollResult:

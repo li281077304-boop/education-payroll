@@ -24,7 +24,7 @@ from .schedule import read_schedule_excel
 from ..reconcile.payroll_scope import star_from_level
 from ..source_registry import SourceRecord, SourceRegistry, SourceStatus, classify_source, file_hash
 from ..adapters.assessment import read_assessment_report
-from ..adapters.personnel import IdentityConflict, default_part_time_records, identity_conflicts, read_personnel
+from ..adapters.personnel import IdentityConflict, identity_conflicts, read_personnel
 from ..adapters.refund import read_refund_report
 from ..adapters.renewal_report import read_renewal_report
 from ..adapters.star import read_star_report
@@ -450,33 +450,16 @@ def discover_payroll_package(root: str | Path, period: str, *, period_start: str
         star_path = package.payroll_paths[0]
         star_digest = _file_hash(star_path)
         registry.register("STAR", period, star_path, sheet="教学部", status=SourceStatus.NEEDS_CONFIRMATION, digest=star_digest, source_evidence={"records": len(package.reference_ratings), "authority": "UPLOAD_REFERENCE_NEEDS_VERIFICATION", "physical_file_key": star_digest, "parse_count": 1, "parsed_once": True})
-    # The fixed part-time prices are a versioned, source-backed business rule
-    # even when the local material package does not contain a separate
-    # personnel workbook.  Only materialize names that actually occur in this
-    # period's schedule; do not invent a personnel roster or merge 刘宇/刘雨.
-    explicit_personnel_names = {item.get("teacher", "") for item in package.personnel_records}
-    default_records = [
-        item.as_dict()
-        for item in default_part_time_records(period, source="内置兼职固定单价规则")
-        if item.teacher in schedule_teacher_names and item.teacher not in explicit_personnel_names
-    ]
-    if default_records:
-        package.personnel_records.extend(default_records)
-        builtin_hash = sha256("内置兼职固定单价规则/v1".encode("utf-8")).hexdigest()
-        registry.add(SourceRecord(
-            source_type="PERSONNEL", period=period,
-            file_name="内置兼职固定单价规则", file_hash=builtin_hash,
-            sheet="PERSONNEL_RULES", status=SourceStatus.RECOGNIZED,
-            source_evidence={
-                "rule": "effective_dated_fixed_rate_per_lesson",
-                "records": default_records,
-                "parse_count": 1, "parsed_once": True,
-            },
-        ))
+    # Historical adapter defaults are suggestions only.  They must never be
+    # silently materialized as an ACTIVE production policy for a new Run;
+    # production rates require an explicit, source-backed personnel import or
+    # a saved versioned policy selected by the user.
     # Identity must be checked against the schedule as well as an uploaded
     # personnel table: both names can appear in payroll material without
     # proving they are the same person.
-    all_personnel_names = explicit_personnel_names | {item.get("teacher", "") for item in default_records}
+    explicit_personnel_names = {item.get("teacher", "") for item in package.personnel_records}
+    default_records: list[dict[str, Any]] = []
+    all_personnel_names = explicit_personnel_names
     package.identity_conflicts = [
         item.as_dict()
         for item in identity_conflicts(all_personnel_names | schedule_teacher_names)

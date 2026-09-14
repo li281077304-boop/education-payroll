@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import io
 import math
@@ -301,7 +302,7 @@ class PayrollService(CoreFlow):
         personnel_profiles = [
             {
                 "teacher": item["teacher"], "grade_scope": "*",
-                "rate_per_session": item["fixed_rate"],
+                "pricing_mode": "FIXED_GRADE_RATE", "fixed_rate": item["fixed_rate"], "rate_per_session": item["fixed_rate"],
                 "notes": f"人员资料生效 {item.get('effective_from', run['period'])}～{item.get('effective_to', run['period'])}",
             }
             for item in package.personnel_records
@@ -309,23 +310,38 @@ class PayrollService(CoreFlow):
             and item.get("fixed_rate") is not None
             and item.get("teacher") not in conflicted_names
         ]
+        # Keep employment identity even when a personnel row has no rate yet;
+        # Core can then fail closed with NEEDS_INPUT instead of treating the
+        # teacher as full-time and silently omitting the missing price.
+        run["personnel_contexts"] = [
+            {"teacher": item["teacher"], "employment_type": item["employment_type"],
+             "effective_from": item["effective_from"], "effective_to": item["effective_to"],
+             "source": item["source_file"]}
+            for item in package.personnel_records if item.get("teacher") not in conflicted_names
+        ]
         if personnel_profiles:
             source = "资料包人员资料（只读提取）"
             existing_part_time = next((item for item in self.part_time_rate_versions()
                                        if item.get("source") == source
                                        and item.get("effective_from") == run["period"]
                                        and item.get("effective_to") == run["period"]
-                                       and item.get("profiles") == personnel_profiles), None)
+                                       and all(
+                                           any(
+                                               stored.get("teacher") == expected.get("teacher")
+                                               and stored.get("grade_scope", "*") == expected.get("grade_scope", "*")
+                                               and float(stored.get("fixed_rate", stored.get("rate_per_session"))) == float(expected.get("fixed_rate", expected.get("rate_per_session")))
+                                               for stored in (item.get("profiles") or [])
+                                           ) for expected in personnel_profiles
+                                       )), None)
             if existing_part_time is None:
                 versions = self.save_part_time_rate_version(personnel_profiles, source, run["period"], run["period"], "系统识别")
                 existing_part_time = next(item for item in versions if item.get("source") == source and item.get("effective_from") == run["period"] and item.get("effective_to") == run["period"])
             run["part_time_rate_version_id"] = existing_part_time["id"]
-            run["personnel_contexts"] = [
-                {"teacher": item["teacher"], "employment_type": item["employment_type"],
-                 "effective_from": item["effective_from"], "effective_to": item["effective_to"],
-                 "source": item["source_file"]}
-                for item in package.personnel_records if item.get("teacher") not in conflicted_names
-            ]
+            # Package discovery may bind a source-backed policy after the Run
+            # was created.  Freeze it before the first calculation; subsequent
+            # policy edits cannot alter this snapshot.
+            if run.get("status") == "DRAFT":
+                run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
 
         if package.schedule_path is None:
             raise ValueError("资料包中没有可识别的排课表。")
@@ -522,6 +538,7 @@ class PayrollService(CoreFlow):
         window = normalize_period_window(period, period_start, period_end, period_boundary_source)
         run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
+        run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
         self.store.save(run)
         return self.render(run)
 
@@ -605,6 +622,77 @@ class PayrollService(CoreFlow):
     def policy_versions(self) -> list[dict]:
         return self._version_views("policy")
 
+    def payroll_policy_registry(self, run_id: str = "", period: str = "") -> dict:
+        """Return one auditable registry view over all compensation policies.
+
+        Registry rows are projections, not a second calculation engine.  A
+        supplied Run is the preferred scope and exposes its frozen snapshot;
+        otherwise only currently stored dated policy versions are shown.
+        """
+        run = self._load(run_id) if run_id else None
+        target_period = period or (run or {}).get("period", "")
+        if target_period and not valid_period(target_period):
+            raise ValueError("工资月份格式无效。")
+        rows: list[dict] = []
+        snapshot = (run or {}).get("run_policy_snapshot")
+        if snapshot and snapshot.get("sha256") != self._policy_snapshot_hash(snapshot):
+            raise ValueError("Run 政策快照校验失败，不能继续核算。")
+
+        default = (snapshot or {}).get("default_full_time")
+        if default is None:
+            core = self._calculation_version(run, "core") if run else None
+            candidate = (core or {}).get("rules", {}).get("af", {}).get("default_policy_candidate") or {}
+            default = {"policy_type": "DEFAULT_FULL_TIME", "obligation_hours": float(candidate.get("obligation_hours", 30) or 30), "unit": "HOURS", "source": (core or {}).get("source", "Core AF 默认政策"), "source_hash": (core or {}).get("sha256", ""), "status": "ACTIVE"}
+        rows.append({"policy_type": "DEFAULT_FULL_TIME", "teacher_id": "*", "display_name": "普通全职教师", "rate": None, "unit": "HOURS", "obligation_hours": default.get("obligation_hours", 30), "effective_from": target_period or "—", "effective_to": target_period or "—", "source": default.get("source", "Core AF 默认政策"), "source_hash": default.get("source_hash", ""), "provenance": {"kind": "CORE_RULE"}, "status": "ACTIVE"})
+
+        if snapshot:
+            personal_versions = [{"id": snapshot.get("policy_version_id"), "effective_from": target_period, "effective_to": target_period, "source": "RUN_POLICY_SNAPSHOT", "source_hash": "", "status": "ACTIVE", "profiles": snapshot.get("personal_policies") or []}]
+            rate_versions = [{"id": snapshot.get("part_time_rate_version_id"), "effective_from": target_period, "effective_to": target_period, "source": "RUN_POLICY_SNAPSHOT", "source_hash": "", "status": "ACTIVE", "profiles": snapshot.get("part_time_rates") or [], "actor": "RUN_POLICY_SNAPSHOT", "created_at": snapshot.get("created_at", "")}]
+        else:
+            personal_versions = self.store.list_policy_versions()
+            rate_versions = self.store.calculation_versions("part_time")
+
+        for version in personal_versions:
+            effective = bool(target_period) and version.get("effective_from", "") <= target_period <= version.get("effective_to", "") and version.get("status", "ACTIVE") == "ACTIVE"
+            status = "ACTIVE" if effective else ("EXPIRED" if target_period and version.get("effective_to", "") < target_period else version.get("status", "EXPIRED"))
+            for profile in version.get("profiles") or []:
+                rows.append({"policy_type": profile.get("policy_type", "PERSONAL_POLICY"), "teacher_id": profile.get("teacher_id") or "", "display_name": profile.get("teacher", ""), "rate": None, "unit": "HOURS", "obligation_hours": profile.get("obligation_hours"), "effective_from": version.get("effective_from", ""), "effective_to": version.get("effective_to", ""), "source": version.get("source", ""), "source_hash": version.get("source_hash", ""), "provenance": {"version_id": version.get("id"), "role": profile.get("role", "")}, "status": status})
+
+        for version in rate_versions:
+            effective = bool(target_period) and version.get("effective_from", "") <= target_period <= version.get("effective_to", "") and version.get("status", "ACTIVE") == "ACTIVE"
+            status = "ACTIVE" if effective else ("EXPIRED" if target_period and version.get("effective_to", "") < target_period else version.get("status", "EXPIRED"))
+            for profile in version.get("profiles") or []:
+                rows.append({"policy_type": "PART_TIME_RATE", "teacher_id": profile.get("teacher_id") or "", "display_name": profile.get("teacher", ""), "rate": profile.get("rate_per_session"), "unit": profile.get("unit", "CNY_PER_LESSON"), "obligation_hours": None, "effective_from": version.get("effective_from", ""), "effective_to": version.get("effective_to", ""), "source": version.get("source", ""), "source_hash": version.get("source_hash", ""), "provenance": {"version_id": version.get("id"), "grade_scope": profile.get("grade_scope", "*"), "actor": version.get("actor", "")}, "status": status})
+
+        # Historical July rates are deliberately a separate projection.  They
+        # are visible for audit and never enter a future Run snapshot.
+        if run and target_period == "2026-07":
+            try:
+                reconciliation = self.historical_reconciliation(run["id"])
+            except (ValueError, OSError):
+                reconciliation = {}
+            for teacher in (reconciliation.get("source_classifications") or {}).get("PART_TIME_RATE", []):
+                detail = next((item for item in reconciliation.get("rows", []) if item.get("teacher") == teacher), {})
+                rate = None
+                source = "2026-07 历史工资表（仅证据）"
+                for field in (detail.get("fields") or {}).values():
+                    for evidence in field.get("evidence") or []:
+                        if evidence.get("source_classification") == "PART_TIME_RATE":
+                            rate = evidence.get("rate")
+                            source = evidence.get("source_cell") or source
+                rows.append({"policy_type": "PART_TIME_RATE", "teacher_id": "", "display_name": teacher, "rate": rate, "unit": "CNY_PER_LESSON", "obligation_hours": None, "effective_from": "2026-07", "effective_to": "2026-07", "source": source, "source_hash": "", "provenance": {"kind": "HISTORICAL_EVIDENCE", "run_id": run["id"]}, "status": "HISTORICAL_ONLY"})
+
+        # Same display name with multiple identities must never silently bind.
+        by_name: dict[str, set[str]] = {}
+        for row in rows:
+            if row["display_name"]:
+                by_name.setdefault(row["display_name"], set()).add(row.get("teacher_id", ""))
+        for row in rows:
+            ids = {item for item in by_name.get(row["display_name"], set()) if item}
+            if len(ids) > 1 and not row.get("teacher_id"):
+                row["status"] = "NEEDS_CONFIRMATION"
+        return {"version": "PAYROLL_POLICY_REGISTRY/v1", "period": target_period or None, "run_id": run_id or None, "priority": ["PERSONAL_POLICY", "PART_TIME_RATE", "DEFAULT_FULL_TIME"], "rows": rows}
+
     def save_policy_version(self, effective_from: str, effective_to: str, source: str, profiles: list[dict], supersedes_version_id: str | None = None, source_hash: str = "") -> list[dict]:
         from math import isfinite
         from .core_flow import valid_period
@@ -630,7 +718,7 @@ class PayrollService(CoreFlow):
             employment = item.get("employment_type", "FULL_TIME")
             if employment not in {"FULL_TIME", "PART_TIME"} or not isinstance(item.get("allow_no_teaching", False), bool):
                 raise ValueError("请明确选择全职/兼职及是否允许当月无课。")
-            cleaned.append({"teacher": teacher, "role": role, "rating": item.get("rating"), "rating_override": item.get("rating_override"), "special_approval": str(item.get("special_approval", "")).strip(), "obligation_hours": float(item.get("obligation_hours", 0)), "obligation_hours_deduction_enabled": bool(item.get("obligation_hours_deduction_enabled", False)), "note": str(item.get("note", "")).strip()})
+            cleaned.append({"teacher": teacher, "teacher_id": str(item.get("teacher_id", "")).strip(), "role": role, "policy_type": str(item.get("policy_type", "PERSONAL_POLICY")), "rating": item.get("rating"), "rating_override": item.get("rating_override"), "special_approval": str(item.get("special_approval", "")).strip(), "obligation_hours": float(item.get("obligation_hours", 0)), "obligation_hours_deduction_enabled": bool(item.get("obligation_hours_deduction_enabled", False)), "pricing_mode": item.get("pricing_mode"), "base_rate": item.get("base_rate"), "fixed_rate": item.get("fixed_rate"), "override_rate": item.get("override_rate"), "student_id": str(item.get("student_id", "")).strip(), "class_id": str(item.get("class_id", "")).strip(), "note": str(item.get("note", "")).strip()})
             cleaned[-1].update(employment_type=employment, allow_no_teaching=item.get("allow_no_teaching", False))
         if supersedes_version_id:
             prior = self.store.get_policy_version(supersedes_version_id)
@@ -1449,6 +1537,11 @@ class PayrollService(CoreFlow):
                 checks = [c for c in recalculated if c.field != "class_value"] + ac_checks
             run["core_calculation"] = core_result
             run["calculation_context"] = self._calculation_context(run)
+            if core_result.get("course_contributions"):
+                # The lesson-level snapshot is produced from the exact
+                # calculation result, so later registry edits cannot change
+                # an already calculated Run's effective prices.
+                run.setdefault("run_part_time_pricing_snapshot", self._build_part_time_pricing_snapshot(run, scoped_schedule, core_result))
         is_generate = run.get("mode", MODE_AUDIT) == MODE_GENERATE
         if not is_generate:
             # These checks describe reconciliation against an existing payroll
@@ -1659,6 +1752,18 @@ class PayrollService(CoreFlow):
         return output
 
     def _policy_version_for_run(self, run: dict) -> dict | None:
+        snapshot = run.get("run_policy_snapshot")
+        if snapshot:
+            if snapshot.get("sha256") != self._policy_snapshot_hash(snapshot):
+                raise ValueError("Run 政策快照校验失败，不得继续核算。")
+            if not snapshot.get("personal_policies"):
+                return None
+            return {
+                "id": snapshot.get("policy_version_id") or "RUN_POLICY_SNAPSHOT",
+                "effective_from": run["period"], "effective_to": run["period"],
+                "source": "RUN_POLICY_SNAPSHOT", "source_hash": snapshot.get("sha256", ""),
+                "profiles": copy.deepcopy(snapshot.get("personal_policies") or []),
+            }
         version_id = run.get("policy_version_id")
         if version_id:
             return self.store.get_policy_version(version_id)

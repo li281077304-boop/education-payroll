@@ -130,6 +130,9 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.core_rule_catalog())
             if parsed.path == "/api/part-time-rates":
                 return self._json(self.server.service.part_time_rate_versions())
+            if parsed.path == "/api/payroll-policy-registry":
+                query = parse_qs(parsed.query)
+                return self._json(self.server.service.payroll_policy_registry(query.get("run_id", [""])[0], query.get("period", [""])[0]))
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/export.csv"):
                 run_id = parsed.path.split("/")[3]
                 body = self.server.service.export_csv(run_id).encode("utf-8-sig")

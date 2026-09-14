@@ -21,6 +21,10 @@ class ScheduleRecord:
     class_name: str = ""
     course_name: str = ""
     duration_text: str = ""
+    # Optional stable target identities used by policy overrides.  Legacy
+    # imports leave these empty; display names are never treated as IDs.
+    student_id: str = ""
+    class_id: str = ""
     # Direct values, explicit confirmations and historical inference must stay
     # distinguishable: an inferred grade is never presented as a source cell.
     grade_origin: str = ""

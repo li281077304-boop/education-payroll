@@ -18,6 +18,70 @@ def valid_period(value: str) -> bool:
 
 
 class CoreFlow:
+    @staticmethod
+    def _policy_snapshot_hash(snapshot: dict) -> str:
+        payload = {key: value for key, value in snapshot.items() if key != "sha256"}
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    def _build_run_policy_snapshot(self, run: dict) -> dict:
+        """Freeze the effective compensation policies at Run creation.
+
+        The calculation engines remain the authority for payroll arithmetic;
+        this snapshot only freezes which dated policy records they receive.
+        Older Runs without this field deliberately retain their legacy
+        version-id lookup behaviour.
+        """
+        period = run["period"]
+        default_hours = 30.0
+        core = self._calculation_version(run, "core")
+        if core:
+            candidate = (core.get("rules") or {}).get("af", {}).get("default_policy_candidate") or {}
+            try:
+                if candidate.get("obligation_hours") is not None:
+                    default_hours = float(candidate["obligation_hours"])
+            except (TypeError, ValueError):
+                default_hours = 30.0
+        personal = self._policy_version_for_run_legacy(run)
+        personal_profiles = []
+        if personal and personal.get("effective_from", period) <= period <= personal.get("effective_to", period):
+            personal_profiles = copy.deepcopy(personal.get("profiles") or [])
+        part_time = self._calculation_version_legacy(run, "part_time")
+        part_profiles = []
+        if part_time and part_time.get("effective_from", period) <= period <= part_time.get("effective_to", period):
+            part_profiles = copy.deepcopy(part_time.get("profiles") or [])
+        snapshot = {
+            "version": "RUN_POLICY_SNAPSHOT/v1",
+            "run_id": run["id"],
+            "period": period,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "default_full_time": {
+                "policy_type": "DEFAULT_FULL_TIME",
+                "obligation_hours": default_hours,
+                "unit": "HOURS",
+                "source": (core or {}).get("source", "Core AF 默认政策候选"),
+                "source_hash": (core or {}).get("sha256", ""),
+                "status": "ACTIVE",
+            },
+            "personal_policies": personal_profiles,
+            "part_time_rates": part_profiles,
+            "policy_version_id": run.get("policy_version_id"),
+            "part_time_rate_version_id": run.get("part_time_rate_version_id"),
+            "core_rule_version_id": run.get("core_rule_version_id"),
+        }
+        snapshot["sha256"] = self._policy_snapshot_hash(snapshot)
+        return snapshot
+
+    def _policy_version_for_run_legacy(self, run: dict) -> dict | None:
+        version_id = run.get("policy_version_id")
+        return self.store.get_policy_version(version_id) if version_id else None
+
+    def _calculation_version_legacy(self, run: dict, kind: str) -> dict | None:
+        key = {"core": "core_rule_version_id", "part_time": "part_time_rate_version_id"}[kind]
+        bound = run.get(key)
+        if not bound:
+            return None
+        return next((item for item in self.store.calculation_versions(kind) if item["id"] == bound), None)
+
     def _configured_calculation(self, run: dict, schedule: list, payroll: list, effective_ac: dict | None = None) -> dict:
         from payroll_core.calculation import calculate_payroll
         from payroll_core.config.core_rules import CoreRules
@@ -40,11 +104,50 @@ class CoreFlow:
         af_source = str(af_confirmation.get("source") or "本次核算义务课时确认")
         af_effective_from = str(af_confirmation.get("effective_from") or run["period"])
         af_effective_to = str(af_confirmation.get("effective_to") or run["period"])
+        # A dated PART_TIME_RATE version is itself an explicit employment
+        # signal when no separate personal policy record exists.  Keep the
+        # existing policy/profile path authoritative when present, but do not
+        # silently treat a teacher with an approved per-lesson policy as a
+        # full-time teacher (which would skip the part-time calculation).
+        part_time_profiles = (part_time or {}).get("profiles", [])
+        personnel_contexts = {
+            str(item.get("teacher", "")): item
+            for item in (run.get("personnel_contexts") or [])
+            if item.get("teacher")
+        }
         for teacher in sorted(teachers):
             matching = [p for p in (policy or {}).get("profiles", []) if p["teacher"] == teacher]
             if len(matching) > 1:
                 raise ValueError("个人工资政策同一教师存在重复记录，请先确认权威版本。")
             profile = matching[0] if matching else {}
+            rate_matches = [p for p in part_time_profiles if p.get("teacher") == teacher]
+            if not profile and rate_matches:
+                profile = {
+                    "teacher": teacher,
+                    "role": "教师",
+                    "employment_type": "PART_TIME",
+                    "allow_no_teaching": False,
+                    "source": part_time.get("source", "兼职定价政策"),
+                    "effective_from": part_time.get("effective_from", run["period"]),
+                    "effective_to": part_time.get("effective_to", run["period"]),
+                    "policy_type": "PART_TIME_RATE",
+                }
+            elif not profile and personnel_contexts.get(teacher, {}).get("employment_type") == "PART_TIME":
+                # A personnel source can establish the employment type even
+                # when its rate is missing.  Keep the teacher on the
+                # PART_TIME path so Core reports NEEDS_INPUT rather than
+                # silently calculating a full-time salary.
+                source_context = personnel_contexts[teacher]
+                profile = {
+                    "teacher": teacher,
+                    "role": "教师",
+                    "employment_type": "PART_TIME",
+                    "allow_no_teaching": False,
+                    "source": source_context.get("source", "人员资料"),
+                    "effective_from": source_context.get("effective_from", run["period"]),
+                    "effective_to": source_context.get("effective_to", run["period"]),
+                    "policy_type": "PART_TIME_RATE",
+                }
             # A confirmed Run-level default supplies the missing full-time
             # policy without replacing an existing dated personal profile.
             # Explicit exceptions intentionally override that profile for this
@@ -87,7 +190,12 @@ class CoreFlow:
                 normalized_profile = {**metadata, **profile}
                 profiles.append({**normalized_profile, "version": policy["id"] if policy else "run-af-policy", "approved_by": profile.get("approved_by", profile.get("special_approval", af_confirmation.get("confirmed_by", ""))), "approved_at": profile.get("approved_at", af_confirmation.get("confirmed_at", policy.get("created_at", "") if policy else ""))})
         ratings = [{**p, "effective_from": rating["effective_from"], "effective_to": rating["effective_to"], "source": rating["source"], "source_version": rating.get("source_version", rating["id"])} for p in (rating or {}).get("ratings", []) if p["teacher"] in teachers]
-        rates = [{**p, "grade": p["grade_scope"], "rate_per_lesson": p["rate_per_session"], "effective_from": part_time["effective_from"], "effective_to": part_time["effective_to"], "source": part_time["source"], "version": part_time["id"], "approved_by": part_time["actor"], "approved_at": part_time["created_at"]} for p in (part_time or {}).get("profiles", [])]
+        rates = [{**p, "grade": p.get("grade_scope", p.get("grade", "*")), "rate_per_lesson": p.get("rate_per_session", p.get("fixed_rate", p.get("base_rate"))), "effective_from": part_time["effective_from"], "effective_to": part_time["effective_to"], "source": part_time["source"], "version": part_time["id"], "approved_by": part_time.get("actor", ""), "approved_at": part_time.get("created_at", "")} for p in (part_time or {}).get("profiles", [])]
+        # An explicit personal pricing policy outranks the shared
+        # teacher×grade rate while preserving the same Core calculation path.
+        for profile in (policy or {}).get("profiles", []):
+            if profile.get("employment_type") == "PART_TIME" and (profile.get("fixed_rate") is not None or profile.get("base_rate") is not None or profile.get("override_rate") is not None):
+                rates.append({**profile, "grade": profile.get("grade_scope", "*"), "rate_per_lesson": profile.get("fixed_rate", profile.get("base_rate")), "effective_from": policy["effective_from"], "effective_to": policy["effective_to"], "source": policy["source"], "version": policy["id"], "approved_by": profile.get("special_approval", ""), "approved_at": policy.get("created_at", "")})
         if not rule_version:
             reason = "当前月份没有唯一绑定的核心规则版本，请到基础资料选择生效版本。"
             return {"period": run["period"], "rows": [{"teacher": t, "fields": {f: {"value": None, "state": "NEEDS_INPUT", "reason": reason, "evidence": []} for f in ("AA", "AC", "AD", "AE", "AF", "PART_TIME")}} for t in sorted(teachers)], "course_contributions": [], "rule_versions": {}}
@@ -184,6 +292,36 @@ class CoreFlow:
             return None
         return {"engine": "CONFIGURED_V1", "rules": self._calculation_version(run, "core"), "part_time": self._calculation_version(run, "part_time"), "af_policy_confirmation": run.get("af_policy_confirmation")}
 
+    def _build_part_time_pricing_snapshot(self, run: dict, schedule: list, calculation: dict) -> dict:
+        """Freeze lesson-level pricing inputs after a Run has been calculated."""
+        version = self._calculation_version(run, "part_time")
+        contributions = {item.get("record_key"): item for item in calculation.get("course_contributions", []) if item.get("field") == "part_time_fee"}
+        entries = []
+        rules_version = self._calculation_version(run, "core")
+        if not rules_version:
+            return {"version": "RUN_PART_TIME_PRICING_SNAPSHOT/v1", "run_id": run["id"], "period": run["period"], "entries": []}
+        from payroll_core.calculation import course_record_key
+        def number(value):
+            return None if value in (None, "", "None") else float(value)
+        for record in schedule:
+            contribution = contributions.get(course_record_key(record))
+            if contribution is None:
+                continue
+            evidence = (contribution.get("evidence") or [{}])[0]
+            inputs = evidence.get("inputs") or {}
+            entries.append({
+                "record_key": course_record_key(record), "teacher": record.teacher,
+                "grade": record.grade, "student_id": getattr(record, "student_id", ""), "class_id": getattr(record, "class_id", ""),
+                "pricing_mode": inputs.get("pricing_mode", "FIXED_GRADE_RATE"),
+                "base_rate": number(inputs.get("base_rate")),
+                "fixed_rate": number(inputs.get("fixed_rate")),
+                "coefficient": float(inputs.get("coefficient", "1")),
+                "target_override": number(inputs.get("override_rate")),
+                "final_rate": contribution.get("value"), "lesson_count": 1, "amount": contribution.get("value"),
+                "source": evidence.get("source", ""),
+            })
+        return {"version": "RUN_PART_TIME_PRICING_SNAPSHOT/v1", "run_id": run["id"], "period": run["period"], "pricing_version_id": version.get("id") if version else None, "entries": entries, "created_at": datetime.now(timezone.utc).isoformat()}
+
     def core_rule_catalog(self) -> dict:
         from payroll_core.config.core_rules import load_core_rules
         seed = load_core_rules().to_dict()
@@ -225,19 +363,42 @@ class CoreFlow:
         for profile in profiles:
             teacher = str(profile.get("teacher", "")).strip()
             grade = str(profile.get("grade_scope", "*")).strip()
+            mode = str(profile.get("pricing_mode", "FIXED_GRADE_RATE")).strip() or "FIXED_GRADE_RATE"
+            if mode not in {"COEFFICIENT_BASED", "FIXED_GRADE_RATE"}:
+                raise ValueError("兼职定价方式只能是 COEFFICIENT_BASED 或 FIXED_GRADE_RATE。")
+            raw_rate = profile.get("base_rate") if mode == "COEFFICIENT_BASED" else (profile.get("fixed_rate") if profile.get("fixed_rate") is not None else profile.get("rate_per_session"))
             try:
-                rate = float(profile["rate_per_session"])
+                rate = float(raw_rate)
             except (KeyError, ValueError, TypeError) as exc:
                 raise ValueError("请填写有效的每节单价。") from exc
-            if not teacher or not grade or not math.isfinite(rate) or rate < 0 or (teacher, grade) in seen:
-                raise ValueError("教师、年级范围或单价无效，不能重复配置同一范围。")
-            seen.add((teacher, grade))
-            cleaned.append({"teacher": teacher, "grade_scope": grade, "rate_per_session": rate, "notes": str(profile.get("notes", ""))})
-        item = {"id": uuid.uuid4().hex[:16], "profiles": cleaned, "source": source.strip(), "effective_from": effective_from, "effective_to": effective_to, "actor": actor.strip(), "created_at": datetime.now(timezone.utc).isoformat()}
+            teacher_id = str(profile.get("teacher_id", "")).strip()
+            target_id = str(profile.get("student_id", "")).strip() or str(profile.get("class_id", "")).strip()
+            if not teacher or not grade or not math.isfinite(rate) or rate < 0 or (teacher_id, teacher, grade, target_id) in seen:
+                raise ValueError("教师、身份、年级范围或单价无效，不能重复配置同一范围。")
+            seen.add((teacher_id, teacher, grade, target_id))
+            cleaned.append({"teacher": teacher, "teacher_id": teacher_id, "grade_scope": grade, "pricing_mode": mode, "base_rate": rate if mode == "COEFFICIENT_BASED" else None, "fixed_rate": rate if mode == "FIXED_GRADE_RATE" else None, "rate_per_session": rate, "student_id": str(profile.get("student_id", "")).strip(), "class_id": str(profile.get("class_id", "")).strip(), "override_rate": profile.get("override_rate"), "unit": "CNY_PER_LESSON", "policy_type": "PART_TIME_RATE", "provenance": profile.get("provenance") or {}, "notes": str(profile.get("notes", ""))})
+        item = {"id": uuid.uuid4().hex[:16], "profiles": cleaned, "source": source.strip(), "source_hash": hashlib.sha256(json.dumps(cleaned, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(), "effective_from": effective_from, "effective_to": effective_to, "actor": actor.strip(), "created_at": datetime.now(timezone.utc).isoformat(), "status": "ACTIVE"}
         self.store.append_calculation_version("part_time", item)
         return self.part_time_rate_versions()
 
     def _calculation_version(self, run: dict, kind: str) -> dict | None:
+        snapshot = run.get("run_policy_snapshot")
+        if snapshot and snapshot.get("sha256") == self._policy_snapshot_hash(snapshot):
+            if kind == "part_time":
+                if not snapshot.get("part_time_rate_version_id"):
+                    return None
+                return {
+                    "id": snapshot["part_time_rate_version_id"],
+                    "profiles": copy.deepcopy(snapshot.get("part_time_rates") or []),
+                    "effective_from": run["period"], "effective_to": run["period"],
+                    "source": "RUN_POLICY_SNAPSHOT",
+                    "actor": "RUN_POLICY_SNAPSHOT",
+                    "created_at": snapshot.get("created_at", ""),
+                }
+            if kind == "core" and snapshot.get("core_rule_version_id"):
+                # Core rules remain resolved from the immutable calculation
+                # version table; the snapshot only binds its identity.
+                pass
         key = {"core": "core_rule_version_id", "part_time": "part_time_rate_version_id"}[kind]
         bound = run.get(key)
         if not bound:
