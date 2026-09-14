@@ -8,6 +8,7 @@ from payroll_core.calculation import calculate_payroll
 from payroll_core.config.core_rules import load_core_rules
 from payroll_core.models.records import ScheduleRecord
 from payroll_core.adapters.renewal_report import read_renewal_report
+from payroll_core.adapters.business_results import read_business_result
 from payroll_core.adapters.weekly_report import read_weekly_report
 from payroll_core.excel.package import discover_payroll_package
 from payroll_core.data_center import discover_payroll_package as discover_from_public_facade
@@ -145,6 +146,40 @@ def test_personnel_keeps_effective_rates_and_identity_conflict(tmp_path):
     assert {item.teacher: item.fixed_rate for item in result.records} == {"刘宇": 140, "刘雨": 140, "张祥": 160}
     assert identity_conflicts(item.teacher for item in result.records)[0].names == ("刘宇", "刘雨")
     assert DEFAULT_PART_TIME_RATES["胡涛"] == 170
+
+
+def test_business_result_period_selects_grouped_month_sheet_and_subtotals(tmp_path):
+    path = tmp_path / "renewals.xlsx"
+    book = openpyxl.Workbook()
+    july = book.active
+    july.title = "7月"
+    header = [None] * 30
+    header[:3] = ["序号", "学科组", "教师"]
+    header[3] = "1V1课时"; header[9] = "班课"; header[25] = "小班领航伴学课次"; header[29] = "总计"
+    july.append(header)
+    sub = [None] * 30
+    for i, value in enumerate([1, 2, 3, 4, 5], start=3): sub[i] = value
+    sub[8] = "合计"
+    for i, value in enumerate(range(1, 16), start=9): sub[i] = value
+    sub[24] = "合计"
+    for i, value in enumerate([1, 2, 3], start=25): sub[i] = value
+    sub[28] = "合计"
+    july.append(sub)
+    row = [None] * 30
+    row[:3] = [1, "组", "七月教师"]; row[3] = 1; row[8] = 1; row[9] = 2; row[24] = 2; row[28] = 0; row[29] = 4
+    july.append(row)
+    august = book.create_sheet("8月")
+    august.append([cell.value for cell in july[1]])
+    august.append([cell.value for cell in july[2]])
+    row = [None] * 30
+    row[:3] = [1, "组", "八月教师"]; row[3] = 3; row[8] = 3; row[9] = 4; row[24] = 4; row[28] = 0; row[29] = 9
+    august.append(row)
+    book.save(path)
+    records = read_business_result(path, period="2026-08")
+    assert [item.teacher_id for item in records] == ["八月教师"]
+    assert records[0].payload["1V1合计"] == 3
+    assert records[0].payload["班课合计"] == 4
+    assert records[0].payload["小班领航合计"] == 0
 
 
 def test_personnel_csv_is_read_only_and_keeps_effective_dates(tmp_path):

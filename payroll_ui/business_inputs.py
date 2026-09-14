@@ -114,15 +114,15 @@ class BusinessInputService:
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise ValueError("找不到要导入的最终结果表。")
+        resolved_period = self._period(period)
         before = file_version(source)
-        records = read_business_result(source)
+        records = read_business_result(source, period=resolved_period)
         try:
             after = file_version(source)
         except OSError as exc:
             raise ValueError("结果表在读取期间不可访问，请重试。") from exc
         if before != after:
             raise ValueError("结果表在读取期间发生变化，未保存任何导入记录。")
-        resolved_period = self._period(period)
         batch_id = uuid.uuid4().hex[:12]
         if activation_scope not in {"SUPPLEMENT", "REPLACE_SELECTED"}:
             raise ValueError("请选择补充导入或明确替代已选版本。")

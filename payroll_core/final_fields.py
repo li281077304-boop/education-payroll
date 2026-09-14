@@ -76,9 +76,9 @@ FIELD_NOTES: dict[str, str] = {
 }
 
 RENEWAL_ALIASES: dict[str, tuple[str, ...]] = {
-    "AH": ("AH", "one_to_one_hours", "1V1合计", "一对一合计", "续费一对一", "续费1V1", "续费一对一课时", "一对一课时"),
-    "AI": ("AI", "class_hours", "班课合计", "续费班课", "续费班课课时", "续费班课课次"),
-    "AJ": ("AJ", "mentor_hours", "小班领航合计", "领航合计", "领航续费", "领航续费课时", "领航课时"),
+    "AH": ("AH", "one_to_one_hours", "1V1合计", "一对一合计", "1V1课时", "续费一对一", "续费1V1", "续费一对一课时", "一对一课时"),
+    "AI": ("AI", "class_hours", "班课合计", "班课", "续费班课", "续费班课课时", "续费班课课次"),
+    "AJ": ("AJ", "mentor_hours", "小班领航合计", "小班领航伴学课次", "领航合计", "领航续费", "领航续费课时", "领航课时"),
 }
 
 NO_EVENT_ALIASES: tuple[str, ...] = (

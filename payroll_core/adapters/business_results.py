@@ -35,8 +35,9 @@ def _header_map(headers: list[str]) -> dict[str, str]:
 
 
 def _row_payload(row: dict[str, Any], mapping: dict[str, str]) -> tuple[str, dict[str, Any]]:
-    teacher = str(row.get(mapping["teacher"], "")).strip() if mapping["teacher"] else ""
-    if not teacher:
+    raw_teacher = row.get(mapping["teacher"]) if mapping["teacher"] else None
+    teacher = str(raw_teacher).strip() if raw_teacher is not None else ""
+    if not teacher or teacher.lower() in {"none", "nan"}:
         raise ValueError("结果表缺少可识别的教师列或教师值。")
     payload = {str(key): value for key, value in row.items() if key is not None and value not in (None, "")}
     payload["teacher"] = teacher
@@ -48,7 +49,7 @@ def _row_payload(row: dict[str, Any], mapping: dict[str, str]) -> tuple[str, dic
     return teacher, payload
 
 
-def read_business_result(path: str | Path) -> list[ImportedBusinessResult]:
+def read_business_result(path: str | Path, *, period: str | None = None) -> list[ImportedBusinessResult]:
     """Read a CSV or simple Excel final-result table with row-level provenance.
 
     The importer preserves all supplied columns in payload. It only identifies
@@ -73,18 +74,50 @@ def read_business_result(path: str | Path) -> list[ImportedBusinessResult]:
     if suffix not in {".xlsx", ".xlsm"}:
         raise ValueError("目前只支持 CSV、.xlsx 或 .xlsm 的最终结果表。")
     workbook = load_workbook(source, data_only=False, read_only=True, keep_links=True)
+    cached_workbook = load_workbook(source, data_only=True, read_only=True, keep_links=True)
     records: list[ImportedBusinessResult] = []
-    for sheet in workbook.worksheets:
+    sheets = list(workbook.worksheets)
+    cached_sheets = {sheet.title: sheet for sheet in cached_workbook.worksheets}
+    if period and len(period) == 7 and period[4] == "-":
+        month = str(int(period[5:]))
+        candidates = {f"{month}月", f"{int(month):02d}月", period}
+        selected = [sheet for sheet in sheets if sheet.title.strip() in candidates]
+        if selected:
+            sheets = selected
+    for sheet in sheets:
         values = list(sheet.iter_rows(values_only=True))
         if not values:
             continue
+        cached_values = list(cached_sheets.get(sheet.title, sheet).iter_rows(values_only=True))
         headers = [str(value).strip() if value is not None else "" for value in values[0]]
+        # The production renewal workbook uses grouped two-row headers.  Give
+        # the three subtotal columns stable semantic names without changing
+        # the generic one-row importer contract.
+        if len(values) > 1 and headers[:3] == ["序号", "学科组", "教师"]:
+            group_headers = list(headers)
+            second = values[1]
+            for index, name in ((8, "1V1合计"), (24, "班课合计"), (28, "小班领航合计"), (29, "总计")):
+                if index < len(group_headers) and not group_headers[index] and index < len(second) and second[index] == "合计":
+                    group_headers[index] = name
+            headers = group_headers
         mapping = _header_map(headers)
         if not mapping["teacher"]:
             continue
         for row_number, values_row in enumerate(values[1:], start=2):
+            cached_row = cached_values[row_number - 1] if row_number - 1 < len(cached_values) else ()
+            # Final-result workbooks commonly store the monthly totals as
+            # formulas.  Keep formula provenance in the workbook itself, but
+            # use Excel's cached result for production numeric fields.
+            values_row = tuple(
+                cached_row[index] if index < len(cached_row) and isinstance(value, str) and value.startswith("=") and cached_row[index] is not None else value
+                for index, value in enumerate(values_row)
+            )
             row = {headers[index]: value for index, value in enumerate(values_row) if index < len(headers) and headers[index]}
             if not any(value not in (None, "") for value in row.values()):
+                continue
+            # Grouped worksheets often end with a totals row.  It is not a
+            # teacher result and must not become a synthetic "None" row.
+            if mapping["teacher"] and row.get(mapping["teacher"]) in (None, ""):
                 continue
             teacher, payload = _row_payload(row, mapping)
             records.append(ImportedBusinessResult(str(payload.get("teacher_id") or teacher), str(row_number), payload, {"source_file": source.name, "sheet": sheet.title, "row": str(row_number), "headers": headers, "display_name": teacher}))
