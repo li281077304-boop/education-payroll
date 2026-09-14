@@ -68,6 +68,25 @@ SCOPE_ROLES = ("math", "science")
 MODE_AUDIT = "AUDIT"
 MODE_GENERATE = "GENERATE"
 
+# Field-check states are deliberately classified by meaning rather than by
+# subtracting an ever-growing list from ``manual_review``.  In particular,
+# GENERATE mode uses DETERMINED/NOT_APPLICABLE for facts that are complete even
+# though they do not compare against a pre-existing payroll workbook.
+COMPLETE_STATUSES = frozenset({
+    "MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH",
+    "READ_ONLY", "EXPLAINED_DIFFERENCE", "DETERMINED", "NOT_APPLICABLE",
+})
+MANUAL_REVIEW_STATUSES = frozenset({
+    "UNEXPLAINED_DIFFERENCE", "RATING_MISMATCH", "RATE_MISMATCH",
+    "AF_POLICY_MISMATCH", "FORMULA_MISSING", "FORMULA_DIFFERENCE",
+    "FORMULA_PATTERN_MISMATCH", "FORMULA_REGION_BREAK",
+    "FORMULA_REPLACED_BY_VALUE", "ROW_REFERENCE_SHIFT", "MISSING_SOURCE",
+    "MISSING_TARGET", "MISSING_PAYROLL_VALUE", "NEEDS_MANUAL_REVIEW",
+    "NEEDS_INPUT", "NEEDS_CONFIRMATION", "NEEDS_RECONFIRMATION",
+    "CONFLICT_NEEDS_CONFIRMATION", "GRADE_UNRESOLVED", "RULE_NOT_FOUND",
+    "MULTIPLE_RULES_MATCHED", "MISSING_AUTHORITY", "NOT_PROVIDED",
+})
+
 
 def _day_before(day: str) -> str:
     from datetime import date, timedelta
@@ -2246,7 +2265,7 @@ class PayrollService(CoreFlow):
     @staticmethod
     def _summary(checks: list[FieldCheck]) -> dict:
         automatic = [row for row in checks if row.field in {"one_to_one", "class_value"}]
-        completed = [row for row in automatic if row.status in {"MATCH", "EXPLAINED_DIFFERENCE"}]
+        completed = [row for row in automatic if row.status in COMPLETE_STATUSES]
         field_states = PayrollService._field_status(checks)
         return {
             "automatic_required": len(automatic),
@@ -2254,7 +2273,7 @@ class PayrollService(CoreFlow):
             "automatic_coverage": round(100 * len(completed) / len(automatic)) if automatic else 0,
             "automatic_pass": bool(automatic) and len(completed) == len(automatic),
             "unexplained": sum(row.status == "UNEXPLAINED_DIFFERENCE" for row in checks),
-            "manual_review": sum(row.status not in {"MATCH", "FORMULA_MATCH", "RATE_MATCH", "AF_POLICY_MATCH", "READ_ONLY", "EXPLAINED_DIFFERENCE"} for row in checks),
+            "manual_review": sum(row.status in MANUAL_REVIEW_STATUSES for row in checks),
             "full_scope_complete": bool(field_states) and all(row["state"].startswith("已核对") for row in field_states),
             "scope_note": "AA、AC 已接入独立排课源；AE、AF、AV 尚无完整独立权威源，不能判定整份工资核对通过。",
         }

@@ -11,9 +11,31 @@ from payroll_ui.server import PayrollHttpServer
 from payroll_ui.service import PayrollService
 from payroll_ui.core_flow import CoreFlow
 from payroll_core.models.records import PayrollRecord
+from payroll_core.reconcile.payroll_scope import FieldCheck
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "excel"
+
+
+def test_generate_summary_does_not_count_determined_or_not_applicable_as_manual_review():
+    checks = [
+        FieldCheck(f"教师{i:02d}", field, None, None, status, "已确定")
+        for i in range(51)
+        for field, status in (
+            ("one_to_one", "DETERMINED"),
+            ("class_value", "DETERMINED"),
+            ("rating", "DETERMINED"),
+            ("rate", "DETERMINED"),
+            ("af_policy", "NOT_APPLICABLE"),
+            ("formula", "NOT_APPLICABLE"),
+        )
+    ]
+
+    summary = PayrollService._summary(checks)
+
+    assert summary["automatic_required"] == 102
+    assert summary["automatic_completed"] == 102
+    assert summary["manual_review"] == 0
 
 
 def _star_package_book(path: Path, rows: list[tuple[str, str]]) -> Path:
