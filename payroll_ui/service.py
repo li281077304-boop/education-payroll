@@ -12,6 +12,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from openpyxl import load_workbook
+
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.excel.package import discover_payroll_package
 from payroll_core.period import coverage_for, dominant_month, month_from_filename, normalize_period_window
@@ -125,6 +127,31 @@ ISSUE_LABELS = {
 }
 ACTION_LABELS = {"special": "已确认特殊情况", "payroll_error": "工资表待修改", "defer": "暂时保留", "confirm_source": "来源待核实"}
 
+# This is a read-only projection of the existing final-payroll contract.  It
+# deliberately names every component in the historical template and records
+# whether the current repository has a source adapter/rule for it.  It is not
+# a second calculation engine; the values and statuses below are only joined
+# with the current Run's durable final_fields evidence by av_source_map().
+AV_SOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "AF": {"business_name": "总课时费", "relationship": "MAX(0, (AD - 义务课时) × AE)", "source": "Core 排课计算 + Run 级义务课时政策", "source_type": "CORE_CALCULATION", "category": "DONE", "authoritative_source": "core_calculation / af_policy_confirmation", "can_auto_calculate": True, "needs_manual_input": False, "needs_business_rule": False},
+    "AG": {"business_name": "领航伴学课时费", "relationship": "模板列，当前没有已定义计算关系", "source": "未发现明确业务来源或规则", "source_type": "UNKNOWN", "category": "RULE_NOT_DEFINED", "authoritative_source": "NO EVIDENCE", "can_auto_calculate": False, "needs_manual_input": False, "needs_business_rule": True},
+    "AH": {"business_name": "续费一对一课时", "relationship": "取已审核 RENEWAL_RESULT 的 one_to_one_hours", "source": "已审核续费最终结果", "source_type": "RENEWAL_RESULT", "category": "SOURCE_MISSING", "authoritative_source": "approved business input bound to Run", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AI": {"business_name": "续费班课课时", "relationship": "取已审核 RENEWAL_RESULT 的 class_hours", "source": "已审核续费最终结果", "source_type": "RENEWAL_RESULT", "category": "SOURCE_MISSING", "authoritative_source": "approved business input bound to Run", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AJ": {"business_name": "领航续费课时", "relationship": "取已审核 RENEWAL_RESULT 的 mentor_hours", "source": "已审核续费最终结果", "source_type": "RENEWAL_RESULT", "category": "SOURCE_MISSING", "authoritative_source": "approved business input bound to Run", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AK": {"business_name": "推荐续费奖", "relationship": "AH × 1 + AI × 1.5 + AJ × 0.75", "source": "AH/AI/AJ 的已审核续费结果", "source_type": "RENEWAL_RESULT", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved renewal result + existing AK adapter", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AL": {"business_name": "进步率奖金", "relationship": "模板列，当前没有已定义计算关系", "source": "未发现明确业务来源或规则", "source_type": "UNKNOWN", "category": "RULE_NOT_DEFINED", "authoritative_source": "NO EVIDENCE", "can_auto_calculate": False, "needs_manual_input": False, "needs_business_rule": True},
+    "AM": {"business_name": "管理团队奖", "relationship": "模板列；管理考核与金额规则尚未统一", "source": "管理岗位考核资料存在入口，但没有 AM 金额权威规则", "source_type": "ASSESSMENT", "category": "RULE_NOT_DEFINED", "authoritative_source": "management assessment source + explicit amount rule required", "can_auto_calculate": False, "needs_manual_input": True, "needs_business_rule": True},
+    "AN": {"business_name": "退费/拒收学员", "relationship": "汇总已审核退费结果的人头金额与业绩金额", "source": "已审核退费最终结果", "source_type": "REFUND_RESULT", "category": "SOURCE_MISSING", "authoritative_source": "approved refund result bound to Run", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AO": {"business_name": "房租", "relationship": "模板列，需明确指向 AO 的已审核金额", "source": "OTHER 业务输入（target_field=AO）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AP": {"business_name": "社保", "relationship": "模板列，需明确指向 AP 的已审核金额", "source": "OTHER 业务输入（target_field=AP）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AQ": {"business_name": "工装费", "relationship": "模板列，需明确指向 AQ 的已审核金额", "source": "OTHER 业务输入（target_field=AQ）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AR": {"business_name": "内部推荐奖金", "relationship": "模板列，需明确指向 AR 的已审核金额", "source": "OTHER 业务输入（target_field=AR）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AS": {"business_name": "月度激励", "relationship": "模板列，需明确标注 AS 的已审核金额", "source": "OTHER 业务输入（target_field=AS）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input with effective period", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AT": {"business_name": "补发工资", "relationship": "模板列，需明确指向 AT 的已审核金额", "source": "OTHER 业务输入（target_field=AT）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AU": {"business_name": "考勤罚款", "relationship": "模板列，需明确指向 AU 的已审核金额", "source": "OTHER 业务输入（target_field=AU）适配器", "source_type": "OTHER", "category": "SOURCE_AVAILABLE_NOT_CONNECTED", "authoritative_source": "approved explicit-field business input", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+    "AV": {"business_name": "总工资", "relationship": "M + AF + AG + AK + AL + AN + AO + AP + AQ + AR + AS + AT + AU + AM", "source": "模板公式汇总已确定的最终工资组成项", "source_type": "DERIVED", "category": "MANUAL_INPUT_REQUIRED", "authoritative_source": "template AV formula + all bound component sources", "can_auto_calculate": True, "needs_manual_input": True, "needs_business_rule": False},
+}
+
 
 def version(path: Path) -> dict[str, Any]:
     digest = hashlib.sha256()
@@ -133,6 +160,43 @@ def version(path: Path) -> dict[str, Any]:
             digest.update(block)
     stat = path.stat()
     return {"sha256": digest.hexdigest(), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _template_av_evidence(path: str | Path | None) -> dict[str, Any]:
+    """Read AV-column evidence from the actual workbook without mutating it."""
+    if not path:
+        return {"path": None, "exists": False, "formula": None, "field_formulas": {}, "historical_evidence": "NO TEMPLATE BOUND"}
+    template = Path(path)
+    if not template.is_file():
+        return {"path": str(template), "exists": False, "formula": None, "field_formulas": {}, "historical_evidence": "TEMPLATE NOT FOUND"}
+    try:
+        book = load_workbook(template, data_only=False, read_only=False, keep_links=True)
+        sheet = book.worksheets[0]
+        columns: dict[str, int] = {}
+        aliases = {
+            "AF": ("总课时费",), "AG": ("领航伴学课时费",), "AH": ("1对1课时",),
+            "AI": ("班课&1对2领航伴课次",), "AJ": ("小班领航伴学课次",), "AK": ("推荐续费奖",),
+            "AL": ("进步率奖金",), "AM": ("管理团队奖",), "AN": ("退费/拒收学员",),
+            "AO": ("房租",), "AP": ("社保",), "AQ": ("工装费",), "AR": ("内部推荐奖金",),
+            "AS": ("月度激励",), "AT": ("补发工资",), "AU": ("考勤罚款",), "AV": ("总工资数",),
+        }
+        for column in range(1, sheet.max_column + 1):
+            values = {str(sheet.cell(row, column).value or "").replace("\n", "").strip() for row in (3, 4)}
+            for code, labels in aliases.items():
+                if code not in columns and values.intersection(labels):
+                    columns[code] = column
+        formulas: dict[str, str | None] = {}
+        for code, column in columns.items():
+            value = sheet.cell(5, column).value if sheet.max_row >= 5 else None
+            formulas[code] = value if isinstance(value, str) and value.startswith("=") else None
+        formula = formulas.get("AV")
+        return {
+            "path": str(template), "exists": True, "sha256": version(template)["sha256"],
+            "formula": formula, "field_formulas": formulas,
+            "historical_evidence": f"真实工资模板 {template.name}；原始列位与公式按 data_only=False 读取。",
+        }
+    except Exception as exc:  # pragma: no cover - defensive read-only projection
+        return {"path": str(template), "exists": True, "formula": None, "field_formulas": {}, "historical_evidence": f"模板读取失败：{exc}"}
 
 
 def safe_csv(value: Any) -> Any:
@@ -692,6 +756,55 @@ class PayrollService(CoreFlow):
             if len(ids) > 1 and not row.get("teacher_id"):
                 row["status"] = "NEEDS_CONFIRMATION"
         return {"version": "PAYROLL_POLICY_REGISTRY/v1", "period": target_period or None, "run_id": run_id or None, "priority": ["PERSONAL_POLICY", "PART_TIME_RATE", "DEFAULT_FULL_TIME"], "rows": rows}
+
+    def av_source_map(self, run_id: str = "") -> dict[str, Any]:
+        """Return a read-only AV source map backed by the current Run/template.
+
+        The map is intentionally an evidence projection.  It does not create
+        business inputs, alter a Run, or calculate any payroll value.
+        """
+        run = self._load(run_id) if run_id else None
+        template = _template_av_evidence((run or {}).get("template_path"))
+        generated_rows = ((run or {}).get("generated_payroll") or {}).get("rows") or []
+        core_rows = (run or {}).get("core_calculation", {}).get("rows") or []
+        rows = generated_rows or core_rows
+        statuses: dict[str, set[str]] = {code: set() for code in AV_SOURCE_DEFINITIONS}
+        for row in rows:
+            final = row.get("final_fields") or {}
+            core = row.get("fields") or {}
+            for code in statuses:
+                item = final.get(code) or core.get(code) or {}
+                statuses[code].add(str(item.get("state", "NO_EVIDENCE")))
+
+        fields: list[dict[str, Any]] = []
+        for code, definition in AV_SOURCE_DEFINITIONS.items():
+            item = copy.deepcopy(definition)
+            state_set = statuses.get(code) or set()
+            if not state_set:
+                item["current_system_status"] = "NO_EVIDENCE"
+            elif len(state_set) == 1:
+                item["current_system_status"] = next(iter(state_set))
+            else:
+                item["current_system_status"] = "MIXED: " + ", ".join(sorted(state_set))
+            item["historical_evidence"] = template.get("historical_evidence", "NO EVIDENCE")
+            if code in template.get("field_formulas", {}):
+                item["template_formula"] = template["field_formulas"].get(code)
+            fields.append({"column": code, **item})
+
+        component_codes = ("AF", "AG", "AK", "AL", "AM", "AN", "AO", "AP", "AQ", "AR", "AS", "AT", "AU")
+        payable = {"DETERMINED", "NOT_APPLICABLE", "ESTIMATED"}
+        complete_count = sum(1 for code in component_codes if statuses.get(code) and statuses[code] <= payable)
+        denominator = len(component_codes)
+        return {
+            "version": "AV_SOURCE_MAP/v1",
+            "run_id": run_id or None,
+            "period": (run or {}).get("period_label") or (run or {}).get("period"),
+            "template": template,
+            "av_formula": template.get("formula") or AV_SOURCE_DEFINITIONS["AV"]["relationship"],
+            "components": list(component_codes),
+            "full_payroll_completeness": {"complete": complete_count, "total": denominator, "label": f"{complete_count} / {denominator}"},
+            "fields": fields,
+        }
 
     def save_policy_version(self, effective_from: str, effective_to: str, source: str, profiles: list[dict], supersedes_version_id: str | None = None, source_hash: str = "") -> list[dict]:
         from math import isfinite

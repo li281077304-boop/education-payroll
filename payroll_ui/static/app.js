@@ -131,7 +131,8 @@ function statusBadge(run) {
 }
 
 function shell(content, historyButton = true) {
-  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="businessInputsPage()">业务填报</button>${current ? '<button class="quiet" onclick="writebackPage()">批注回填</button>' : ""}<button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button><button class="quiet" onclick="assessmentsPage()">岗位考核</button><a class="quiet" href="/teacher">教师填报</a></div></header>${content}</div>`;
+  const mapRunId = current ? escapeHtml(current.id) : "";
+  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="avSourceMapPage('${mapRunId}')">总工资来源地图</button><button class="quiet" onclick="businessInputsPage()">业务填报</button>${current ? '<button class="quiet" onclick="writebackPage()">批注回填</button>' : ""}<button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button><button class="quiet" onclick="assessmentsPage()">岗位考核</button><a class="quiet" href="/teacher">教师填报</a></div></header>${content}</div>`;
 }
 
 async function home() {
@@ -486,6 +487,26 @@ function renderTab() {
     view.innerHTML = '<section class="card"><h2>历史工资对账</h2><p class="muted">正在读取历史工资表与当前核心计算的逐教师差异……</p></section>';
     loadHistoricalReconciliation();
   }
+}
+
+async function avSourceMapPage(runId = current?.id || "") {
+  try {
+    const query = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
+    const data = await api(`/api/av-source-map${query}`);
+    const fields = data.fields || [];
+    const statusClass = (status) => ["DETERMINED", "NOT_APPLICABLE", "DONE"].includes(status) ? "ok" : (["NO_EVIDENCE", "HUMAN_REQUIRED", "SOURCE_MISSING", "RULE_NOT_DEFINED", "MANUAL_INPUT_REQUIRED"].includes(status) ? "warn" : "info");
+    const statusLabel = (status) => ({
+      DETERMINED: "已确定", NOT_APPLICABLE: "不适用", HUMAN_REQUIRED: "待补来源/确认",
+      SOURCE_MISSING: "缺来源", RULE_NOT_DEFINED: "规则未定义", MANUAL_INPUT_REQUIRED: "需人工输入",
+      SOURCE_AVAILABLE_NOT_CONNECTED: "已有入口，尚未接入本期来源", DONE: "已完成", NO_EVIDENCE: "NO EVIDENCE",
+    }[status] || status);
+    const row = (item) => `<tr><td><strong>${escapeHtml(item.column)}</strong></td><td>${escapeHtml(item.business_name)}</td><td>${escapeHtml(item.relationship || "—")}${item.template_formula ? `<div class="small muted">模板公式：${escapeHtml(item.template_formula)}</div>` : ""}</td><td>${escapeHtml(item.source || "—")}</td><td>${escapeHtml(item.source_type || "—")}</td><td><span class="status ${statusClass(item.category)}">${escapeHtml(statusLabel(item.category))}</span><div class="small muted">当前：${escapeHtml(statusLabel(item.current_system_status))}</div></td><td>${escapeHtml(item.authoritative_source || "—")}</td></tr>`;
+    const core = fields.filter((item) => item.column === "AF");
+    const peripheral = fields.filter((item) => !["AF", "AV"].includes(item.column));
+    const missing = fields.filter((item) => ["SOURCE_MISSING", "RULE_NOT_DEFINED", "MANUAL_INPUT_REQUIRED"].includes(item.category));
+    const back = current ? "renderRun()" : "home()";
+    shell(`<section class="section-head"><div><p class="eyebrow">只读证据</p><h1>总工资来源地图</h1><p class="muted">${data.period ? `当前 Run：${escapeHtml(data.period)} · ` : ""}来源、规则和缺口来自现有代码、Run 证据与真实工资模板；本页面不会写入任何核算状态。</p></div><button class="secondary" onclick="${back}">返回</button></section><section class="card"><div class="section-head"><div><h2>AV 公式</h2><p class="muted">真实模板 data_only=False 读取；未把历史数值反推成新规则。</p></div><strong class="readiness">${escapeHtml(data.full_payroll_completeness?.label || "—")}</strong></div><div class="formula-box">${escapeHtml(data.av_formula || "NO EVIDENCE")}</div><p class="small muted">FULL_PAYROLL_COMPLETENESS = 已具备来源的 AV 组成项 / ${data.full_payroll_completeness?.total || 0} 个组成项</p></section><section class="card"><h2>核心工资</h2><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>业务含义</th><th>关系</th><th>来源</th><th>来源类型</th><th>状态</th><th>权威来源</th></tr></thead><tbody>${core.map(row).join("")}</tbody></table></div></section><section class="card"><h2>外围工资与人工项</h2><div class="table-wrap"><table class="table"><thead><tr><th>字段</th><th>业务含义</th><th>关系</th><th>来源</th><th>来源类型</th><th>状态</th><th>权威来源</th></tr></thead><tbody>${peripheral.map(row).join("")}</tbody></table></div></section><section class="card"><h2>缺口清单</h2>${missing.length ? `<div class="evidence-list">${missing.map((item) => `<div class="evidence-card"><div><span>${escapeHtml(item.column)} ${escapeHtml(item.business_name)}</span><strong>${escapeHtml(statusLabel(item.category))}</strong></div><div><span>当前系统</span><strong>${escapeHtml(statusLabel(item.current_system_status))}</strong></div><div><span>依据</span><strong>${escapeHtml(item.authoritative_source || "NO EVIDENCE")}</strong></div></div>`).join("")}</div>` : '<div class="empty success">当前没有缺口。</div>'}</section>`, false);
+  } catch (error) { showMessage(error.message); }
 }
 
 async function loadHistoricalReconciliation() {
