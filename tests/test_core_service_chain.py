@@ -95,6 +95,15 @@ def test_future_rule_does_not_change_old_run(tmp_path):
     assert service.create("2026-10")["core_rule_version_id"] != run["core_rule_version_id"]
 
 
+def test_new_evidence_month_can_keep_semantic_rule_id(tmp_path):
+    service = PayrollService(tmp_path / "local-data")
+    rules = copy.deepcopy(service.core_rule_catalog()["seed"])
+    rules.update(rule_version_id="core_rules_2026_07_v1", effective_from="2026-07", effective_to="2026-07")
+    versions = service.save_core_rule_version(rules, "historical July payroll reconstruction", "evidence review")["versions"]
+    july = next(item for item in versions if item["id"] == "core_rules_2026_07_v1")
+    assert july["rules"]["rule_version_id"] == "core_rules_2026_07_v1"
+
+
 def test_sanitized_http_generate_chain_and_restore(tmp_path):
     service, run, _, _ = prepared(tmp_path, "GENERATE")
     server = PayrollHttpServer(("127.0.0.1", 0), service, Path(__file__).parents[1] / "payroll_ui" / "static")

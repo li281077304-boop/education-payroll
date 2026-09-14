@@ -198,7 +198,12 @@ class CoreFlow:
         if not source.strip() or not actor.strip():
             raise ValueError("请填写规则来源与确认人。")
         snapshot = copy.deepcopy(rules)
-        snapshot["rule_version_id"] = uuid.uuid4().hex[:16]
+        requested_id = str(snapshot.get("rule_version_id", "")).strip()
+        existing_ids = {item.get("id") for item in self.store.calculation_versions("core")}
+        # A new evidence-backed month may carry a stable semantic identifier;
+        # legacy edits that reuse an existing seed id still receive a fresh
+        # immutable storage id and can never overwrite that snapshot.
+        snapshot["rule_version_id"] = requested_id if requested_id and requested_id not in existing_ids else uuid.uuid4().hex[:16]
         snapshot["source"] = source.strip()
         validated = CoreRules.from_dict(snapshot).to_dict()
         item = {"id": validated["rule_version_id"], "rules": validated, "effective_from": validated["effective_from"], "effective_to": validated["effective_to"], "source": source.strip(), "actor": actor.strip(), "created_at": datetime.now(timezone.utc).isoformat()}
