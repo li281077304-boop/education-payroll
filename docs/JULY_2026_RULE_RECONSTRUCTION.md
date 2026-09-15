@@ -51,6 +51,8 @@ July 历史对账对每位可比教师逐字段比较 `AA、AC、AD、AE、AF`�
 
 分类只由读取到的字段、公式、政策和逐课证据决定；没有证据时保留异常，不能为通过而改写历史值。
 
+历史值或当前值在 AA、AC、AD、AE、AF 任一字段单侧缺失时，仍生成该字段的 `NEEDS_CONFIRMATION` 记录并分类为 `MISSING_SOURCE`，明确缺失侧；不会把空值当作 0。即使有贡献对象，只有同时匹配教师、字段和排课来源记录时才可使用 `COURSE_CONTRIBUTION`，空贡献或未匹配来源仍按缺失证据处理。
+
 ## August 隔离回归
 
 - 新建空存储时会同时注册 July 与 August 的日期化 Core 快照；July Run 绑定 `core_rules_2026_07_v1`，August Run 绑定 `core_rules_2026_08_09_v1`。

@@ -390,11 +390,9 @@ def _write_evidence_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple
     sheet.cell(start, 1, "课程记录来源索引").font = Font(bold=True)
     for column, value in enumerate(("record_key", "教师", "源文件", "来源证据(JSON)"), start=1):
         sheet.cell(start + 1, column, value).font = Font(bold=True)
-    for item in payroll.source_records:
-        sheet.append([
-            item.get("record_key", ""), item.get("teacher", ""), item.get("source", ""),
-            json.dumps(item.get("provenance", {}), ensure_ascii=False, sort_keys=True, default=str),
-        ])
+    source_rows, source_overflow_rows = _source_index_rows(payroll.source_records)
+    for item in source_rows:
+        sheet.append(item)
     _set_widths(sheet, {1: 18, 2: 12, 3: 18, 4: 18, 5: 46, 6: 80, 7: 26})
     if overflow_rows:
         overflow_sheet = book.create_sheet("字段证据")
@@ -403,14 +401,61 @@ def _write_evidence_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple
         for row in overflow_rows:
             overflow_sheet.append(row)
         _set_widths(overflow_sheet, {1: 14, 2: 18, 3: 12, 4: 12, 5: 120})
+    if source_overflow_rows:
+        overflow_sheet = book.create_sheet("来源证据")
+        overflow_sheet.append(["超出 Excel 单元格长度限制的课程来源证据（按 record_key 拆分）"])
+        overflow_sheet.append(["record_key", "教师", "证据序号", "来源证据(JSON)"])
+        for row in source_overflow_rows:
+            overflow_sheet.append(row)
+        _set_widths(overflow_sheet, {1: 28, 2: 18, 3: 14, 4: 120})
 
 
 def _json_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _text_chunks(value: str) -> list[str]:
+    return [
+        value[offset:offset + EXCEL_CELL_CHAR_LIMIT]
+        for offset in range(0, len(value), EXCEL_CELL_CHAR_LIMIT)
+    ] or [""]
+
+
+def _source_index_rows(source_records: list[dict[str, Any]]):
+    """Return bounded source-index rows and lossless provenance spill rows."""
+    rows = []
+    overflow_rows = []
+    for item in source_records:
+        record_key = item.get("record_key", "")
+        provenance_text = _json_text(item.get("provenance", {}))
+        if len(provenance_text) <= EXCEL_CELL_CHAR_LIMIT:
+            shown = provenance_text
+        else:
+            chunks = _text_chunks(provenance_text)
+            shown = _json_text({
+                "storage": "来源证据",
+                "record_key": record_key,
+                "chunk_count": len(chunks),
+            })
+            for chunk_number, chunk in enumerate(chunks, start=1):
+                overflow_rows.append([
+                    record_key,
+                    item.get("teacher", ""),
+                    f"1#{chunk_number}/{len(chunks)}",
+                    chunk,
+                ])
+        rows.append([record_key, item.get("teacher", ""), item.get("source", ""), shown])
+    return rows, overflow_rows
+
+
 def _evidence_detail_rows(payroll: GeneratedPayroll, rows: tuple[Any, ...]):
-    """Return detail rows plus lossless spill rows for Excel's 32,767-char limit."""
+    """Return detail rows plus lossless spill rows for Excel's 32,767-char limit.
+
+    The spill table is intentionally row-oriented.  A normal evidence item
+    occupies one row; a single oversized JSON item occupies ordered chunk rows
+    whose sequence marker lets a reader concatenate them without losing any
+    characters.  No cell written by this function exceeds Excel's limit.
+    """
     detail_rows = []
     overflow_rows = []
     detail_number = 0
@@ -419,6 +464,23 @@ def _evidence_detail_rows(payroll: GeneratedPayroll, rows: tuple[Any, ...]):
             detail_id = f"F{detail_number:06d}"
             evidence = field.get("evidence", [])
             evidence_text = _json_text(evidence)
+            reason_text = field.get("reason", "")
+            if isinstance(reason_text, str) and len(reason_text) > EXCEL_CELL_CHAR_LIMIT:
+                chunks = _text_chunks(reason_text)
+                reason_text = _json_text({
+                    "storage": "字段证据",
+                    "detail_id": detail_id,
+                    "kind": "reason",
+                    "chunk_count": len(chunks),
+                })
+                for chunk_number, chunk in enumerate(chunks, start=1):
+                    overflow_rows.append([
+                        detail_id,
+                        row.teacher,
+                        field_name,
+                        f"reason#{chunk_number}/{len(chunks)}",
+                        chunk,
+                    ])
             if len(evidence_text) > EXCEL_CELL_CHAR_LIMIT:
                 evidence_text = _json_text({
                     "storage": "字段证据",
@@ -426,13 +488,17 @@ def _evidence_detail_rows(payroll: GeneratedPayroll, rows: tuple[Any, ...]):
                     "item_count": len(evidence),
                 })
                 for evidence_number, item in enumerate(evidence, start=1):
-                    overflow_rows.append([detail_id, row.teacher, field_name, evidence_number, _json_text(item)])
+                    item_text = _json_text(item)
+                    chunks = _text_chunks(item_text)
+                    for chunk_number, chunk in enumerate(chunks, start=1):
+                        sequence = evidence_number if len(chunks) == 1 else f"{evidence_number}#{chunk_number}/{len(chunks)}"
+                        overflow_rows.append([detail_id, row.teacher, field_name, sequence, chunk])
             detail_rows.append([
                 row.teacher,
                 field_name,
                 _value(field.get("value")),
                 field.get("state", ""),
-                field.get("reason", ""),
+                reason_text,
                 evidence_text,
                 payroll.rule_versions.get("core", ""),
             ])
@@ -601,13 +667,7 @@ def validate_standard_payroll_workbook(path: str | Path, payroll: GeneratedPayro
         source_headers = ["record_key", "教师", "源文件", "来源证据(JSON)"]
         if [evidence_sheet.cell(source_start + 1, column).value for column in range(1, 5)] != source_headers:
             errors.append("课程记录来源索引表头发生变化")
-        expected_sources = [
-            [
-                item.get("record_key", ""), item.get("teacher", ""), item.get("source", ""),
-                json.dumps(item.get("provenance", {}), ensure_ascii=False, sort_keys=True, default=str),
-            ]
-            for item in payroll.source_records
-        ]
+        expected_sources, expected_source_overflow = _source_index_rows(payroll.source_records)
         for row_number, wanted_row in enumerate(expected_sources, start=source_start + 2):
             actual_row = [evidence_sheet.cell(row_number, column).value for column in range(1, 5)]
             if actual_row != wanted_row:
@@ -615,6 +675,20 @@ def validate_standard_payroll_workbook(path: str | Path, payroll: GeneratedPayro
         expected_max_row = source_start + 1 + len(expected_sources)
         if evidence_sheet.max_row != expected_max_row:
             errors.append("核验与来源行数发生变化")
+        source_overflow_sheet = book["来源证据"] if "来源证据" in book.sheetnames else None
+        if expected_source_overflow:
+            if source_overflow_sheet is None:
+                errors.append("缺少来源证据拆分工作表")
+            else:
+                source_overflow_headers = ["record_key", "教师", "证据序号", "来源证据(JSON)"]
+                if [source_overflow_sheet.cell(2, column).value for column in range(1, 5)] != source_overflow_headers:
+                    errors.append("来源证据拆分表头发生变化")
+                for row_number, wanted_row in enumerate(expected_source_overflow, start=3):
+                    actual_row = [source_overflow_sheet.cell(row_number, column).value for column in range(1, 5)]
+                    if actual_row != wanted_row:
+                        errors.append(f"来源证据拆分第 {row_number} 行发生变化")
+                if source_overflow_sheet.max_row != len(expected_source_overflow) + 2:
+                    errors.append("来源证据拆分行数发生变化")
     # A generated workbook is a static result.  Formula text or external-link
     # metadata anywhere in its companion pages would make the result depend on
     # an unavailable spreadsheet engine, so reject it as well.

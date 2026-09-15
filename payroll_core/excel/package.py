@@ -406,6 +406,27 @@ def discover_payroll_package(root: str | Path, period: str, *, period_start: str
     package.schedule_path = schedule_candidates[0][1]
     package.grade_history_paths = grade_candidates
     package.payroll_paths = [path for _count, path, _records in payroll_candidates]
+    # Some real monthly deliveries use the issued payroll workbook itself as
+    # the reusable layout/formula template.  When there is no explicitly named
+    # template, prefer a unique non-backup workbook for the requested month;
+    # if several remain, a unique largest monthly workbook is the combined
+    # department delivery.  Otherwise stay ambiguous and require an explicit
+    # template file instead of guessing from a teacher or a golden value.
+    if package.template_path is None:
+        year, month = period.split("-")
+        month_token = f"{year}年{int(month)}月份"
+        monthly = [item for item in payroll_candidates if month_token in item[1].stem and "备份" not in item[1].stem]
+        if len(payroll_candidates) == 1:
+            candidates = payroll_candidates
+        else:
+            candidates = monthly
+        if len(candidates) == 1:
+            package.template_path = candidates[0][1]
+        elif candidates:
+            largest = max(item[0] for item in candidates)
+            winners = [item for item in candidates if item[0] == largest]
+            if len(winners) == 1:
+                package.template_path = winners[0][1]
     package.grade_evidence = all_facts
 
     ratings: dict[str, set[int]] = {}

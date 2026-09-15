@@ -1236,13 +1236,31 @@ class PayrollService(CoreFlow):
             for field, old_name in fields:
                 historical_value = getattr(old, old_name, None)
                 current_value = (new.get("fields", {}).get(field) or {}).get("value")
-                difference = None if historical_value is None or current_value is None else round(float(current_value) - float(historical_value), 6)
-                comparable = historical_value is not None and current_value is not None
+                historical_missing = self._historical_value_missing(historical_value)
+                current_missing = self._historical_value_missing(current_value)
+                difference = None if historical_missing or current_missing else round(float(current_value) - float(historical_value), 6)
+                comparable = not historical_missing and not current_missing
                 if comparable:
                     stats[field]["comparable"] += 1
                     if abs(difference or 0) <= 1e-6:
                         stats[field]["matches"] += 1
-                if difference is None or abs(difference) <= 1e-6:
+                if difference is not None and abs(difference) <= 1e-6:
+                    continue
+                if difference is None:
+                    category, evidence = self._historical_missing_evidence(
+                        field, old, new, historical_value, current_value, run,
+                    )
+                    field_output[field] = {
+                        "historical": historical_value,
+                        "current": current_value,
+                        "diff": None,
+                        "status": "NEEDS_CONFIRMATION",
+                        "difference_category": category,
+                        "evidence": evidence,
+                    }
+                    category_counts[category] += 1
+                    teacher_categories.append(category)
+                    teacher_evidence.extend(evidence)
                     continue
                 category, evidence = self._historical_difference_evidence(
                     field, old, new, difference, contributions, by_key, run,
@@ -1261,7 +1279,8 @@ class PayrollService(CoreFlow):
                 }
             if field_output:
                 primary = next((item for item in ("PART_TIME_RATE", "MISSING_SOURCE", "PERSONAL_EXCEPTION", "COURSE_CONTRIBUTION", "RULE_DIFFERENCE", "DATA_QUALITY", "INPUT_SCOPE", "UNEXPLAINED") if item in teacher_categories), "DATA_QUALITY")
-                differences.append({"teacher": teacher, "fields": field_output, "status": "DIFFERENCE", "difference_category": primary, "evidence": teacher_evidence})
+                row_status = "NEEDS_CONFIRMATION" if any(item.get("status") == "NEEDS_CONFIRMATION" for item in field_output.values()) else "DIFFERENCE"
+                differences.append({"teacher": teacher, "fields": field_output, "status": row_status, "difference_category": primary, "evidence": teacher_evidence})
         source_classifications = {name: [] for name in ("PART_TIME_RATE", "PERSONAL_POLICY", "FIXED_HISTORICAL_VALUE", "MISSING_SOURCE")}
         for row in differences:
             for field in row["fields"].values():
@@ -1288,6 +1307,45 @@ class PayrollService(CoreFlow):
         }
 
     @staticmethod
+    def _historical_missing_evidence(field: str, old: object, new: dict, historical_value: object, current_value: object, run: dict) -> tuple[str, list[dict]]:
+        """Keep a field-level manual-review record when either side is blank.
+
+        A missing historical value and a missing current value are both source
+        gaps for this read-only ledger.  The evidence says which side is
+        absent, so a reviewer can distinguish a malformed historical workbook
+        from an incomplete current calculation without treating either as 0.
+        """
+        historical_missing = PayrollService._historical_value_missing(historical_value)
+        current_missing = PayrollService._historical_value_missing(current_value)
+        missing_side = "both" if historical_missing and current_missing else ("historical" if historical_missing else "current")
+        return "MISSING_SOURCE", [{
+            "source_classification": "MISSING_SOURCE",
+            "field": field,
+            "missing_side": missing_side,
+            "historical_value": historical_value,
+            "current_value": current_value,
+            "historical_source": getattr(old, "source", ""),
+            "current_source": run.get("files", {}).get("schedule", {}).get("path", ""),
+            "current_reason": (new.get("fields", {}).get(field) or {}).get("reason", ""),
+            "teacher": new.get("teacher") or getattr(old, "teacher", ""),
+            "period": run.get("period_label", run.get("period", "")),
+            "reason": f"{field} 的{({'historical': '历史工资表', 'current': '当前核算', 'both': '历史工资表和当前核算'}[missing_side])}值缺失；不能把缺失证据当作 0。",
+        }]
+
+    @staticmethod
+    def _historical_value_missing(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if not normalized or normalized in {"nan", "none", "null", "—", "-"}:
+                return True
+        try:
+            return not math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return True
+
+    @staticmethod
     def _historical_obligation(formula: object) -> float | None:
         text = str(formula or "").upper().replace("$", "")
         if re.search(r"AD\d*\s*\*\s*AE", text):
@@ -1302,20 +1360,12 @@ class PayrollService(CoreFlow):
         current_fact = (new.get("fields", {}).get(field) or {})
         evidence: list[dict] = [{"source": getattr(old, "source", ""), "historical_formula": historical_formula, "difference": difference}]
         if field in {"AA", "AC", "AD"}:
-            course_rows = []
-            for item in contributions:
-                contribution_field = item.get("field")
-                expected_fields = {"AA": {"aa"}, "AC": {"ac"}, "AD": {"aa", "ac"}}[field]
-                if item.get("teacher") != new.get("teacher") or contribution_field not in expected_fields or item.get("value") is None:
-                    continue
-                record = by_key.get(item.get("record_key"))
-                if record is None:
-                    continue
-                locations = [value for value in (getattr(record, "provenance", {}) or {}).values() if getattr(value, "coordinate", "")]
-                inputs = (item.get("evidence") or [{}])[0].get("inputs", {})
-                course_rows.append({"record_key": item.get("record_key"), "field": contribution_field.upper(), "date": getattr(record, "lesson_date", ""), "class_name": getattr(record, "class_name", ""), "student": getattr(record, "student", ""), "lesson_status": getattr(record, "lesson_status", ""), "attended": getattr(record, "attended", None), "grade": getattr(record, "grade", ""), "class_type": getattr(record, "class_type", ""), "coefficient": inputs, "contribution": item.get("value"), "source_row": ", ".join(f"{getattr(value, 'sheet', '')}!{getattr(value, 'coordinate', '')}" for value in locations)})
-            evidence.append({"source_classification": "COURSE_CONTRIBUTION", "course_contributions": course_rows, "course_contribution_count": len(course_rows), "note": f"当前 {field} 差异由逐课 {field} 贡献与历史工资表字段对照；历史逐课公式未存入工资表，保留课程来源位置作为依据。"})
-            return "COURSE_CONTRIBUTION", evidence
+            course_rows = self._historical_course_rows(field, new, contributions, by_key)
+            if course_rows:
+                evidence.append({"source_classification": "COURSE_CONTRIBUTION", "course_contributions": course_rows, "course_contribution_count": len(course_rows), "note": f"当前 {field} 差异由逐课 {field} 贡献与历史工资表字段对照；历史逐课公式未存入工资表，保留课程来源位置作为依据。"})
+                return "COURSE_CONTRIBUTION", evidence
+            evidence.append({"source_classification": "MISSING_SOURCE", "field": field, "course_contributions": [], "course_contribution_count": 0, "reason": f"{field} 存在差异，但没有同时匹配教师、字段和来源记录的逐课贡献；不能将差异归为 COURSE_CONTRIBUTION。"})
+            return "MISSING_SOURCE", evidence
         if field == "AF":
             part_time = self._historical_part_time_policy(old, comments or [], run)
             if part_time is not None:
@@ -1333,8 +1383,12 @@ class PayrollService(CoreFlow):
                 evidence.append({"historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "historical_formula": historical_formula, "current_formula": current_fact.get("reason", "")})
                 return "PERSONAL_EXCEPTION", evidence
             if historical_obligation is not None and abs(float(getattr(old, "teaching_hours", 0) or 0) - float((new.get("fields", {}).get("AD") or {}).get("value") or 0)) > 1e-6:
-                evidence.append({"historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "reason": "AF 差异由 AD 课程贡献差异传导。"})
-                return "COURSE_CONTRIBUTION", evidence
+                course_rows = self._historical_course_rows("AD", new, contributions, by_key)
+                if course_rows:
+                    evidence.append({"source_classification": "COURSE_CONTRIBUTION", "course_contributions": course_rows, "course_contribution_count": len(course_rows), "historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "reason": "AF 差异由有来源的 AD 逐课贡献传导。"})
+                    return "COURSE_CONTRIBUTION", evidence
+                evidence.append({"source_classification": "MISSING_SOURCE", "field": "AD", "course_contributions": [], "course_contribution_count": 0, "historical_obligation_hours": historical_obligation, "current_obligation_hours": current_obligation, "reason": "AF 看起来受到 AD 差异传导，但没有同时匹配教师、字段和来源记录的逐课贡献。"})
+                return "MISSING_SOURCE", evidence
             if historical_obligation is None:
                 evidence.append({"source_classification": "MISSING_SOURCE", "reason": "历史 AF 公式未引用 AD/AE，且没有可绑定的兼职/个人政策证据；该教师历史来源缺少可复算字段。", "historical_formula": historical_formula})
                 return "MISSING_SOURCE", evidence
@@ -1342,6 +1396,27 @@ class PayrollService(CoreFlow):
             return "RULE_DIFFERENCE", evidence
         evidence.append({"reason": "历史字段与当前版本化规则结果不同，保留双方来源供后续规则对账。", "current_reason": current_fact.get("reason", "")})
         return "RULE_DIFFERENCE", evidence
+
+    @staticmethod
+    def _historical_course_rows(field: str, new: dict, contributions: list[dict], by_key: dict) -> list[dict]:
+        """Return only source-backed contributions that can explain ``field``."""
+        expected_fields = {"AA": {"aa"}, "AC": {"ac"}, "AD": {"aa", "ac"}, "AF": {"aa", "ac"}}[field]
+        rows = []
+        for item in contributions:
+            contribution_field = str(item.get("field") or "").lower()
+            if item.get("teacher") != new.get("teacher") or contribution_field not in expected_fields or item.get("value") is None:
+                continue
+            record = by_key.get(item.get("record_key"))
+            if record is None:
+                continue
+            locations = [value for value in (getattr(record, "provenance", {}) or {}).values() if getattr(value, "coordinate", "")]
+            source_file = str(getattr(record, "source", "") or "")
+            if not source_file and not locations:
+                continue
+            inputs = (item.get("evidence") or [{}])[0].get("inputs", {})
+            source_row = ", ".join(f"{getattr(value, 'sheet', '')}!{getattr(value, 'coordinate', '')}" for value in locations) or source_file
+            rows.append({"record_key": item.get("record_key"), "field": contribution_field.upper(), "date": getattr(record, "lesson_date", ""), "class_name": getattr(record, "class_name", ""), "student": getattr(record, "student", ""), "lesson_status": getattr(record, "lesson_status", ""), "attended": getattr(record, "attended", None), "grade": getattr(record, "grade", ""), "class_type": getattr(record, "class_type", ""), "coefficient": inputs, "contribution": item.get("value"), "source_row": source_row})
+        return rows
 
     @staticmethod
     def _historical_part_time_policy(old: object, comments: list[object], run: dict) -> dict | None:

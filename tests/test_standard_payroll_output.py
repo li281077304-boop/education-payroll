@@ -1,6 +1,7 @@
 """Regression tests for the generated standard payroll workbook contract."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from dataclasses import replace
 
@@ -132,6 +133,64 @@ def test_large_field_evidence_spills_without_loss_or_export_failure(tmp_path: Pa
     book = load_workbook(path, data_only=False)
     assert "字段证据" in book.sheetnames
     assert book["字段证据"].max_row == 502
+    assert validate_standard_payroll_workbook(path, payroll)["ok"] is True
+
+
+def test_single_oversized_evidence_item_is_chunked_losslessly(tmp_path: Path):
+    payroll = _generated()
+    row = payroll.rows[0]
+    original = "证据" * 20000
+    fields = dict(row.fields)
+    fields["AC"] = {**fields["AC"], "evidence": [{"kind": "LONG_NOTE", "note": original}]}
+    payroll = replace(payroll, rows=(replace(row, fields=fields),))
+    output = tmp_path / "single-oversized-evidence.xlsx"
+
+    path = render_generated_payroll(payroll, output)
+    book = load_workbook(path, data_only=False)
+    overflow = book["字段证据"]
+    chunks = [
+        overflow.cell(row_number, 5).value
+        for row_number in range(3, overflow.max_row + 1)
+        if str(overflow.cell(row_number, 4).value).startswith("1#")
+    ]
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 32767 for chunk in chunks)
+    assert "".join(chunks) == '{"kind": "LONG_NOTE", "note": ' + json.dumps(original, ensure_ascii=False) + "}"
+    assert validate_standard_payroll_workbook(path, payroll)["ok"] is True
+
+
+def test_oversized_source_provenance_is_chunked_losslessly(tmp_path: Path):
+    payroll = _generated()
+    original = "来源" * 20000
+    payroll = replace(payroll, source_records=[{
+        "record_key": "record-long-source",
+        "teacher": "教师甲",
+        "source": "脱敏排课.xlsx",
+        "provenance": {"课程来源": original},
+    }])
+    output = tmp_path / "long-source-provenance.xlsx"
+
+    path = render_generated_payroll(payroll, output)
+    book = load_workbook(path, data_only=False)
+    assert "来源证据" in book.sheetnames
+    source_index = book["核验与来源"]
+    source_header_row = next(row for row in range(1, source_index.max_row + 1) if source_index.cell(row, 1).value == "课程记录来源索引")
+    assert source_index.cell(source_header_row + 2, 4).value.startswith('{"chunk_count":')
+    overflow = book["来源证据"]
+    chunks = [
+        overflow.cell(row_number, 4).value
+        for row_number in range(3, overflow.max_row + 1)
+        if str(overflow.cell(row_number, 3).value).startswith("1#")
+    ]
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 32767 for chunk in chunks)
+    assert "".join(chunks) == json.dumps({"课程来源": original}, ensure_ascii=False, sort_keys=True)
+    assert all(
+        not isinstance(cell.value, str) or len(cell.value) <= 32767
+        for sheet in book.worksheets
+        for row in sheet.iter_rows()
+        for cell in row
+    )
     assert validate_standard_payroll_workbook(path, payroll)["ok"] is True
 
 

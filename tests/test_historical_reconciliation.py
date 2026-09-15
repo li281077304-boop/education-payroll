@@ -118,7 +118,7 @@ def test_historical_reconciliation_recovers_named_part_time_rate_from_af_comment
     result = service.historical_reconciliation("run-3")
 
     field = result["rows"][0]["fields"]["AF"]
-    assert result["category_counts"]["MISSING_SOURCE"] == 0
+    assert result["category_counts"]["MISSING_SOURCE"] == 4
     assert result["category_counts"]["PART_TIME_RATE"] == 1
     assert field["difference_category"] == "PART_TIME_RATE"
     assert field["evidence"][-1]["teacher"] == "刘雨"
@@ -162,3 +162,102 @@ def test_historical_reconciliation_classifies_each_core_field_from_its_own_evide
     assert fields["AF"]["difference_category"] == "COURSE_CONTRIBUTION"
     assert fields["AA"]["evidence"][-1]["course_contributions"][0]["field"] == "AA"
     assert fields["AD"]["evidence"][-1]["course_contributions"]
+
+
+def test_historical_reconciliation_keeps_single_sided_missing_fields_pending(tmp_path):
+    service = PayrollService(tmp_path / "store")
+    baseline = SimpleNamespace(
+        teacher="教师甲", source="july.xlsx", one_to_one=None, class_value=20.0,
+        teaching_hours=None, ae=40.0, af=0.0, provenance={},
+    )
+    run = {
+        "id": "run-missing-field", "period": "2026-07", "period_label": "2026-07",
+        "files": {"baseline": {"path": "july.xlsx"}},
+        "core_calculation": {"rows": [{"teacher": "教师甲", "fields": {
+            "AA": {"value": 10.0}, "AC": {"value": None}, "AD": {"value": None},
+            "AE": {"value": None}, "AF": {"value": None},
+        }}], "course_contributions": []},
+    }
+    service._load = lambda _run_id: run
+    service._require_fresh = lambda _run: None
+    service._read_for_run = lambda _role, _path, _run: SimpleNamespace(records=[baseline])
+
+    result = service.historical_reconciliation("run-missing-field")
+    fields = result["rows"][0]["fields"]
+
+    assert fields["AA"]["status"] == "NEEDS_CONFIRMATION"
+    assert fields["AA"]["difference_category"] == "MISSING_SOURCE"
+    assert fields["AA"]["evidence"][0]["missing_side"] == "historical"
+    assert fields["AC"]["status"] == "NEEDS_CONFIRMATION"
+    assert fields["AC"]["difference_category"] == "MISSING_SOURCE"
+    assert fields["AC"]["evidence"][0]["missing_side"] == "current"
+    assert fields["AD"]["status"] == "NEEDS_CONFIRMATION"
+    assert fields["AD"]["evidence"][0]["missing_side"] == "both"
+    assert fields["AE"]["status"] == "NEEDS_CONFIRMATION"
+    assert fields["AE"]["evidence"][0]["missing_side"] == "current"
+    assert fields["AF"]["status"] == "NEEDS_CONFIRMATION"
+    assert fields["AF"]["evidence"][0]["missing_side"] == "current"
+    assert result["category_counts"]["MISSING_SOURCE"] == 5
+    assert result["rows"][0]["status"] == "NEEDS_CONFIRMATION"
+
+
+def test_historical_reconciliation_does_not_call_empty_or_unmatched_courses_contributions(tmp_path):
+    service = PayrollService(tmp_path / "store")
+    baseline = SimpleNamespace(
+        teacher="教师甲", source="july.xlsx", one_to_one=10.0, class_value=20.0,
+        teaching_hours=30.0, ae=40.0, af=0.0, provenance={"af": SimpleNamespace(raw_value="=(AD7-30)*AE7")},
+    )
+    run = {
+        "id": "run-no-course-source", "period": "2026-07", "period_label": "2026-07",
+        "files": {"baseline": {"path": "july.xlsx"}},
+        "core_calculation": {"rows": [{"teacher": "教师甲", "fields": {
+            "AA": {"value": 12.0}, "AC": {"value": 21.0}, "AD": {"value": 33.0},
+            "AE": {"value": 40.0}, "AF": {"value": 120.0, "evidence": [{"inputs": {"obligation_hours": "30"}}]},
+        }}], "course_contributions": [
+            {"teacher": "教师甲", "field": "ac", "record_key": "missing-source", "value": 21.0, "evidence": [{}]},
+            {"teacher": "教师甲", "field": "aa", "record_key": "empty-value", "value": None, "evidence": [{}]},
+        ]},
+    }
+    service._load = lambda _run_id: run
+    service._require_fresh = lambda _run: None
+    service._read_for_run = lambda _role, _path, _run: SimpleNamespace(records=[baseline])
+
+    result = service.historical_reconciliation("run-no-course-source")
+    fields = result["rows"][0]["fields"]
+
+    assert fields["AA"]["difference_category"] == "MISSING_SOURCE"
+    assert fields["AC"]["difference_category"] == "MISSING_SOURCE"
+    assert fields["AD"]["difference_category"] == "MISSING_SOURCE"
+    assert fields["AF"]["difference_category"] == "MISSING_SOURCE"
+    for code in ("AA", "AC", "AD", "AF"):
+        assert fields[code]["evidence"][-1]["course_contributions"] == []
+    assert result["category_counts"]["COURSE_CONTRIBUTION"] == 0
+
+
+def test_historical_reconciliation_requires_source_metadata_for_course_contribution(tmp_path):
+    service = PayrollService(tmp_path / "store")
+    baseline = SimpleNamespace(
+        teacher="教师甲", source="july.xlsx", one_to_one=10.0, class_value=20.0,
+        teaching_hours=30.0, ae=40.0, af=0.0, provenance={"af": SimpleNamespace(raw_value="=(AD7-30)*AE7")},
+    )
+    source_record = SimpleNamespace(**{**_record(record_key="ac-course").__dict__, "source": "", "provenance": {}})
+    run = {
+        "id": "run-empty-source-metadata", "period": "2026-07", "period_label": "2026-07",
+        "files": {"baseline": {"path": "july.xlsx"}, "schedule": {"path": "schedule.xlsx"}},
+        "core_calculation": {"rows": [{"teacher": "教师甲", "fields": {
+            "AA": {"value": 10.0}, "AC": {"value": 21.0}, "AD": {"value": 31.0},
+            "AE": {"value": 40.0}, "AF": {"value": 40.0, "evidence": [{"inputs": {"obligation_hours": "30"}}]},
+        }}], "course_contributions": [
+            {"teacher": "教师甲", "field": "ac", "record_key": "ac-course", "value": 21.0, "evidence": [{}]},
+        ]},
+    }
+    service._load = lambda _run_id: run
+    service._require_fresh = lambda _run: None
+    service._read_for_run = lambda role, _path, _run: SimpleNamespace(records=[baseline] if role == "baseline" else [source_record])
+
+    result = service.historical_reconciliation("run-empty-source-metadata")
+    fields = result["rows"][0]["fields"]
+
+    assert fields["AC"]["difference_category"] == "MISSING_SOURCE"
+    assert fields["AC"]["evidence"][-1]["course_contributions"] == []
+    assert result["category_counts"]["COURSE_CONTRIBUTION"] == 0
