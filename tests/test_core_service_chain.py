@@ -121,6 +121,29 @@ def test_fresh_store_binds_july_bundle_and_does_not_inherit_august_run_state(tmp
     assert restored_august["af_policy_confirmation"]["default_obligation_hours"] == 24
 
 
+def test_july_generate_preview_and_export_stay_isolated_from_august_policy(tmp_path):
+    service = PayrollService(tmp_path / "local-data")
+    july = service.create("2026-07", "GENERATE")
+    august = service.create("2026-08", "GENERATE")
+
+    # This is deliberately confirmed before the July calculation.  A dated
+    # Run must not read the latest confirmation from a neighboring month.
+    service.confirm_af_policy(august["id"], "August reviewer", default_obligation_hours=24)
+    schedule = _schedule(tmp_path / "july-schedule.xlsx", [["张三", "九年级", "数学", "1对1", 1, "已上课"]])
+    service.import_file(july["id"], "schedule", str(schedule))
+
+    preview = service.preview_payroll(july["id"])
+    assert preview["generated_payroll"]["rule_versions"]["core"] == "core_rules_2026_07_v1"
+    assert preview["generated_payroll"]["rows"]
+    assert service.get(july["id"])["af_policy_confirmation"] is None
+
+    output = tmp_path / "july-generated.xlsx"
+    generated = service.generate_payroll(july["id"], str(output))
+    assert output.exists()
+    assert generated["rule_versions"]["core"] == "core_rules_2026_07_v1"
+    assert service.get(august["id"])["af_policy_confirmation"]["default_obligation_hours"] == 24
+
+
 def test_sanitized_http_generate_chain_and_restore(tmp_path):
     service, run, _, _ = prepared(tmp_path, "GENERATE")
     server = PayrollHttpServer(("127.0.0.1", 0), service, Path(__file__).parents[1] / "payroll_ui" / "static")
