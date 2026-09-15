@@ -4,8 +4,8 @@
 
 | 编号 | 规则 | 来源 | 类型 | 生效时间 | 是否确定 |
 |---|---|---|---|---|---|
-| R01 | 仅保留上课状态为“已上课”且实到大于 0 的排课行 | `import_paikeshi.py:read_source/main`、`build_8月核对表.py` | A | 当前脚本 | 确定 |
-| R02 | `一对一→1对1`、`集体班/6人班/8人班/10人班→小班`、`一对多→1对2` | `_grade_extractor.py:CLASS_TYPE_MAP` | A | 当前 Skill | 确定 |
+| R01 | 计算时仅保留上课状态为“已上课”且实到大于 0 的排课行；实到为 0 或非授课状态保留来源但不计入，实到缺失/事实不明保持待确认而不转成 0 | `payroll_core/excel/schedule.py:read_schedule_excel`、`payroll_core/calculation.py` | A | 2026-07 Core | 确定 |
+| R02 | `一对一→1对1`、明确的 `1对2/1v2→1对2`、明确的 `1对3/1v3→1对3`；泛称“一对多”不自动映射特殊班型，普通小班不因人数被改判为特殊班型 | `payroll_core/excel/common.py:normalize_schedule_class_type`、`config/core_rules_2026_07.yaml` | A/B | 2026-07 Core | 已确定；缺少特殊班型配置时待确认 |
 | R03 | 学科优先读取上课科目，否则从班级名括号提取并去数字前缀 | `_grade_extractor.py:extract_subject` | A | 当前 Skill | 确定 |
 | R04 | 领航、衔接班、年级关键词和特殊班级查表的年级提取优先级 | `_grade_extractor.py:extract_grade`、Skill 年级规则 | A | 2026-07/08 固化 | 确定，但查表缺失项仍需人判 |
 | R05 | 排课记录 F/G/H 由年级系数、人数系数和班型 SWITCH 公式计算 | `_grade_extractor.py:build_switch_formulas` | A | 当前 Skill | 确定 |
