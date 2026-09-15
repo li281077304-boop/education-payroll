@@ -104,6 +104,23 @@ def test_new_evidence_month_can_keep_semantic_rule_id(tmp_path):
     assert july["rules"]["rule_version_id"] == "core_rules_2026_07_v1"
 
 
+def test_fresh_store_binds_july_bundle_and_does_not_inherit_august_run_state(tmp_path):
+    service = PayrollService(tmp_path / "local-data")
+    july = service.create("2026-07", "GENERATE")
+    august = service.create("2026-08", "GENERATE")
+
+    assert july["core_rule_version_id"] == "core_rules_2026_07_v1"
+    assert august["core_rule_version_id"] == "core_rules_2026_08_09_v1"
+    service.confirm_af_policy(august["id"], "August reviewer", default_obligation_hours=24)
+
+    restored_july = service.get(july["id"])
+    restored_august = service.get(august["id"])
+    assert restored_july["core_rule_version_id"] != restored_august["core_rule_version_id"]
+    assert restored_july["af_policy_confirmation"] is None
+    assert restored_july["business_decisions"] == []
+    assert restored_august["af_policy_confirmation"]["default_obligation_hours"] == 24
+
+
 def test_sanitized_http_generate_chain_and_restore(tmp_path):
     service, run, _, _ = prepared(tmp_path, "GENERATE")
     server = PayrollHttpServer(("127.0.0.1", 0), service, Path(__file__).parents[1] / "payroll_ui" / "static")

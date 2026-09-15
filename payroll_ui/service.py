@@ -1301,18 +1301,20 @@ class PayrollService(CoreFlow):
         historical_formula = getattr(af_fact, "raw_value", "") if af_fact else ""
         current_fact = (new.get("fields", {}).get(field) or {})
         evidence: list[dict] = [{"source": getattr(old, "source", ""), "historical_formula": historical_formula, "difference": difference}]
-        if field in {"AC", "AD"}:
+        if field in {"AA", "AC", "AD"}:
             course_rows = []
             for item in contributions:
-                if item.get("teacher") != new.get("teacher") or item.get("field") != "ac" or item.get("value") is None:
+                contribution_field = item.get("field")
+                expected_fields = {"AA": {"aa"}, "AC": {"ac"}, "AD": {"aa", "ac"}}[field]
+                if item.get("teacher") != new.get("teacher") or contribution_field not in expected_fields or item.get("value") is None:
                     continue
                 record = by_key.get(item.get("record_key"))
                 if record is None:
                     continue
                 locations = [value for value in (getattr(record, "provenance", {}) or {}).values() if getattr(value, "coordinate", "")]
                 inputs = (item.get("evidence") or [{}])[0].get("inputs", {})
-                course_rows.append({"record_key": item.get("record_key"), "date": getattr(record, "lesson_date", ""), "class_name": getattr(record, "class_name", ""), "student": getattr(record, "student", ""), "lesson_status": getattr(record, "lesson_status", ""), "attended": getattr(record, "attended", None), "grade": getattr(record, "grade", ""), "class_type": getattr(record, "class_type", ""), "coefficient": inputs, "contribution": item.get("value"), "source_row": ", ".join(f"{getattr(value, 'sheet', '')}!{getattr(value, 'coordinate', '')}" for value in locations)})
-            evidence.append({"course_contributions": course_rows, "course_contribution_count": len(course_rows), "note": "当前 AC/AD 差异由逐课贡献与历史工资表字段对照；历史逐课公式未存入工资表，保留原始 AC 公式作为依据。"})
+                course_rows.append({"record_key": item.get("record_key"), "field": contribution_field.upper(), "date": getattr(record, "lesson_date", ""), "class_name": getattr(record, "class_name", ""), "student": getattr(record, "student", ""), "lesson_status": getattr(record, "lesson_status", ""), "attended": getattr(record, "attended", None), "grade": getattr(record, "grade", ""), "class_type": getattr(record, "class_type", ""), "coefficient": inputs, "contribution": item.get("value"), "source_row": ", ".join(f"{getattr(value, 'sheet', '')}!{getattr(value, 'coordinate', '')}" for value in locations)})
+            evidence.append({"source_classification": "COURSE_CONTRIBUTION", "course_contributions": course_rows, "course_contribution_count": len(course_rows), "note": f"当前 {field} 差异由逐课 {field} 贡献与历史工资表字段对照；历史逐课公式未存入工资表，保留课程来源位置作为依据。"})
             return "COURSE_CONTRIBUTION", evidence
         if field == "AF":
             part_time = self._historical_part_time_policy(old, comments or [], run)

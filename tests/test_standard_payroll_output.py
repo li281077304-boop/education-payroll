@@ -114,6 +114,27 @@ def test_output_validation_detects_evidence_tampering(tmp_path: Path):
     assert any("核验与来源第" in error for error in validation["errors"])
 
 
+def test_large_field_evidence_spills_without_loss_or_export_failure(tmp_path: Path):
+    payroll = _generated()
+    row = payroll.rows[0]
+    fields = dict(row.fields)
+    fields["AC"] = {
+        **fields["AC"],
+        "evidence": [
+            {"kind": "COURSE_CALCULATION", "record_key": f"record-{index:04d}", "detail": "x" * 80}
+            for index in range(500)
+        ],
+    }
+    payroll = replace(payroll, rows=(replace(row, fields=fields),))
+    output = tmp_path / "large-evidence.xlsx"
+
+    path = render_generated_payroll(payroll, output)
+    book = load_workbook(path, data_only=False)
+    assert "字段证据" in book.sheetnames
+    assert book["字段证据"].max_row == 502
+    assert validate_standard_payroll_workbook(path, payroll)["ok"] is True
+
+
 def test_preview_uses_final_fields_without_writing_until_export(tmp_path: Path, monkeypatch):
     """Preview and export share final-field calculation; only export writes XLSX."""
     service = PayrollService(tmp_path / "app-data")

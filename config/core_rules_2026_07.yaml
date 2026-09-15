@@ -1,0 +1,51 @@
+schema_version: payroll-core-rules/v1
+rule_version_id: core_rules_2026_07_v1
+effective_from: "2026-07"
+effective_to: "2026-07"
+source: "2026-07 historical payroll reconstruction from local payroll, reconciliation, schedule and template evidence"
+lesson_hour_factor: "2"
+grade_coefficients:
+  "一年级": "0.85"
+  "二年级": "0.85"
+  "三年级": "0.85"
+  "四年级": "0.85"
+  "五年级": "0.85"
+  "六年级": "0.85"
+  "七年级": "0.9"
+  "八年级": "0.9"
+  "九年级": "1.0"
+  "高一": "1.1"
+  "高二": "1.25"
+  "高三": "1.35"
+  "雅思": "1.5"
+  "托福": "1.5"
+excluded_grades: ["领航伴学"]
+non_teaching_lesson_statuses: ["未上课", "已取消", "取消", "停课", "请假"]
+course_rules:
+  - id: special_one_to_two
+    treatment: SPECIAL
+    class_types: ["1对2"]
+    coefficients:
+      "1": "0.8"
+      "2": "1.2"
+ae:
+  tiers:
+    - {id: zero_to_30, minimum: "0", maximum: "30", base: "0"}
+    - {id: 30_to_60, minimum: "30", minimum_exclusive: true, maximum: "60", base: "30"}
+    - {id: 60_to_80, minimum: "60", minimum_exclusive: true, maximum: "80", base: "32"}
+    - {id: 80_to_100, minimum: "80", minimum_exclusive: true, maximum: "100", base: "34"}
+    - {id: 100_to_130, minimum: "100", minimum_exclusive: true, maximum: "130", base: "36"}
+    - {id: 130_to_160, minimum: "130", minimum_exclusive: true, maximum: "160", base: "37"}
+    - {id: over_160, minimum: "160", minimum_exclusive: true, maximum: null, base: "38"}
+  star_bonuses:
+    "1": "0"
+    "2": "0"
+    "3": "5"
+    "4": "10"
+    "5": "15"
+    "6": "20"
+af:
+  default_policy_candidate:
+    obligation_hours: "30"
+    label: "2026-07 default is a candidate only; personal policy or explicit Run confirmation is required"
+    source: "2026-07 historical payroll reconstruction; AF formulas and policy evidence"

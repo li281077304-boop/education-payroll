@@ -40,6 +40,7 @@ HEADERS = CORE_HEADERS + FINAL_OUTPUT_HEADERS
 # zero.  Keeping the list here also makes the delivery boundary testable.
 OUT_OF_SCOPE_FINAL_FIELDS: tuple[str, ...] = FINAL_FIELD_CODES
 HUMAN_REQUIRED = "HUMAN_REQUIRED"
+EXCEL_CELL_CHAR_LIMIT = 32767
 
 
 def _star_display(row: Any) -> str | None:
@@ -380,17 +381,9 @@ def _write_evidence_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple
     sheet.append(headers)
     for column in range(1, len(headers) + 1):
         sheet.cell(7, column).font = Font(bold=True)
-    for row in rows:
-        for field_name, field in {**row.fields, **row.final_fields}.items():
-            sheet.append([
-                row.teacher,
-                field_name,
-                _value(field.get("value")),
-                field.get("state", ""),
-                field.get("reason", ""),
-                json.dumps(field.get("evidence", []), ensure_ascii=False, sort_keys=True, default=str),
-                payroll.rule_versions.get("core", ""),
-            ])
+    detail_rows, overflow_rows = _evidence_detail_rows(payroll, rows)
+    for detail_row in detail_rows:
+        sheet.append(detail_row)
     # A compact source index lets a reviewer resolve the opaque record_key in
     # course evidence back to the source file and source cells.
     start = sheet.max_row + 2
@@ -403,6 +396,48 @@ def _write_evidence_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple
             json.dumps(item.get("provenance", {}), ensure_ascii=False, sort_keys=True, default=str),
         ])
     _set_widths(sheet, {1: 18, 2: 12, 3: 18, 4: 18, 5: 46, 6: 80, 7: 26})
+    if overflow_rows:
+        overflow_sheet = book.create_sheet("字段证据")
+        overflow_sheet.append(["超出 Excel 单元格长度限制的字段证据（按明细编号拆分）"])
+        overflow_sheet.append(["明细编号", "教师", "字段", "证据序号", "证据(JSON)"])
+        for row in overflow_rows:
+            overflow_sheet.append(row)
+        _set_widths(overflow_sheet, {1: 14, 2: 18, 3: 12, 4: 12, 5: 120})
+
+
+def _json_text(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _evidence_detail_rows(payroll: GeneratedPayroll, rows: tuple[Any, ...]):
+    """Return detail rows plus lossless spill rows for Excel's 32,767-char limit."""
+    detail_rows = []
+    overflow_rows = []
+    detail_number = 0
+    for row in rows:
+        for field_name, field in {**row.fields, **row.final_fields}.items():
+            detail_id = f"F{detail_number:06d}"
+            evidence = field.get("evidence", [])
+            evidence_text = _json_text(evidence)
+            if len(evidence_text) > EXCEL_CELL_CHAR_LIMIT:
+                evidence_text = _json_text({
+                    "storage": "字段证据",
+                    "detail_id": detail_id,
+                    "item_count": len(evidence),
+                })
+                for evidence_number, item in enumerate(evidence, start=1):
+                    overflow_rows.append([detail_id, row.teacher, field_name, evidence_number, _json_text(item)])
+            detail_rows.append([
+                row.teacher,
+                field_name,
+                _value(field.get("value")),
+                field.get("state", ""),
+                field.get("reason", ""),
+                evidence_text,
+                payroll.rule_versions.get("core", ""),
+            ])
+            detail_number += 1
+    return detail_rows, overflow_rows
 
 
 def _write_boundary_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple[Any, ...]) -> None:
@@ -527,19 +562,7 @@ def validate_standard_payroll_workbook(path: str | Path, payroll: GeneratedPayro
 
     evidence_sheet = book["核验与来源"] if "核验与来源" in book.sheetnames else None
     if evidence_sheet is not None:
-        expected_detail = [
-            [
-                row.teacher,
-                field_name,
-                _value(field.get("value")),
-                field.get("state", ""),
-                field.get("reason", ""),
-                json.dumps(field.get("evidence", []), ensure_ascii=False, sort_keys=True, default=str),
-                payroll.rule_versions.get("core", ""),
-            ]
-            for row in expected_rows
-            for field_name, field in {**row.fields, **row.final_fields}.items()
-        ]
+        expected_detail, expected_overflow = _evidence_detail_rows(payroll, expected_rows)
         fixed = {
             (1, 1): "标准工资表核验与来源",
             (2, 1): "期间", (2, 2): payroll.period,
@@ -558,6 +581,20 @@ def validate_standard_payroll_workbook(path: str | Path, payroll: GeneratedPayro
             actual_row = [evidence_sheet.cell(row_number, column).value for column in range(1, 8)]
             if any(not _same_output_value(actual, wanted) for actual, wanted in zip(actual_row, wanted_row)):
                 errors.append(f"核验与来源第 {row_number} 行发生变化")
+        overflow_sheet = book["字段证据"] if "字段证据" in book.sheetnames else None
+        if expected_overflow:
+            if overflow_sheet is None:
+                errors.append("缺少字段证据拆分工作表")
+            else:
+                overflow_headers = ["明细编号", "教师", "字段", "证据序号", "证据(JSON)"]
+                if [overflow_sheet.cell(2, column).value for column in range(1, 6)] != overflow_headers:
+                    errors.append("字段证据拆分表头发生变化")
+                for row_number, wanted_row in enumerate(expected_overflow, start=3):
+                    actual_row = [overflow_sheet.cell(row_number, column).value for column in range(1, 6)]
+                    if actual_row != wanted_row:
+                        errors.append(f"字段证据拆分第 {row_number} 行发生变化")
+                if overflow_sheet.max_row != len(expected_overflow) + 2:
+                    errors.append("字段证据拆分行数发生变化")
         source_start = 9 + len(expected_detail)
         if evidence_sheet.cell(source_start, 1).value != "课程记录来源索引":
             errors.append("缺少课程记录来源索引")

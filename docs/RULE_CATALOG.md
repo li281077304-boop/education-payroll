@@ -31,3 +31,5 @@
 | R25 | 合并或复制工作簿时要保留批注，修改前先备份 | `SKILL.md` 五、七 | E | 当前 Skill | 有要求，无自动保障 |
 | R26 | 8 月最终填报数据页用跨文件绝对路径 VLOOKUP；桌面版打开时更新链接 | `SKILL.md` 四、8 月最终工作簿 | C | 2026-09-08 | 确定为最终工作簿机制 |
 | R27 | 全盘复查顺序为差值→溯源→AE→AF/AV→年级→续退兼→名单/管理行 | `SKILL.md` 十四 | E | 2026-09-08 | 规则确定，未程序化 |
+| R28 | 2026-07 使用独立 `core_rules_2026_07_v1` 快照；不继承 2026-08 Run 状态或人工确认 | `config/core_rules_2026_07.yaml`、`docs/JULY_2026_RULE_RECONSTRUCTION.md`、`tests/test_core_service_chain.py` | B | 2026-07 | 已确定 |
+| R29 | July 历史对账对 AA、AC、AD、AE、AF 逐字段分类并保留课程/公式/政策证据；不以教师或 Golden 数值硬编码 | `payroll_ui/service.py:historical_reconciliation`、`docs/JULY_2026_RULE_RECONSTRUCTION.md`、`tests/test_historical_reconciliation.py` | A/D | 2026-07 | 已确定；无证据仍待确认 |

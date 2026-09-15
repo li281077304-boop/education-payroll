@@ -282,3 +282,18 @@ def load_core_rules(path: str | Path | None = None) -> CoreRules:
     with rule_path.open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
     return CoreRules.from_dict(_mapping(raw, f"core rules {rule_path}"))
+
+
+def load_core_rule_bundles(directory: str | Path | None = None) -> tuple[CoreRules, ...]:
+    """Load every checked-in dated Core bundle for first-run registration.
+
+    A fresh local store must be able to create a historical Run without a
+    prior UI edit.  Bundles remain separate immutable snapshots; this helper
+    only discovers them and never chooses a version for a Run.
+    """
+    root = Path(directory) if directory is not None else Path(__file__).resolve().parents[2] / "config"
+    paths = sorted(root.glob("core_rules_*.yaml"))
+    bundles = tuple(load_core_rules(path) for path in paths)
+    if not bundles:
+        return (load_core_rules(root / "core_rules_2026.yaml"),)
+    return bundles

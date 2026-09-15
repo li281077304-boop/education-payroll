@@ -124,3 +124,41 @@ def test_historical_reconciliation_recovers_named_part_time_rate_from_af_comment
     assert field["evidence"][-1]["teacher"] == "刘雨"
     assert field["evidence"][-1]["period"] == "2026-07"
     assert field["evidence"][-1]["rate"] == 140.0
+
+
+def test_historical_reconciliation_classifies_each_core_field_from_its_own_evidence(tmp_path):
+    service = PayrollService(tmp_path / "store")
+    baseline = SimpleNamespace(
+        teacher="教师甲", source="july.xlsx", one_to_one=10.0, class_value=20.0,
+        teaching_hours=30.0, ae=40.0, af=0.0,
+        provenance={"af": SimpleNamespace(raw_value="=(AD7-30)*AE7")},
+    )
+    schedule = [
+        _record(record_key="aa-course"),
+        SimpleNamespace(**{**_record(record_key="ac-course").__dict__, "record_key": "ac-course"}),
+    ]
+    run = {
+        "id": "run-each-field", "period": "2026-07", "period_label": "2026-07",
+        "files": {"baseline": {"path": "july.xlsx"}, "schedule": {"path": "schedule.xlsx"}},
+        "core_calculation": {"rows": [{"teacher": "教师甲", "fields": {
+            "AA": {"value": 12.0}, "AC": {"value": 21.0}, "AD": {"value": 33.0},
+            "AE": {"value": 41.0}, "AF": {"value": 123.0, "reason": "AF：(AD − 30) × AE", "evidence": [{"inputs": {"obligation_hours": "30"}}]},
+        }}], "course_contributions": [
+            {"teacher": "教师甲", "field": "aa", "record_key": "aa-course", "value": 12.0, "evidence": [{"inputs": {"grade_coefficient": "1"}}]},
+            {"teacher": "教师甲", "field": "ac", "record_key": "ac-course", "value": 21.0, "evidence": [{"inputs": {"grade_coefficient": "1.5"}}]},
+        ]},
+    }
+    service._load = lambda _run_id: run
+    service._require_fresh = lambda _run: None
+    service._read_for_run = lambda role, _path, _run: SimpleNamespace(records=[baseline] if role == "baseline" else schedule)
+
+    result = service.historical_reconciliation("run-each-field")
+    fields = result["rows"][0]["fields"]
+
+    assert fields["AA"]["difference_category"] == "COURSE_CONTRIBUTION"
+    assert fields["AC"]["difference_category"] == "COURSE_CONTRIBUTION"
+    assert fields["AD"]["difference_category"] == "COURSE_CONTRIBUTION"
+    assert fields["AE"]["difference_category"] == "RULE_DIFFERENCE"
+    assert fields["AF"]["difference_category"] == "COURSE_CONTRIBUTION"
+    assert fields["AA"]["evidence"][-1]["course_contributions"][0]["field"] == "AA"
+    assert fields["AD"]["evidence"][-1]["course_contributions"]

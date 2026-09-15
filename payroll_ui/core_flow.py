@@ -323,12 +323,20 @@ class CoreFlow:
         return {"version": "RUN_PART_TIME_PRICING_SNAPSHOT/v1", "run_id": run["id"], "period": run["period"], "pricing_version_id": version.get("id") if version else None, "entries": entries, "created_at": datetime.now(timezone.utc).isoformat()}
 
     def core_rule_catalog(self) -> dict:
-        from payroll_core.config.core_rules import load_core_rules
+        from payroll_core.config.core_rules import load_core_rule_bundles, load_core_rules
         seed = load_core_rules().to_dict()
         versions = self.store.calculation_versions("core")
-        if not versions:
-            self._append_core_rules(seed, seed["source"], "已确认规则基线")
-            versions = self.store.calculation_versions("core")
+        known_rule_ids = {item.get("id") for item in versions}
+        # Register all repository-owned dated bundles on first use, including
+        # historical July.  Existing rows are immutable and are never updated
+        # when a later month is introduced.
+        for bundle in load_core_rule_bundles():
+            rules = bundle.to_dict()
+            if rules["rule_version_id"] in known_rule_ids:
+                continue
+            self._append_core_rules(rules, rules["source"], "已确认规则基线")
+            known_rule_ids.add(rules["rule_version_id"])
+        versions = sorted(self.store.calculation_versions("core"), key=lambda item: item.get("effective_from", ""), reverse=True)
         return {"versions": versions, "seed": seed}
 
     def _append_core_rules(self, rules: dict, source: str, actor: str) -> dict:

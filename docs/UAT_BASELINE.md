@@ -258,6 +258,12 @@ missing normalized schedule columns
 
 ## 14. 范围
 
+### 2026-07 规则重建
+
+- July 的真实工资表、核对表、排课源和模板结构已登记为本机只读证据，规则快照见 [`JULY_2026_RULE_RECONSTRUCTION.md`](JULY_2026_RULE_RECONSTRUCTION.md)。
+- July 与 August 使用不同的日期化 Core 版本；Run 级人工确认不会跨月份继承。
+- AA、AC、AD、AE、AF 的历史差异按字段分类并保留来源证据；差异没有依据时继续显示待确认。
+
 工资主流程没有稳定以前，不要自行扩成：
 
 - 完整续费系统
