@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "run_id": "payroll-cua-big-loop-20260915",
+  "project_id": "education-payroll",
+  "phase": "WAITING_FOR_HUMAN",
+  "status": "waiting",
+  "updated_at": "2026-09-16T08:00:00+08:00",
+  "current_payroll_run_id": "18a38d63ebcd",
+  "obligation_counts": {
+    "total": 17,
+    "pass": 11,
+    "technical_open": 0,
+    "human_blocked": 6,
+    "failed": 0
+  },
+  "fresh_run": {
+    "period_label": "2026-08",
+    "period_start": "2026-08-03",
+    "period_end": "2026-08-30",
+    "schedule_rows": 2385,
+    "teachers": 51,
+    "aa": "51/51 DETERMINED",
+    "ac": "51/51 DETERMINED",
+    "ad": "51/51 DETERMINED",
+    "ae": "51/51 DETERMINED",
+    "af": "6 DETERMINED; 45 ESTIMATED pending fresh policy confirmation",
+    "m": "19 DETERMINED; 32 BLOCKED_BY_INPUT",
+    "renewal": "49 real 8月 rows imported as SUBMITTED; none APPROVED/bound",
+    "refund": "31 real 8月份 rows read; status is blank"
+  },
+  "chief": {
+    "external_attempts": 3,
+    "external_successes": 3,
+    "external_failures": 0,
+    "host_sol_fallbacks": 0
+  },
+  "human_interrupt_count": 0,
+  "isolation": {
+    "worktree": "/private/tmp/education-payroll-host-chief.h2CabN",
+    "original_workspace_touched": false,
+    "merge_occurred": false
+  },
+  "stop_reason": "All remaining current obligations are evidence-backed business/source confirmations; no technical-open item remains."
+}

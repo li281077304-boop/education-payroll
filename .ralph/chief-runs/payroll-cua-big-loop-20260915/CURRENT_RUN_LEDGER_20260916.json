@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "run_id": "18a38d63ebcd",
+  "project_id": "education-payroll",
+  "period_label": "2026-08",
+  "period_start": "2026-08-03",
+  "period_end": "2026-08-30",
+  "period_boundary_source": "SOURCE_FILE_RANGE",
+  "source": "REAL_UAT_20260916.md",
+  "obligations": [
+    {"id":"UAT-01","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-01"},
+    {"id":"UAT-02","status":"PASS","evidence":"REAL_UAT_20260916.md#run-and-period"},
+    {"id":"UAT-03","status":"PASS","evidence":"REAL_UAT_20260916.md#inputs-and-hashes"},
+    {"id":"UAT-04","status":"PASS","evidence":"REAL_UAT_20260916.md#current-fresh-run-results","note":"period and grade warnings remain explicit"},
+    {"id":"UAT-05","status":"HUMAN_BLOCKED","category":"USER_ONLY_INPUT","blocked_reason":"32 in-scope teachers still lack complete authoritative G-L inputs","evidence":"REAL_UAT_20260916.md#current-fresh-run-results"},
+    {"id":"UAT-06","status":"HUMAN_BLOCKED","category":"BUSINESS_DECISION","blocked_reason":"fresh AF monthly policy confirmation is not inherited from an older Run","evidence":"REAL_UAT_20260916.md#current-fresh-run-results"},
+    {"id":"UAT-07","status":"HUMAN_BLOCKED","category":"BUSINESS_DECISION","blocked_reason":"no active, period-effective part-time pricing policy was confirmed for this Run","evidence":"docs/UAT_MATRIX.md#UAT-07"},
+    {"id":"UAT-08","status":"HUMAN_BLOCKED","category":"USER_ONLY_INPUT","blocked_reason":"real 8月 renewal rows are SUBMITTED without APPROVED state and stable teacher_id","evidence":"REAL_UAT_20260916.md#source-gap-decisions"},
+    {"id":"UAT-09","status":"HUMAN_BLOCKED","category":"BUSINESS_DECISION","blocked_reason":"real refund source has blank status; approval cannot be inferred","evidence":"REAL_UAT_20260916.md#source-gap-decisions"},
+    {"id":"UAT-10","status":"HUMAN_BLOCKED","category":"BUSINESS_DECISION","blocked_reason":"other AV component rules or authoritative values are not defined","evidence":"REAL_UAT_20260916.md#source-gap-decisions"},
+    {"id":"UAT-11","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-11"},
+    {"id":"UAT-12","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-12"},
+    {"id":"UAT-13","status":"PASS","evidence":"REAL_UAT_20260916.md#export-and-deterministic-checks"},
+    {"id":"UAT-14","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-14"},
+    {"id":"UAT-15","status":"PASS","evidence":"REAL_UAT_20260916.md#export-and-deterministic-checks"},
+    {"id":"UAT-16","status":"PASS","evidence":"REAL_UAT_20260916.md#export-and-deterministic-checks"},
+    {"id":"UAT-17","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-17"}
+  ],
+  "counts": {"PASS": 11, "TECHNICAL_OPEN": 0, "HUMAN_BLOCKED": 6, "FAILED": 0},
+  "core_payroll_ready": "YES",
+  "full_payroll_ready": "NO",
+  "scheduler_state": "WAITING_FOR_HUMAN"
+}

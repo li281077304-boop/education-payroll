@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "project_id": "education-payroll",
+  "bootstrap_id": "payroll-bootstrap-20260915",
+  "obligations": [
+    {"id":"UAT-01","description":"进入系统与导航","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-01"},
+    {"id":"UAT-02","description":"新建真实工资 Run","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-02"},
+    {"id":"UAT-03","description":"导入真实资料","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-03"},
+    {"id":"UAT-04","description":"数据准备与异常","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-04","note":"PASS_WITH_WARNING; grade warnings retained"},
+    {"id":"UAT-05","description":"基本工资 M","status":"HUMAN_BLOCKED","evidence":"docs/UAT_MATRIX.md#UAT-05","blocked_reason":"缺少权威 G-L 实际基本工资来源","category":"USER_ONLY_INPUT"},
+    {"id":"UAT-06","description":"核心课时工资 AA/AC/AD/AE/AF","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-06"},
+    {"id":"UAT-07","description":"兼职定价","status":"HUMAN_BLOCKED","evidence":"docs/UAT_MATRIX.md#UAT-07","blocked_reason":"本期缺少可核验 ACTIVE 兼职政策目标","category":"BUSINESS_DECISION"},
+    {"id":"UAT-08","description":"续费与 AK","status":"HUMAN_BLOCKED","evidence":"docs/UAT_MATRIX.md#UAT-08","blocked_reason":"缺少 APPROVED 结果与稳定 teacher_id","category":"USER_ONLY_INPUT"},
+    {"id":"UAT-09","description":"退费 AN","status":"HUMAN_BLOCKED","evidence":"docs/UAT_MATRIX.md#UAT-09","blocked_reason":"退费来源无审核状态字段","category":"BUSINESS_DECISION"},
+    {"id":"UAT-10","description":"其它 AV 组成项","status":"HUMAN_BLOCKED","evidence":"docs/UAT_MATRIX.md#UAT-10","blocked_reason":"缺少权威来源或规则","category":"BUSINESS_DECISION"},
+    {"id":"UAT-11","description":"待办中心","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-11"},
+    {"id":"UAT-12","description":"批注/回填","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-12","note":"PASS_WITH_WARNING; source-specific confirmation retained"},
+    {"id":"UAT-13","description":"工资预览","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-13","note":"PASS_WITH_WARNING; peripheral gaps visible"},
+    {"id":"UAT-14","description":"历史工资对账","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-14","note":"PASS_WITH_WARNING; peripheral gaps classified"},
+    {"id":"UAT-15","description":"正常 UI 导出","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-15"},
+    {"id":"UAT-16","description":"Excel 重开","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-16"},
+    {"id":"UAT-17","description":"第二次使用","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-17"}
+  ],
+  "counts": {"PASS": 12, "HUMAN_BLOCKED": 5, "TECHNICAL_OPEN": 0, "FAILED": 0},
+  "latest_current_run": {
+    "run_id": "18a38d63ebcd",
+    "artifact": ".ralph/chief-runs/payroll-cua-big-loop-20260915/CURRENT_RUN_LEDGER_20260916.json",
+    "counts": {"PASS": 11, "HUMAN_BLOCKED": 6, "TECHNICAL_OPEN": 0, "FAILED": 0},
+    "note": "Fresh 2026-08 run re-confirmed AF and M readiness; prior Run decisions were not reused."
+  },
+  "scheduler_state": "WAITING_FOR_HUMAN",
+  "created_at": "2026-09-15T09:00:00Z"
+}
