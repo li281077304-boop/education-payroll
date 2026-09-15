@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "run_id": "payroll-bootstrap-real-uat-20260915",
+  "round": 1,
+  "task_id": null,
+  "handoff_hash": "076fcf3a644504744ced3b05e1bb593e0107a732fe48a6794348bb69776f2ab5",
+  "task_hash": "32f0151b7d8b819a55c74f4e66887b48c131151e9ca1420820ad56786b478e81",
+  "created_at": "2026-09-15T12:21:11.583Z"
+}
