@@ -27,7 +27,7 @@
     {"id":"UAT-17","status":"PASS","evidence":"docs/UAT_MATRIX.md#UAT-17"}
   ],
   "counts": {"PASS": 11, "TECHNICAL_OPEN": 0, "HUMAN_BLOCKED": 6, "FAILED": 0},
-  "core_payroll_ready": "YES",
+  "core_payroll_ready": "NO (fresh AF monthly confirmation pending)",
   "full_payroll_ready": "NO",
   "scheduler_state": "WAITING_FOR_HUMAN"
 }
