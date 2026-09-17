@@ -10,7 +10,8 @@ class RunStore:
     def __init__(self, root: Path):
         root.mkdir(parents=True, exist_ok=True)
         self.path = root / "payroll-ui.sqlite3"
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
+            db.execute("PRAGMA journal_mode=WAL")
             db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS rating_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS policy_versions (id TEXT PRIMARY KEY, effective_from TEXT NOT NULL, effective_to TEXT NOT NULL, payload TEXT NOT NULL)")
@@ -38,10 +39,23 @@ class RunStore:
             # grade facts by themselves.
             db.execute("CREATE TABLE IF NOT EXISTS course_export_snapshots (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
+    def _connect(self) -> sqlite3.Connection:
+        """Open a busy-tolerant connection for concurrent UI requests.
+
+        The browser can issue a refresh/recheck while an earlier POST is still
+        committing.  WAL plus a bounded busy timeout prevents the valid second
+        request from becoming the user-visible ``database is locked`` failure.
+        """
+        db = sqlite3.connect(self.path, timeout=15.0)
+        db.execute("PRAGMA busy_timeout=15000")
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        return db
+
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
         payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO runs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (run["id"], run["created_at"], payload))
 
     def save_run_and_business_input(self, run: dict, item: dict) -> None:
@@ -56,35 +70,35 @@ class RunStore:
         item["updated_at"] = timestamp
         run_payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         item_payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO runs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (run["id"], run["created_at"], run_payload))
             db.execute("INSERT INTO business_inputs(id,created_at,payload) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (item["id"], item["created_at"], item_payload))
 
     def get(self, run_id: str) -> dict:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT payload FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None:
             raise ValueError("未找到该工资核算记录。")
         return json.loads(row[0])
 
     def list(self) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             rows = db.execute("SELECT payload FROM runs ORDER BY created_at DESC").fetchall()
         runs = [json.loads(row[0]) for row in rows]
         return sorted(runs, key=lambda item: item.get("updated_at", item["created_at"]), reverse=True)
 
     def save_rating_version(self, version: dict) -> None:
         payload = json.dumps(version, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO rating_versions(id,effective_from,effective_to,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (version["id"], version["effective_from"], version["effective_to"], payload))
 
     def list_rating_versions(self) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             rows = db.execute("SELECT payload FROM rating_versions ORDER BY effective_from DESC").fetchall()
         return [json.loads(row[0]) for row in rows]
 
     def get_rating_version(self, version_id: str) -> dict:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT payload FROM rating_versions WHERE id=?", (version_id,)).fetchone()
         if row is None:
             raise ValueError("未找到教师星级版本。")
@@ -92,16 +106,16 @@ class RunStore:
 
     def save_policy_version(self, version: dict) -> None:
         payload = json.dumps(version, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO policy_versions(id,effective_from,effective_to,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", (version["id"], version["effective_from"], version["effective_to"], payload))
 
     def list_policy_versions(self) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             rows = db.execute("SELECT payload FROM policy_versions ORDER BY effective_from DESC").fetchall()
         return [json.loads(row[0]) for row in rows]
 
     def get_policy_version(self, version_id: str) -> dict:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT payload FROM policy_versions WHERE id=?", (version_id,)).fetchone()
         if row is None:
             raise ValueError("未找到教师工资政策版本。")
@@ -113,18 +127,18 @@ class RunStore:
         item.setdefault("created_at", created)
         item["updated_at"] = datetime.now(timezone.utc).isoformat()
         payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute(f"INSERT INTO {table}({key},created_at,payload) VALUES(?,?,?) ON CONFLICT({key}) DO UPDATE SET payload=excluded.payload", (identifier, created, payload))
 
     def _get_entity(self, table: str, identifier: str, *, key: str = "id") -> dict:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute(f"SELECT payload FROM {table} WHERE {key}=?", (identifier,)).fetchone()
         if row is None:
             raise ValueError("未找到指定记录。")
         return json.loads(row[0])
 
     def _list_entities(self, table: str) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             rows = db.execute(f"SELECT payload FROM {table} ORDER BY created_at DESC").fetchall()
         return [json.loads(row[0]) for row in rows]
 
@@ -133,11 +147,11 @@ class RunStore:
 
     def append_business_input_event(self, input_id: str, event: dict) -> None:
         payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO business_input_events(input_id,created_at,payload) VALUES(?,?,?)", (input_id, event["created_at"], payload))
 
     def list_business_input_events(self, input_id: str) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             rows = db.execute("SELECT payload FROM business_input_events WHERE input_id=? ORDER BY id", (input_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
@@ -167,7 +181,7 @@ class RunStore:
         record: a class-course note may only be generated from a resolution
         that really exists, and it must never depend on which side wrote it.
         """
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT payload FROM resolutions WHERE id=?", (resolution_id,)).fetchone()
         if row is not None:
             return json.loads(row[0])
@@ -201,11 +215,11 @@ class RunStore:
 
     def append_submission_event(self, batch_id: str, event: dict) -> None:
         payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO submission_events(batch_id,created_at,payload) VALUES(?,?,?)", (batch_id, event["created_at"], payload))
 
     def list_submission_events(self, batch_id: str) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             rows = db.execute("SELECT payload FROM submission_events WHERE batch_id=? ORDER BY id", (batch_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
@@ -235,7 +249,7 @@ class RunStore:
         """Calculation authorities are immutable snapshots, never upserted."""
         table = {"core": "core_rule_versions", "part_time": "part_time_rate_versions"}[kind]
         payload = json.dumps(item, ensure_ascii=False, allow_nan=False)
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute(f"INSERT INTO {table}(id,created_at,payload) VALUES(?,?,?)", (item["id"], item["created_at"], payload))
 
     def calculation_versions(self, kind: str) -> list[dict]:
@@ -262,20 +276,20 @@ class RunStore:
 
     def append_assessment_event(self, record_id: str, event: dict) -> None:
         payload = json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO assessment_events(record_id,created_at,payload) VALUES(?,?,?)", (record_id, event["created_at"], payload))
 
     def list_assessment_events(self, record_id: str) -> list[dict]:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             rows = db.execute("SELECT payload FROM assessment_events WHERE record_id=? ORDER BY id", (record_id,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
     def save_teacher_access(self, teacher_id: str, token_hash: str, item: dict) -> None:
         payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             db.execute("INSERT INTO teacher_access(teacher_id,token_hash,payload) VALUES(?,?,?) ON CONFLICT(teacher_id) DO UPDATE SET token_hash=excluded.token_hash,payload=excluded.payload", (teacher_id, token_hash, payload))
 
     def teacher_access_by_hash(self, token_hash: str) -> dict | None:
-        with sqlite3.connect(self.path) as db:
+        with self._connect() as db:
             row = db.execute("SELECT payload FROM teacher_access WHERE token_hash=?", (token_hash,)).fetchone()
         return json.loads(row[0]) if row else None

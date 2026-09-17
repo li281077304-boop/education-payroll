@@ -12,6 +12,7 @@ from payroll_ui.service import PayrollService
 from payroll_ui.server import PayrollHttpServer
 from tests.test_payroll_modes_and_class_rules import _schedule
 from tests.test_payroll_ui_service import _payroll_with_only
+from tests.payroll_test_helpers import bind_template
 
 
 def prepared(tmp_path, mode="AUDIT"):
@@ -53,6 +54,7 @@ def test_generate_and_audit_share_all_five_fields(tmp_path):
     service, audit, source, _ = prepared(tmp_path)
     checked = service.check(audit["id"])
     generate = service.create("2026-08", "GENERATE")
+    generate = bind_template(service, generate)
     service.import_file(generate["id"], "schedule", str(source))
     made = service.generate_payroll(generate["id"], str(tmp_path / "generated.xlsx"))
     assert made["rows"][0]["fields"] == checked["core_calculation"]["rows"][0]["fields"]
@@ -106,6 +108,7 @@ def test_new_evidence_month_can_keep_semantic_rule_id(tmp_path):
 
 def test_sanitized_http_generate_chain_and_restore(tmp_path):
     service, run, _, _ = prepared(tmp_path, "GENERATE")
+    run = bind_template(service, run)
     server = PayrollHttpServer(("127.0.0.1", 0), service, Path(__file__).parents[1] / "payroll_ui" / "static")
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()

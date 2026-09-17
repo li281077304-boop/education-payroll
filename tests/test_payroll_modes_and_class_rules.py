@@ -15,6 +15,7 @@ from payroll_core.reconcile.payroll_scope import (
 )
 from payroll_ui.service import PayrollService
 from tests.test_payroll_ui_service import FIXTURES, _prepared_run_with_values
+from tests.payroll_test_helpers import bind_template
 
 
 def _record(class_type: str, attended: int, grade: str = "八年级") -> ScheduleRecord:
@@ -172,7 +173,7 @@ def test_generated_and_audited_modes_use_same_core_result(tmp_path):
     checked = service.check(audit_run["id"])
     audited = {item["teacher"]: item for item in checked["field_records"] if item["field"] == "class_value"}
 
-    generated_run = service.create("2026-08", "GENERATE")
+    generated_run = bind_template(service, service.create("2026-08", "GENERATE"))
     service.import_file(generated_run["id"], "schedule", str(schedule))
     output = tmp_path / "生成工资表.xlsx"
     produced = service.generate_payroll(generated_run["id"], str(output))
@@ -183,13 +184,13 @@ def test_generated_and_audited_modes_use_same_core_result(tmp_path):
         if expected and expected["expected"] is not None:
             assert row["class_value"] == pytest.approx(expected["expected"]), "两模式不能出现算法漂移"
     book = load_workbook(output)
-    assert book["标准工资表"]["B3"].value == "AA 一对一折算小时"
-    assert book["标准工资表"]["A1"].value.endswith("非复制任何提交表）")
+    assert book["标准工资表"]["C3"].value == "姓名"
+    assert book["标准工资表"]["H2"].value == "2026-08"
 
 
 def test_generate_mode_does_not_require_a_submitted_payroll_sheet(tmp_path):
     service = PayrollService(tmp_path / "data")
-    run = service.create("2026-08", "GENERATE")
+    run = bind_template(service, service.create("2026-08", "GENERATE"))
     path = _schedule(tmp_path / "schedule.xlsx", [["张三", "八年级", "数学", "1对1", 2, "已上课"]])
 
     imported = service.import_file(run["id"], "schedule", str(path))
@@ -220,13 +221,14 @@ def test_audit_mode_still_requires_a_submitted_payroll_sheet(tmp_path):
 
 def test_generate_mode_marks_draft_and_never_overwrites(tmp_path):
     service = PayrollService(tmp_path / "data")
-    run = service.create("2026-08", "GENERATE")
+    run = bind_template(service, service.create("2026-08", "GENERATE"))
     service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "s.xlsx", [["张三", "八年级", "数学", "1对1", 2, "已上课"]])))
     output = tmp_path / "标准工资表.xlsx"
 
     service.generate_payroll(run["id"], str(output))
-    text = load_workbook(output)["标准工资表"]["A2"].value
-    assert "不等于最终全项工资" in text
+    book = load_workbook(output)
+    assert book["标准工资表"]["H2"].value == "2026-08"
+    assert book["标准工资表"]["C5"].value == "张三"
     first_bytes = output.read_bytes()
     second = service.generate_payroll(run["id"], str(output))
     assert Path(second["path"]).name == "标准工资表 (2).xlsx"
@@ -235,7 +237,7 @@ def test_generate_mode_marks_draft_and_never_overwrites(tmp_path):
 
 def test_unknown_class_type_blocks_the_generated_payroll(tmp_path):
     service = PayrollService(tmp_path / "data")
-    run = service.create("2026-08", "GENERATE")
+    run = bind_template(service, service.create("2026-08", "GENERATE"))
     service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "s.xlsx", [["张三", "八年级", "数学", "四人精品班", 4, "已上课"]])))
 
     produced = service.generate_payroll(run["id"], str(tmp_path / "out.xlsx"))

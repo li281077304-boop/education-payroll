@@ -1,0 +1,20 @@
+{
+  "version": "2026-09-17.1",
+  "run_id": "payroll-uat-20260917-r1",
+  "source_task": "docs/uat/2026-09-17/PAYROLL_TASK_2026-09-17.md",
+  "source_uat": "docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_2026-09-17.md",
+  "obligations": [
+    {"id":"UAT-0917-01","priority":"P0","status":"PASS","description":"教师筛选连续输入、删除、清空和无结果状态不丢焦点","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
+    {"id":"UAT-0917-03","priority":"P0","status":"HUMAN_BLOCKED","description":"特殊情况提供无特殊情况与有特殊情况双向确认并持久化","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
+    {"id":"UAT-0917-04","priority":"P0","status":"PASS","description":"30小时确认有处理中、成功/失败反馈、防重复提交及持久化","evidence":"devlog/2026-09-17/001-payroll-real-product-loop/technical-incident-database-lock.md","failure_signature":"4ac7c59609da3256"},
+    {"id":"UAT-0917-05","priority":"P0","status":"HUMAN_BLOCKED","description":"基本工资缺失在当前问题卡完成查看、录入、暂缓或允许的下一步","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
+    {"id":"UAT-0917-07","priority":"P0","status":"HUMAN_BLOCKED","description":"导出必须绑定公司原工资模板，未绑定时 fail closed","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
+    {"id":"UAT-0917-12","priority":"P0","status":"PASS","description":"缺权威且缺上传资料的星级为待确认，不默认二星已确定","evidence":"tests/test_core_calculation.py::test_ae_authority_reference_and_missing_rating_states"},
+    {"id":"UAT-0917-02","priority":"P1","status":"PASS","description":"聚合教师卡提供明确查看明细入口","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
+    {"id":"UAT-0917-06","priority":"P1","status":"PASS","description":"核查动作使用明确动词和结果描述","evidence":"tests/test_uat_20260917_payroll_loop.py::test_payroll_issue_actions_expose_recovery_paths"},
+    {"id":"UAT-0917-08","priority":"P1","status":"PASS","description":"预览表头简洁，详细依据折叠","evidence":"tests/test_standard_payroll_output.py"},
+    {"id":"UAT-0917-09","priority":"P1","status":"PASS","description":"预览和底部操作区可完整滚动到达","evidence":"tests/test_standard_payroll_output.py"},
+    {"id":"UAT-0917-10","priority":"P1","status":"PASS","description":"预览单元格减少重复长说明，保留可展开依据","evidence":"tests/test_standard_payroll_output.py"},
+    {"id":"UAT-0917-11","priority":"P1","status":"PASS","description":"统一绿色/黄色/红色状态语义","evidence":"tests/test_rc_ui_render.py"}
+  ]
+}

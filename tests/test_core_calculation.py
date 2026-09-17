@@ -162,9 +162,10 @@ def test_ae_authority_reference_and_missing_rating_states():
     assert row(referenced).ae.value == Decimal("40") and row(referenced).ae.state == ValueState.DETERMINED
     assert row(referenced).af.state == ValueState.DETERMINED
     missing = calculate_payroll("2026-08", classes, rules, profiles=[approved_profile()])
-    assert row(missing).ae.value == Decimal("30")
-    assert row(missing).ae.state == row(missing).af.state == ValueState.DETERMINED
-    assert "默认二星" in row(missing).ae.reason
+    assert row(missing).ae.value is None
+    assert row(missing).ae.state.value == "NEEDS_INPUT"
+    assert row(missing).af.state == ValueState.NEEDS_INPUT
+    assert "缺失" in row(missing).ae.reason
 
 
 def test_star_source_policy_is_explicit_and_conflicts_never_silently_win():

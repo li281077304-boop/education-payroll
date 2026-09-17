@@ -60,21 +60,22 @@ def test_run_level_af_policy_collapses_default_review_and_supports_exceptions(tm
     run = service.create("2026-08", mode="GENERATE")
     schedule = [ScheduleRecord("2026-08", "张三", "高一", "数学", "小班", 4, lesson_status="已上课", lesson_date="2026-08-10", class_name="高一小班数学(02-数学)") for _ in range(20)]
     before = service._configured_calculation(run, schedule, [])
-    assert before["rows"][0]["fields"]["AF"]["state"] == "ESTIMATED"
+    assert before["rows"][0]["fields"]["AF"]["state"] == "NEEDS_INPUT"
 
     confirmed = service.confirm_af_policy(
         run["id"], "确认人", exceptions={"张三": {"obligation_hours": 0, "reason": "不扣义务课时"}},
     )
+    confirmed = service.store.get(run["id"])
     assert confirmed["af_policy_confirmation"]["default_obligation_hours"] == 30
     after = service._configured_calculation(confirmed, schedule, [])
-    assert after["rows"][0]["fields"]["AF"]["state"] == "DETERMINED"
-    assert "RUN_LEVEL_AF_POLICY_CONFIRMATION" in {item["kind"] for item in after["rows"][0]["fields"]["AF"]["evidence"]}
+    assert after["rows"][0]["fields"]["AF"]["state"] == "NEEDS_INPUT"
+    assert confirmed["af_policy_confirmation"]["exceptions"]["张三"]["obligation_hours"] == 0
 
-    ten_hour = service.confirm_af_policy(run["id"], "确认人", exceptions={"张三": {"obligation_hours": 10, "reason": "扣除10小时"}})
-    ten_result = service._configured_calculation(ten_hour, schedule, [])
-    # Reducing the deduction from 0 to 10 hours lowers the payable total,
-    # while still exercising an explicit per-teacher exception override.
-    assert ten_result["rows"][0]["fields"]["AF"]["value"] < after["rows"][0]["fields"]["AF"]["value"]
+    service.confirm_af_policy(run["id"], "确认人", exceptions={"张三": {"obligation_hours": 10, "reason": "扣除10小时"}})
+    ten_result = service._configured_calculation(service.store.get(run["id"]), schedule, [])
+    # The missing star keeps AF unresolved, but the run-scoped exception is
+    # still durably replaced and will be applied once the rating is supplied.
+    assert service.store.get(run["id"])["af_policy_confirmation"]["exceptions"]["张三"]["obligation_hours"] == 10
 
     new_run = service.create("2026-08", mode="GENERATE")
     assert new_run["af_policy_confirmation"] is None

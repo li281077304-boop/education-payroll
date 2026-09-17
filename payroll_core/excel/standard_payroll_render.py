@@ -49,7 +49,10 @@ def _star_display(row: Any) -> str | None:
     evidence = row.fields.get("AE", {}).get("evidence", ()) if isinstance(row.fields, Mapping) else ()
     kinds = {item.get("kind") for item in evidence if isinstance(item, Mapping)}
     if "DEFAULT_TWO_STAR" in kinds:
-        return f"已确定/默认二星"
+        # Legacy runs may still contain this historical evidence, but new
+        # calculations never create it.  Keep the display honest if an old
+        # artifact is opened rather than treating it as current authority.
+        return f"历史运行/默认二星"
     if "CONFLICT_AUTHORITY_WINS" in kinds:
         return f"已确定/冲突按权威/{row.star}星"
     if "RATING_AUTHORITY" in kinds and "PAYROLL_REFERENCE_RATING" in kinds:
@@ -100,48 +103,18 @@ def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path, *, t
     target = safe_output_path(output)
     if not payroll.rows:
         raise ValueError("没有可生成的教师记录，不能创建空的标准工资表。")
+    if not template_path:
+        raise ValueError("未绑定公司工资模板，已停止导出；请先在当前核算材料中选择或导入公司原工资模板。")
     rows = _ordered_rows(payroll)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if template_path:
         return _render_with_template(payroll, rows, target, Path(template_path))
 
-    book = Workbook()
-    sheet = book.active
-    sheet.title = "标准工资表"
-    headline = f"{payroll.period} 标准工资表（由 Core 计算结果生成，非复制任何提交表）"
-    sheet.append([headline])
-    sheet["A1"].font = Font(bold=True)
-    sheet.append([f"状态：{'全项最终工资已计算' if payroll.final else '草稿 / 待确认——不得作为最终工资；不等于最终全项工资'}"])
-    sheet.append(list(HEADERS))
-    for column in range(1, len(HEADERS) + 1):
-        sheet.cell(3, column).font = Font(bold=True)
-    sheet.freeze_panes = "A4"
-    sheet.auto_filter.ref = f"A3:{_column_letter(len(HEADERS))}{len(rows) + 3}"
-
-    for row in rows:
-        av = _field_value(row, "AV")
-        detail_fields = {**row.fields, **row.final_fields}
-        sheet.append([
-            row.teacher,
-            _value(row.one_to_one), _value(row.class_value), _value(row.teaching_hours),
-            _value(row.ae), _value(_field_value(row, "AF", fallback=row.af)), _value(av),
-            "待确认" if not row.final else "已计算",
-            "、".join(_row_blockers(row)),
-            _value(row.part_time_amount),
-            "；".join(f"{key}: {item['state']}" for key, item in detail_fields.items()),
-            row.star,
-            payroll.rule_versions.get("core", ""),
-            *[_value(_field_value(row, code)) for code in FINAL_OUTPUT_CODES],
-        ])
-
-    _write_evidence_sheet(book, payroll, rows)
-    _write_boundary_sheet(book, payroll, rows)
-    book.save(target)
-    validation = validate_standard_payroll_workbook(target, payroll)
-    if not validation["ok"]:
-        raise ValueError("生成的标准工资表校验失败：" + "；".join(validation["errors"]))
-    return str(target.resolve())
+    # The final output path is intentionally template-only.  The old
+    # generated "标准工资表" fallback was a second business format and could
+    # not satisfy the company's export contract.
+    return _render_with_template(payroll, rows, target, Path(template_path))
 
 
 def _template_headers(sheet) -> dict[str, int]:
@@ -163,6 +136,13 @@ def _template_headers(sheet) -> dict[str, int]:
     if missing:
         raise ValueError("工资模板缺少必要列：" + "、".join(missing))
     return found
+
+
+def _template_headers_safe(sheet) -> dict[str, int] | None:
+    try:
+        return _template_headers(sheet)
+    except ValueError:
+        return None
 
 
 def _render_with_template(payroll: GeneratedPayroll, rows: tuple[Any, ...], target: Path, template: Path) -> str:
@@ -443,8 +423,49 @@ def validate_standard_payroll_workbook(path: str | Path, payroll: GeneratedPayro
     except Exception as exc:  # openpyxl raises several format-specific types
         return {"ok": False, "errors": [f"无法重新打开输出文件：{exc}"], "warnings": [], "rows_checked": 0}
     if "标准工资表" not in book.sheetnames:
-        errors.append("缺少标准工资表工作表")
-        return {"ok": False, "errors": errors, "warnings": [], "rows_checked": 0}
+        # Company templates are allowed to retain their own sheet name.  In
+        # that case validate the stable template contract instead of
+        # rejecting an otherwise valid export merely because the tab is named
+        # ``Sheet1`` (or another company-local name).
+        template_sheet = next((candidate for candidate in book.worksheets if _template_headers_safe(candidate)), None)
+        if template_sheet is None:
+            errors.append("缺少标准工资表工作表")
+            return {"ok": False, "errors": errors, "warnings": [], "rows_checked": 0}
+        columns = _template_headers(template_sheet)
+        expected_rows = _ordered_rows(payroll)
+        for offset, expected in enumerate(expected_rows, start=5):
+            if template_sheet.cell(offset, columns["teacher"]).value != expected.teacher:
+                errors.append(f"{expected.teacher} 的教师列输出值不一致")
+            if not _same_output_value(template_sheet.cell(offset, columns["ae"]).value, expected.ae):
+                errors.append(f"{expected.teacher} 的 ae 输出值不一致")
+        # Evidence and boundary sheets are still checked by the canonical
+        # sections below; formulas in the supplied company template are
+        # intentionally permitted in this branch.
+        if "核验与来源" not in book.sheetnames:
+            errors.append("缺少核验与来源工作表")
+        if "外围字段状态" not in book.sheetnames:
+            errors.append("缺少外围字段状态工作表")
+        else:
+            boundary = book["外围字段状态"]
+            for index, code in enumerate(OUT_OF_SCOPE_FINAL_FIELDS, start=4):
+                states = {str(row.final_fields.get(code, {}).get("state", HUMAN_REQUIRED)) for row in expected_rows}
+                wanted_state = next(iter(states)) if len(states) == 1 else HUMAN_REQUIRED
+                if (boundary.cell(index, 1).value, boundary.cell(index, 2).value) != (code, wanted_state):
+                    errors.append(f"外围字段 {code} 状态不一致")
+        evidence_sheet = book["核验与来源"] if "核验与来源" in book.sheetnames else None
+        if evidence_sheet is not None:
+            expected_detail = [
+                [row.teacher, field_name, _value(field.get("value")), field.get("state", ""),
+                 field.get("reason", ""), json.dumps(field.get("evidence", []), ensure_ascii=False, sort_keys=True, default=str),
+                 payroll.rule_versions.get("core", "")]
+                for row in expected_rows
+                for field_name, field in {**row.fields, **row.final_fields}.items()
+            ]
+            for row_number, wanted_row in enumerate(expected_detail, start=8):
+                actual_row = [evidence_sheet.cell(row_number, column).value for column in range(1, 8)]
+                if any(not _same_output_value(actual, wanted) for actual, wanted in zip(actual_row, wanted_row)):
+                    errors.append(f"核验与来源第 {row_number} 行发生变化")
+        return {"ok": not errors, "errors": errors, "warnings": [], "rows_checked": len(expected_rows)}
     sheet = book["标准工资表"]
     if sheet.max_column != len(HEADERS):
         errors.append(f"标准工资表列数不一致：文件 {sheet.max_column}，模型 {len(HEADERS)}")

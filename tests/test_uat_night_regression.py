@@ -17,6 +17,8 @@ from openpyxl import Workbook
 from payroll_core.excel.output_paths import safe_output_path
 from payroll_core.period import coverage_for, default_period_for, dominant_month, month_from_filename
 from payroll_ui.service import PayrollService
+from tests.payroll_test_helpers import bind_template
+from tests.payroll_test_helpers import bind_template
 
 
 HEADERS = ["任课老师", "年级", "学科", "课程所属班型", "实到人数", "上课状态", "上课时间"]
@@ -131,7 +133,7 @@ def test_keeping_the_month_does_not_silently_switch(tmp_path):
 def test_partial_month_coverage_is_a_warning_not_a_blocker(tmp_path):
     """8/1–8/30 覆盖不完整 → warning，不是默认 blocker。"""
     service = PayrollService(tmp_path / "app")
-    run = service.create("2026-08", "GENERATE")
+    run = bind_template(service, service.create("2026-08", "GENERATE"))
     path = _schedule(tmp_path / "排课.xlsx", [_lesson("张三", "2026-08-01"), _lesson("张三", "2026-08-30")])
 
     imported = service.import_file(run["id"], "schedule", str(path))
@@ -189,7 +191,7 @@ def test_export_fills_gaps_without_colliding(tmp_path):
 def test_generated_payroll_export_is_collision_safe(tmp_path):
     """End to end: generating twice must not fail or overwrite the first file."""
     service = PayrollService(tmp_path / "app")
-    run = service.create("2026-08", "GENERATE")
+    run = bind_template(service, service.create("2026-08", "GENERATE"))
     path = _schedule(tmp_path / "排课.xlsx", [_lesson("张三", "2026-08-05"), _lesson("张三", "2026-08-31")])
     service.import_file(run["id"], "schedule", str(path))
     target = tmp_path / "工资表.xlsx"

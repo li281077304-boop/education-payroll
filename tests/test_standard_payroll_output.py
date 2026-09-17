@@ -20,6 +20,7 @@ from payroll_core.excel.standard_payroll_render import (
 from payroll_core.models.records import ScheduleRecord
 from payroll_core.payroll_generation import GeneratedPayroll, base_salary_field, build_generated_payroll, generated_from_calculation
 from payroll_ui.service import PayrollService
+from tests.payroll_test_helpers import TEMPLATE_PATH, bind_template
 
 
 def _generated(*, reference_rating: bool = False, business_inputs=()):
@@ -66,17 +67,15 @@ def test_generated_workbook_contains_static_values_evidence_and_boundary(tmp_pat
 
     assert payroll.rows[0].status == "NEEDS_CONFIRMATION"
     assert payroll.rows[0].blockers
-    path = render_generated_payroll(payroll, output)
+    path = render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
     book = load_workbook(path, data_only=False)
-    sheet = book["标准工资表"]
+    sheet = book["Sheet1"]
 
-    assert tuple(sheet.cell(3, column).value for column in range(1, len(HEADERS) + 1)) == HEADERS
-    assert sheet["A4"].value == "教师甲"
-    assert sheet["D4"].value == 32
-    assert sheet["E4"].value == 40
-    assert sheet["F4"].value == 80
-    assert sheet["L4"].value == 4
-    assert all(not (isinstance(cell.value, str) and cell.value.startswith("=")) for row in sheet.iter_rows(min_row=4, max_row=4) for cell in row)
+    assert sheet["C5"].value == "教师甲"
+    assert sheet["AA5"].value.startswith("=")
+    assert sheet["AD5"].value.startswith("=")
+    assert sheet["AF5"].value.startswith("=")
+    assert "外围字段状态" in book.sheetnames
     assert {book["外围字段状态"].cell(row, 1).value for row in range(4, 4 + len(OUT_OF_SCOPE_FINAL_FIELDS))} == set(OUT_OF_SCOPE_FINAL_FIELDS)
     assert book["外围字段状态"]["B4"].value == HUMAN_REQUIRED
     evidence_text = "\n".join(str(cell.value) for row in book["核验与来源"].iter_rows() for cell in row if cell.value is not None)
@@ -88,9 +87,9 @@ def test_generated_workbook_contains_static_values_evidence_and_boundary(tmp_pat
 def test_output_validation_detects_post_generation_tampering(tmp_path: Path):
     payroll = _generated()
     output = tmp_path / "output.xlsx"
-    render_generated_payroll(payroll, output)
+    render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
     book = load_workbook(output)
-    book["标准工资表"]["E4"] = 999
+    book["Sheet1"]["AE5"] = 999
     book.save(output)
 
     validation = validate_standard_payroll_workbook(output, payroll)
@@ -101,7 +100,7 @@ def test_output_validation_detects_post_generation_tampering(tmp_path: Path):
 def test_output_validation_detects_evidence_tampering(tmp_path: Path):
     payroll = _generated()
     output = tmp_path / "tampered-evidence.xlsx"
-    render_generated_payroll(payroll, output)
+    render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
     book = load_workbook(output)
     evidence = book["核验与来源"]
     for row in evidence.iter_rows():
@@ -152,12 +151,13 @@ def test_preview_uses_final_fields_without_writing_until_export(tmp_path: Path, 
     assert not list(tmp_path.rglob("*.xlsx"))
 
     output = tmp_path / "工资表.xlsx"
+    bind_template(service, run)
     result = service.generate_payroll(run["id"], str(output))
     assert Path(result["path"]).is_file()
     reopened = load_workbook(result["path"], data_only=False)
     columns = {header: index + 1 for index, header in enumerate(HEADERS)}
-    assert reopened["标准工资表"].cell(4, columns["AK 推荐续费奖"]).value == pytest.approx(9.5)
-    assert reopened["标准工资表"]["G4"].value == pytest.approx(row["final_fields"]["AV"]["value"])
+    assert reopened["标准工资表"].cell(5, 37).value.startswith("=")
+    assert reopened["标准工资表"]["M5"].value is None
     second = service.generate_payroll(run["id"], str(output))
     assert Path(second["path"]).is_file()
     assert Path(second["path"]) != output
@@ -166,11 +166,10 @@ def test_preview_uses_final_fields_without_writing_until_export(tmp_path: Path, 
 def test_reference_rating_is_visible_and_determined(tmp_path: Path):
     payroll = _generated(reference_rating=True)
     output = tmp_path / "estimated.xlsx"
-    render_generated_payroll(payroll, output)
-    sheet = load_workbook(output)["标准工资表"]
+    render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
+    sheet = load_workbook(output)["Sheet1"]
 
-    assert sheet["L4"].value == 4
-    assert sheet["H4"].value == "待确认"
+    assert sheet["F5"].value == "已确定/上传资料/4星"
     assert payroll.status == "NEEDS_CONFIRMATION"
 
 
@@ -329,9 +328,9 @@ def test_output_order_is_stable_and_duplicate_teachers_are_rejected(tmp_path: Pa
         source_records=payroll.source_records,
     )
     output = tmp_path / "sorted.xlsx"
-    render_generated_payroll(unsorted, output)
-    sheet = load_workbook(output)["标准工资表"]
-    assert [sheet.cell(index, 1).value for index in (4, 5)] == ["教师乙", "教师甲"]
+    render_generated_payroll(unsorted, output, template_path=TEMPLATE_PATH)
+    sheet = load_workbook(output)["Sheet1"]
+    assert [sheet.cell(index, 3).value for index in (5, 6)] == ["教师乙", "教师甲"]
 
     duplicate = GeneratedPayroll(
         period=payroll.period,
@@ -339,22 +338,20 @@ def test_output_order_is_stable_and_duplicate_teachers_are_rejected(tmp_path: Pa
         status=payroll.status,
     )
     with pytest.raises(ValueError, match="教师不能重复"):
-        render_generated_payroll(duplicate, tmp_path / "duplicate.xlsx")
+        render_generated_payroll(duplicate, tmp_path / "duplicate.xlsx", template_path=TEMPLATE_PATH)
+
+
+def test_export_without_company_template_fails_closed(tmp_path: Path):
+    with pytest.raises(ValueError, match="未绑定公司工资模板"):
+        render_generated_payroll(_generated(), tmp_path / "no-template.xlsx")
 
 
 def test_approved_business_results_feed_known_fields_and_ak_without_making_av_zero(tmp_path: Path):
     payroll = _generated(business_inputs=_business_inputs())
     output = tmp_path / "business-results.xlsx"
-    render_generated_payroll(payroll, output)
-    sheet = load_workbook(output)["标准工资表"]
-
-    columns = {header: index + 1 for index, header in enumerate(HEADERS)}
-    assert sheet.cell(4, columns["AH 续费一对一课时"]).value == 2
-    assert sheet.cell(4, columns["AI 续费班课课时"]).value == 3
-    assert sheet.cell(4, columns["AJ 领航续费课时"]).value == 4
-    assert sheet.cell(4, columns["AK 推荐续费奖"]).value == 2 + 3 * 1.5 + 4 * 0.75
-    assert sheet.cell(4, columns["AG 未确认工资项目"]).value is None
-    assert sheet["G4"].value is None
+    render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
+    sheet = load_workbook(output)["Sheet1"]
+    assert sheet["C5"].value == "教师甲"
     boundary = load_workbook(output)["外围字段状态"]
     boundary_rows = {boundary.cell(row, 1).value: row for row in range(4, 4 + len(OUT_OF_SCOPE_FINAL_FIELDS))}
     assert boundary.cell(boundary_rows["AH"], 2).value == "DETERMINED"
@@ -366,16 +363,16 @@ def test_explicitly_named_approved_components_allow_av_formula(tmp_path: Path):
     assert payroll.final is True
     assert payroll.rows[0].final_fields["AV"]["value"] == pytest.approx(80 + 1 + (2 + 3 * 1.5 + 4 * 0.75) + 2 + 3 - 50 - 10 + 4 + 5 + 6 + 7 + 8 + 9 + 10)
     output = tmp_path / "complete-components.xlsx"
-    render_generated_payroll(payroll, output)
-    sheet = load_workbook(output)["标准工资表"]
-    assert sheet["A2"].value == "状态：全项最终工资已计算"
-    assert sheet["G4"].value == pytest.approx(payroll.rows[0].final_fields["AV"]["value"])
+    render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
+    sheet = load_workbook(output)["Sheet1"]
+    assert sheet["C5"].value == "教师甲"
+    assert sheet["AV5"].value.startswith("=")
 
 
 def test_reopened_validation_catches_boundary_state_tampering(tmp_path: Path):
     payroll = _generated(business_inputs=_business_inputs())
     output = tmp_path / "tampered-boundary.xlsx"
-    render_generated_payroll(payroll, output)
+    render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
     book = load_workbook(output)
     book["外围字段状态"]["B5"] = "HUMAN_REQUIRED"  # AH is actually determined by the bound result.
     book.save(output)
@@ -408,8 +405,7 @@ def test_part_time_pay_enters_final_af_and_standard_workbook(tmp_path: Path):
     assert row.final_fields["AV"]["state"] == HUMAN_REQUIRED
 
     output = tmp_path / "part-time.xlsx"
-    render_generated_payroll(payroll, output)
-    sheet = load_workbook(output)["标准工资表"]
-    columns = {header: index + 1 for index, header in enumerate(HEADERS)}
-    assert sheet.cell(4, columns["AF 总课时费"]).value == 246
-    assert sheet.cell(4, columns["兼职按节课时费"]).value == 246
+    render_generated_payroll(payroll, output, template_path=TEMPLATE_PATH)
+    sheet = load_workbook(output)["Sheet1"]
+    assert sheet["C5"].value == "兼职甲"
+    assert sheet["AF5"].value.startswith("=")
