@@ -418,6 +418,19 @@ class PayrollService(CoreFlow):
         if package.template_path is not None:
             run["template_path"] = str(package.template_path.resolve())
             run["template"] = self._template_binding(package.template_path, source="资料包自动识别的工资模板")
+        elif len(package.payroll_paths) == 1 and _template_file_is_usable(package.payroll_paths[0]):
+            # Some historical deliveries contain the real company payroll
+            # workbook but no separately named blank template.  It is still
+            # the only traceable template evidence in that package.  Bind it
+            # explicitly so July can complete preview/export without inventing
+            # a second workbook format; the source remains read-only and the
+            # renderer always writes a new output path.
+            historical_template = package.payroll_paths[0]
+            run["template_path"] = str(historical_template.resolve())
+            run["template"] = self._template_binding(
+                historical_template,
+                source="资料包历史工资表兼作模板证据",
+            )
         if package.star_conflicts:
             # A source can be readable yet not bindable for this Run.  Mark
             # that distinction in the Run-local registry so the UI does not
@@ -1321,11 +1334,19 @@ class PayrollService(CoreFlow):
         """
         run = self._load(run_id)
         self._require_fresh(run)
-        baseline_item = run.get("files", {}).get("baseline")
+        historical_role = next(
+            (
+                role
+                for role in ("baseline", "math", "science")
+                if run.get("files", {}).get(role)
+            ),
+            "",
+        )
+        baseline_item = run.get("files", {}).get(historical_role)
         core = run.get("core_calculation") or {}
         if not baseline_item or not core.get("rows"):
             raise ValueError("当前记录缺少可用于历史工资对账的基准工资表或核心计算结果。")
-        baseline_result = self._read_for_run("baseline", Path(baseline_item["path"]), run)
+        baseline_result = self._read_for_run(historical_role, Path(baseline_item["path"]), run)
         historical = {row.teacher: row for row in baseline_result.records if getattr(row, "teacher", "")}
         historical_comments = {}
         for comment in getattr(baseline_result, "comments", []) or []:
@@ -1391,6 +1412,7 @@ class PayrollService(CoreFlow):
             "period_start": run.get("period_start"),
             "period_end": run.get("period_end"),
             "historical_source": baseline_item.get("path"),
+            "historical_role": historical_role,
             "current_source": run.get("files", {}).get("schedule", {}).get("path"),
             "teachers_compared": len(common),
             "field_stats": stats,
@@ -1684,6 +1706,13 @@ class PayrollService(CoreFlow):
                     item["status"] = "NEEDS_RECONFIRMATION"
                     item["invalidated_at"] = datetime.now(timezone.utc).isoformat()
                     run.setdefault("resolution_history", []).append({**item, "history_event": "SOURCE_CHANGED"})
+        if role in {"baseline", *SCOPE_ROLES} and not run.get("template_path") and _template_file_is_usable(source):
+            # A real payroll sheet is also valid template evidence when the
+            # package has no separately named blank template.  Bind the
+            # source only as read-only layout evidence; all generated output
+            # still goes through a new safe path.
+            run["template_path"] = str(source)
+            run["template"] = self._template_binding(source, source="当前工资表兼作模板证据")
         # Legacy per-field decisions predate business review cards.  They are
         # cleared for backward compatibility; durable business decisions are
         # retained but explicitly require a fresh confirmation.

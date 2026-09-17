@@ -9,6 +9,7 @@ import re
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .business import invalidate
 
@@ -410,6 +411,27 @@ class CoreFlow:
 
     def _bind_new_calculation(self, run: dict) -> None:
         versions = self.core_rule_catalog()["versions"]
+        # Historical rule bundles are opt-in by effective period.  The normal
+        # catalog keeps the current August seed for backwards compatibility,
+        # while a new July Run must materialize the evidence-backed July
+        # bundle before resolving its version.  This prevents a July Run from
+        # falling through to August (or remaining silently unbound).
+        if not any(item["effective_from"] <= run["period"] <= item["effective_to"] for item in versions):
+            config_root = Path(__file__).resolve().parents[1] / "config"
+            for path in sorted(config_root.glob("core_rules_2026_*.yaml")):
+                try:
+                    from payroll_core.config.core_rules import load_core_rules
+
+                    candidate = load_core_rules(path).to_dict()
+                except (OSError, ValueError):
+                    continue
+                if not candidate["effective_from"] <= run["period"] <= candidate["effective_to"]:
+                    continue
+                existing = next((item for item in versions if item.get("id") == candidate.get("rule_version_id")), None)
+                if existing is None:
+                    self._append_core_rules(candidate, candidate["source"], "按月份规则初始化")
+                versions = self.core_rule_catalog()["versions"]
+                break
         for kind, key, candidates in (("core", "core_rule_version_id", versions), ("part_time", "part_time_rate_version_id", self.part_time_rate_versions())):
             matched = [item for item in candidates if item["effective_from"] <= run["period"] <= item["effective_to"]]
             # Two possible revisions require explicit selection, not latest wins.

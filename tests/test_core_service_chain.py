@@ -1,6 +1,7 @@
 """Artificial files exercise the public calculation/service/HTTP chain."""
 import copy
 import json
+from decimal import Decimal
 from pathlib import Path
 from threading import Thread
 from urllib.request import Request, urlopen
@@ -8,6 +9,8 @@ from urllib.request import Request, urlopen
 import pytest
 from openpyxl import load_workbook
 
+from payroll_core.calculation import calculate_course
+from payroll_core.config.core_rules import load_core_rules
 from payroll_ui.service import PayrollService
 from payroll_ui.server import PayrollHttpServer
 from tests.test_payroll_modes_and_class_rules import _schedule
@@ -104,6 +107,33 @@ def test_new_evidence_month_can_keep_semantic_rule_id(tmp_path):
     versions = service.save_core_rule_version(rules, "historical July payroll reconstruction", "evidence review")["versions"]
     july = next(item for item in versions if item["id"] == "core_rules_2026_07_v1")
     assert july["rules"]["rule_version_id"] == "core_rules_2026_07_v1"
+
+
+def test_july_rule_bundle_is_loaded_by_period_and_differs_from_august():
+    july = load_core_rules(Path(__file__).parents[1] / "config" / "core_rules_2026_07.yaml")
+    august = load_core_rules()
+    july_record = {"period": "2026-07", "teacher": "synthetic-teacher", "grade": "三年级", "class_type": "1对2", "attended": 1, "lesson_status": "已上课", "source": "synthetic.xlsx"}
+    august_record = {**july_record, "period": "2026-08"}
+
+    july_value = calculate_course(july_record, july).value
+    august_value = calculate_course(august_record, august).value
+
+    assert july.rule_version_id == "core_rules_2026_07_v1"
+    assert july_value == Decimal("1.632")
+    assert august_value == Decimal("1.36")
+
+
+def test_new_july_run_does_not_inherit_august_or_run_confirmation(tmp_path):
+    service = PayrollService(tmp_path / "local-data")
+    july = service.create("2026-07")
+    august = service.create("2026-08")
+
+    assert july["core_rule_version_id"] == "core_rules_2026_07_v1"
+    assert august["core_rule_version_id"] == "core_rules_2026_08_09_v1"
+    service.confirm_af_policy(july["id"], "July reviewer", default_obligation_hours=0, reason="July-only test confirmation")
+    reopened_august = service.get(august["id"])
+    assert reopened_august["af_policy_confirmation"] is None
+    assert reopened_august["core_rule_version_id"] != july["core_rule_version_id"]
 
 
 def test_sanitized_http_generate_chain_and_restore(tmp_path):
