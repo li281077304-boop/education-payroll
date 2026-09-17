@@ -1,0 +1,43 @@
+# Durable Ralph V3 run configuration for the 2026-09-17 manual UAT loop.
+chief_mode: external
+max_iterations: 8
+timeout_seconds: 1800
+
+worker:
+  agent: codex
+  mode: native_goal
+  model: gpt-5.6-luna
+
+gui_bridge:
+  enabled: true
+  conversation_url: https://chatgpt.com/c/6aa95a7d-d968-83ea-8683-00a8af93adb6
+  session: payroll-manual-uat-20260917-r1
+  extension_env_file: ~/.config/playwright-mcp/env
+  timeout_ms: 180000
+
+commands:
+  - .venv/bin/python -m pytest -q
+  - .venv/bin/python -m compileall -q payroll_core payroll_ui
+
+uat_commands:
+  - .venv/bin/python -m pytest -q
+
+gate_allowed_paths:
+  - payroll_core/
+  - payroll_ui/
+  - tests/
+  - docs/
+  - README.md
+
+forbidden_paths:
+  - real_data/
+  - '*.xlsx'
+  - '*.xls'
+
+protected_paths:
+  - CHIEF.md
+  - DECISIONS.md
+  - ACCEPTANCE.yaml
+  - ACCEPTANCE.yml
+  - TASK.md
+  - CHIEF_VERDICT.json
