@@ -1,0 +1,20 @@
+{
+  "run_id": "40360d851ace",
+  "period": "2026-08",
+  "root_cause": "new_run_did_not_inherit_historical_template",
+  "historical_source_run_id": "a1c9e2563e37",
+  "template_path": "/Users/macos/Desktop/payroll_read_test/薪资表模板.xlsx",
+  "template_sha256": "fe483e5e95df2049e638375fc8e25ab1ba4d2b00e1f1945c95119e280031ecaf",
+  "output_path": "/private/tmp/payroll-template-recovery-uat/工资表-2026-08-recovered.xlsx",
+  "output_sha256": "1e464f73327543ec0c9875b171b5b98e59a36a8d4c43087281cd7959ef738810",
+  "template_sheet": "Sheet1",
+  "template_merges": 19,
+  "output_merges": 19,
+  "merged_ranges_preserved": true,
+  "template_sheet_preserved": true,
+  "output_extra_evidence_sheets": ["核验与来源", "外围字段状态"],
+  "excel_error_markers": [],
+  "focused_tests": "60 passed",
+  "full_tests": "380 passed",
+  "fail_closed_without_template": true
+}

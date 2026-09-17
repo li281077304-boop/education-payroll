@@ -8,7 +8,7 @@
     {"id":"UAT-0917-03","priority":"P0","status":"HUMAN_BLOCKED","description":"特殊情况提供无特殊情况与有特殊情况双向确认并持久化","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
     {"id":"UAT-0917-04","priority":"P0","status":"PASS","description":"30小时确认有处理中、成功/失败反馈、防重复提交及持久化","evidence":"devlog/2026-09-17/001-payroll-real-product-loop/technical-incident-database-lock.md","failure_signature":"4ac7c59609da3256"},
     {"id":"UAT-0917-05","priority":"P0","status":"HUMAN_BLOCKED","description":"基本工资缺失在当前问题卡完成查看、录入、暂缓或允许的下一步","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
-    {"id":"UAT-0917-07","priority":"P0","status":"HUMAN_BLOCKED","description":"导出必须绑定公司原工资模板，未绑定时 fail closed","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
+    {"id":"UAT-0917-07","priority":"P0","status":"PASS","description":"已发现并复用公司原工资模板；无可信模板时仍 fail closed","evidence":"docs/uat/2026-09-17/PAYROLL_TEMPLATE_RECOVERY_UAT.md"},
     {"id":"UAT-0917-12","priority":"P0","status":"PASS","description":"缺权威且缺上传资料的星级为待确认，不默认二星已确定","evidence":"tests/test_core_calculation.py::test_ae_authority_reference_and_missing_rating_states"},
     {"id":"UAT-0917-02","priority":"P1","status":"PASS","description":"聚合教师卡提供明确查看明细入口","evidence":"docs/uat/2026-09-17/PAYROLL_MANUAL_UAT_RESULT_2026-09-17.md"},
     {"id":"UAT-0917-06","priority":"P1","status":"PASS","description":"核查动作使用明确动词和结果描述","evidence":"tests/test_uat_20260917_payroll_loop.py::test_payroll_issue_actions_expose_recovery_paths"},

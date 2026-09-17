@@ -204,6 +204,34 @@ def _template_av_evidence(path: str | Path | None) -> dict[str, Any]:
         return {"path": str(template), "exists": True, "formula": None, "field_formulas": {}, "historical_evidence": f"模板读取失败：{exc}"}
 
 
+def _template_file_is_usable(path: str | Path | None) -> bool:
+    """Return whether a candidate is a real workbook that can be reused.
+
+    A missing template is intentionally *not* replaced with a generated
+    standard workbook.  Discovery is conservative: trusted paths persisted by
+    an earlier Run are accepted when the workbook is still present; ad-hoc
+    filesystem candidates must carry the historical template filename or
+    enough of the company payroll header to be unambiguous.
+    """
+    if not path:
+        return False
+    candidate = Path(path).expanduser()
+    if not candidate.is_file() or candidate.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+        return False
+    try:
+        book = load_workbook(candidate, read_only=True, data_only=False)
+        values = []
+        for sheet in book.worksheets[:3]:
+            for row in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row or 1, 8), min_col=1, max_col=min(sheet.max_column or 1, 80), values_only=True):
+                values.extend(str(value or "").strip() for value in row)
+        text = "|".join(values)
+        signals = sum(token in text for token in ("总工资", "实际基本工资", "总课时费", "教师", "总工资数"))
+        trusted_name = "模板" in candidate.stem or "template" in candidate.stem.lower()
+        return trusted_name or signals >= 2
+    except Exception:
+        return False
+
+
 def safe_csv(value: Any) -> Any:
     if not isinstance(value, str):
         return value
@@ -219,6 +247,91 @@ class PayrollService(CoreFlow):
         # flows on purpose: a personal payroll sheet is never an assessment.
         self.submissions = PayrollSubmissionService(self.store)
         self.assessments = AssessmentService(self.store)
+
+    def _template_binding(self, path: Path, *, source: str, source_run_id: str = "") -> dict[str, Any]:
+        info = version(path)
+        return {
+            "name": path.name,
+            "path": str(path.resolve()),
+            "sha256": info["sha256"],
+            "size": info["size"],
+            "source": source,
+            "source_run_id": source_run_id or None,
+            "bound_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+    def _template_candidates(self, run: dict) -> list[tuple[Path, str, str]]:
+        """Return trusted company-template candidates in deterministic order.
+
+        The old product bound the real template during package import.  A
+        later Run created from the already imported schedule must inherit that
+        durable authority instead of asking the operator to bind it again.
+        """
+        candidates: list[tuple[Path, str, str]] = []
+
+        def add(raw: str | Path | None, source: str, source_run_id: str = "") -> None:
+            if not raw:
+                return
+            path = Path(raw).expanduser()
+            key = str(path.resolve()) if path.exists() else str(path)
+            if not any(str(item[0].resolve()) == key for item in candidates):
+                candidates.append((path, source, source_run_id))
+
+        add(run.get("template_path"), "当前 Run 已绑定")
+        package_root = run.get("package_root")
+        if package_root:
+            root = Path(package_root).expanduser()
+            if root.is_dir():
+                for path in sorted(root.iterdir()):
+                    if path.is_file() and ("模板" in path.stem or "template" in path.stem.lower()):
+                        add(path, "当前资料包自动识别")
+
+        # A previous successful package import is the durable source of truth
+        # for later Runs.  Prefer the same payroll period, then newest known
+        # binding, and never scan arbitrary user files.
+        previous = sorted(
+            (item for item in self.store.list() if item.get("id") != run.get("id")),
+            key=lambda item: (item.get("period") == run.get("period"), item.get("updated_at", item.get("created_at", ""))),
+            reverse=True,
+        )
+        for item in previous:
+            add(item.get("template_path") or (item.get("template") or {}).get("path"), "历史 Run 自动复用", str(item.get("id", "")))
+            root = item.get("package_root")
+            if root:
+                directory = Path(root).expanduser()
+                if directory.is_dir():
+                    for path in sorted(directory.iterdir()):
+                        if path.is_file() and ("模板" in path.stem or "template" in path.stem.lower()):
+                            add(path, "历史资料包自动复用", str(item.get("id", "")))
+        return candidates
+
+    def _bind_existing_template(self, run: dict) -> bool:
+        """Bind a previously discovered real company template, if available."""
+        current_path = str(run.get("template_path") or "")
+        # Do not overwrite provenance when the current Run was just bound by
+        # an explicit package import.  We only enrich legacy records that have
+        # a path but no durable binding metadata.
+        if current_path and _template_file_is_usable(current_path):
+            info = run.get("template") or {}
+            current = self._template_binding(Path(current_path), source=info.get("source") or "当前 Run 已绑定", source_run_id=info.get("source_run_id") or "")
+            changed = any(info.get(key) != current.get(key) for key in ("name", "path", "sha256", "size"))
+            if changed:
+                run["template"] = {**info, **current, "source": info.get("source") or current["source"]}
+            return changed
+        for path, source, source_run_id in self._template_candidates(run):
+            if not _template_file_is_usable(path):
+                continue
+            binding = self._template_binding(path, source=source, source_run_id=source_run_id)
+            changed = (
+                current_path != binding["path"]
+                or (run.get("template") or {}).get("sha256") != binding["sha256"]
+                or (run.get("template") or {}).get("source") != binding["source"]
+            )
+            if changed:
+                run["template_path"] = binding["path"]
+                run["template"] = binding
+            return changed
+        return False
 
     def import_payroll_sheets(self, paths: list[str], period: str, submitted_by: str, *, default_teacher: str = "") -> dict:
         return self.submissions.import_sheets(paths, period, submitted_by, default_teacher=default_teacher)
@@ -303,12 +416,8 @@ class PayrollService(CoreFlow):
         run["package_inventory"] = package.inventory
         run["source_registry"] = list(package.source_registry)
         if package.template_path is not None:
-            run["template_path"] = str(package.template_path)
-            run["template"] = {
-                "name": package.template_path.name,
-                "path": str(package.template_path),
-                "source": "资料包自动识别的工资模板",
-            }
+            run["template_path"] = str(package.template_path.resolve())
+            run["template"] = self._template_binding(package.template_path, source="资料包自动识别的工资模板")
         if package.star_conflicts:
             # A source can be readable yet not bindable for this Run.  Mark
             # that distinction in the Run-local registry so the UI does not
@@ -633,6 +742,10 @@ class PayrollService(CoreFlow):
         run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "base_salary_inputs": {}, "base_salary_input_snapshot": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
+        # A real company template already discovered by an earlier Run is a
+        # durable project authority.  New Runs inherit it automatically;
+        # absence still remains fail-closed at export time.
+        self._bind_existing_template(run)
         self.store.save(run)
         return self.render(run)
 
@@ -766,6 +879,7 @@ class PayrollService(CoreFlow):
                 "status": status,
                 "status_label": STATUS.get(status, status),
                 "summary": summary,
+                "template": stored.get("template") or ({"path": stored.get("template_path")} if stored.get("template_path") else None),
                 "issue_groups": list(stored.get("issue_groups") or []),
                 "user_actions": list(stored.get("user_actions") or []),
                 "health": {
@@ -2176,6 +2290,7 @@ class PayrollService(CoreFlow):
 
     def _load(self, run_id: str) -> dict:
         run = self.store.get(run_id)
+        template_changed = self._bind_existing_template(run)
         # A stale source is terminal for this read: never downgrade STALE to
         # FILES_READY merely because a separately bound authority changed too.
         if not self._fresh(run):
@@ -2193,6 +2308,8 @@ class PayrollService(CoreFlow):
             self._refresh_business_groups(run)
             if prior != [(x.get("group_id"), x.get("status")) for x in run.get("business_decisions", [])]:
                 self.store.save(run)
+        elif template_changed:
+            self.store.save(run)
         return run
 
     def _fresh(self, run: dict) -> bool:

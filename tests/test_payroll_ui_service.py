@@ -117,6 +117,33 @@ def test_real_package_template_is_bound_to_run(tmp_path):
     assert imported["template"]["source"] == "资料包自动识别的工资模板"
 
 
+def test_new_run_reuses_real_template_bound_by_previous_run(tmp_path):
+    """A later Run must not turn an already-known company template into a human blocker."""
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    template = package_dir / "薪资表模板.xlsx"
+    copyfile(FIXTURES / "fake_payroll.xlsx", template)
+    service = PayrollService(tmp_path / "app-data")
+    first = service.create("2026-08", mode="GENERATE")
+    stored = service.store.get(first["id"])
+    stored["template_path"] = str(template.resolve())
+    stored["template"] = {"name": template.name, "path": str(template.resolve()), "source": "历史资料包自动识别"}
+    service.store.save(stored)
+
+    second = service.create("2026-08", mode="GENERATE")
+    assert second["template_path"] == str(template.resolve())
+    assert second["template"]["source"] == "历史 Run 自动复用"
+    reopened = service.get(second["id"])
+    assert reopened["template"]["sha256"]
+
+
+def test_missing_template_still_fails_closed_without_inventing_one(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    assert not run.get("template_path")
+    assert "template_path" not in run or run.get("template_path") is None
+
+
 def _star_package_book(path: Path, rows: list[tuple[str, str]]) -> Path:
     book = load_workbook(FIXTURES / "fake_payroll.xlsx")
     sheet = book.active

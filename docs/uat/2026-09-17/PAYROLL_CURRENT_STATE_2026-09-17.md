@@ -37,15 +37,18 @@ P1: preview usability, three-color status, scrolling, and concise evidence prese
 ## Unknowns requiring evidence, not guesses
 
 - Exact source and runtime behavior of the 30-hour failure code `4ac7c59609da3256`.
-- Company payroll template path/binding for export.
+- Company payroll template path/binding for export is now recovered from the
+  prior successful Run and automatically reused; missing-template fail-closed
+  remains in force.
 - Whether any missing business facts remain genuinely user-only after deterministic processing.
 
 ## Verification update
 
-- Full regression: 378 passed.
+- Full regression: 380 passed.
 - The 30-hour failure was confirmed as SQLite lock contention and remediated
   with busy-timeout/WAL connections plus duplicate-submit protection.
 - Local UI replay verified filter focus/value retention and explicit base-salary
   action controls.
-- Base-salary inputs and company-template binding remain user-owned blockers;
+- Base-salary inputs remain user-owned blockers; company-template binding is no
+  longer a user-owned blocker after the template-recovery regression fix;
   no values are guessed and no incomplete run is marked PASS.
