@@ -3,6 +3,7 @@ from shutil import copyfile
 from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+import hashlib
 import json
 
 from openpyxl import load_workbook
@@ -12,6 +13,7 @@ from payroll_ui.service import PayrollService
 from payroll_ui.core_flow import CoreFlow
 from payroll_core.models.records import PayrollRecord
 from payroll_core.reconcile.payroll_scope import FieldCheck
+from tests.payroll_test_helpers import bind_template
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "excel"
@@ -142,6 +144,58 @@ def test_missing_template_still_fails_closed_without_inventing_one(tmp_path):
     run = service.create("2026-08", mode="GENERATE")
     assert not run.get("template_path")
     assert "template_path" not in run or run.get("template_path") is None
+
+
+def _usable_historical_payroll(path: Path) -> Path:
+    """Create a sanitized historical sheet that is also renderable as a template."""
+    copyfile(FIXTURES / "fake_payroll.xlsx", path)
+    book = load_workbook(path)
+    sheet = book.active
+    for cell, value in {
+        "C3": "姓名", "F3": "教师级别", "G3": "基本工资", "H3": "岗位津贴",
+        "I3": "工龄工资/教师等级", "J3": "其他待遇", "K3": "应出勤", "L3": "实际出勤",
+        "M3": "实际基本工资", "AA3": "折算小时数", "AC3": "班课折算小时数",
+        "AD3": "最终授课小时数据", "AE3": "该档每小时金额", "AF3": "总课时费",
+        "AV3": "总工资数",
+    }.items():
+        sheet[cell] = value
+    book.save(path)
+    return path
+
+
+def test_import_package_historical_payroll_fallback_is_read_only_and_exports_new_file(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    copyfile(FIXTURES / "fake_schedule.xlsx", package_dir / "排课列表.xlsx")
+    historical = _usable_historical_payroll(package_dir / "历史工资表.xlsx")
+    before = hashlib.sha256(historical.read_bytes()).hexdigest()
+
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    imported = service.import_package(run["id"], str(package_dir))["run"]
+
+    assert imported["template_path"] == str(historical.resolve())
+    assert imported["template"]["source"] == "资料包历史工资表兼作模板证据"
+    exported = service.generate_payroll(imported["id"], str(tmp_path / "exports" / "工资表.xlsx"))
+    output = Path(exported["path"])
+    assert output.exists()
+    assert output.resolve() != historical.resolve()
+    assert hashlib.sha256(historical.read_bytes()).hexdigest() == before
+
+
+def test_import_file_historical_payroll_fallback_preserves_existing_template_binding(tmp_path):
+    historical = _usable_historical_payroll(tmp_path / "历史工资表.xlsx")
+    before = hashlib.sha256(historical.read_bytes()).hexdigest()
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08")
+    existing = bind_template(service, run)
+    existing_template = existing["template_path"]
+
+    imported = service.import_file(run["id"], "baseline", str(historical))
+
+    assert imported["template_path"] == existing_template
+    assert imported["template"]["source"] == "测试用脱敏公司工资模板"
+    assert hashlib.sha256(historical.read_bytes()).hexdigest() == before
 
 
 def _star_package_book(path: Path, rows: list[tuple[str, str]]) -> Path:
