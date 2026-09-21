@@ -71,7 +71,17 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             # The response must still reach the browser even if diagnostics
             # cannot be written (for example, a read-only data directory).
             pass
-        return self._error(f"{context}，系统已记录错误（错误编号 {error_id}），请重试。", HTTPStatus.INTERNAL_SERVER_ERROR)
+        message = str(exc).strip()
+        if isinstance(exc, (ValueError, KeyError)) and message:
+            friendly = message
+        elif "zip" in message.lower() or "xml" in message.lower() or "excel" in message.lower():
+            friendly = "Excel 文件损坏或格式无法识别，请确认文件可以正常打开后重试。"
+        else:
+            if context == "生成工资表失败":
+                friendly = "生成工资表失败：请确认材料完整、目标文件可写后重试。"
+            else:
+                friendly = "这份材料暂时无法处理，请确认选择的是排课、学科组提交、续费或退费表后重试。"
+        return self._error(f"{friendly}（错误编号 {error_id}）", HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _serve_static(self, relative: str) -> None:
         path = (self.server.static_root / relative).resolve()
@@ -245,6 +255,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.import_file(run_id, str(payload.get("role", "")), str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
                 if action == "package":
                     return self._json(self.server.service.import_package(run_id, str(payload.get("path", ""))))
+                if action == "material":
+                    return self._json(self.server.service.import_material_file(run_id, str(payload.get("kind", "auto")), str(payload.get("path", ""))))
                 if action == "grade-history":
                     return self._json(self.server.service.import_grade_history_for_run(run_id, str(payload.get("path", "")), payload.get("sha256")))
                 if action == "grade-confirmations":

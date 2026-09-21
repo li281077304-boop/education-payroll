@@ -9,6 +9,7 @@ let detailBasisToken = null;
 let partTimeRateRows = [];
 let policyProfileRows = [];
 let coreRuleEditingBase = {};
+const materialBusy = new Set();
 
 const coreStateLabels = {
   DETERMINED: "已确定",
@@ -19,10 +20,13 @@ const coreStateLabels = {
 
 const roleCopy = {
   schedule: ["原始排课数据", "选择原始排课表", "用于重新计算一对一和班课"],
-  math: ["数学组提交表（任选）", "选择数学组提交表", "确定本次需要核验的教师"],
-  science: ["理化组提交表（任选）", "选择理化组提交表", "确定本次需要核验的教师"],
-  baseline: ["基准最终工资表（可选）", "选择基准最终工资表", "作为实际工资值和公式核验的依据"],
-  check: ["最终工资核对表（可选）", "选择最终核对表", "仅作辅助查看，不作为排课依据"],
+  subject_group: ["学科组提交表", "选择学科组提交表", "系统会自动识别所属学科组"],
+  math: ["学科组提交表", "选择学科组提交表", "确定本次需要核验的教师"],
+  science: ["学科组提交表", "选择学科组提交表", "确定本次需要核验的教师"],
+  renewal: ["续费表", "选择续费表", "读取上游已确认的续费结果"],
+  refund: ["退费表", "选择退费表", "读取上游已确认的退费结果"],
+  baseline: ["工资结果参考表", "选择工资结果参考表", "仅作辅助核对"],
+  check: ["历史核对辅助表", "选择历史核对辅助表", "仅作辅助查看"],
 };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
@@ -131,8 +135,7 @@ function statusBadge(run) {
 }
 
 function shell(content, historyButton = true) {
-  const mapRunId = current ? escapeHtml(current.id) : "";
-  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="home()">工作台</button><button class="quiet" onclick="avSourceMapPage('${mapRunId}')">总工资来源地图</button><button class="quiet" onclick="businessInputsPage()">业务填报</button>${current ? '<button class="quiet" onclick="writebackPage()">批注回填</button>' : ""}<button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button><button class="quiet" onclick="assessmentsPage()">岗位考核</button><a class="quiet" href="/teacher">教师填报</a></div></header>${content}</div>`;
+  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="home()">工作台</button><button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button></div></header>${content}</div>`;
 }
 
 async function home() {
@@ -444,7 +447,7 @@ function navigation() {
   const checked = ["REVIEW_REQUIRED", "PASS"].includes(current.status);
   const groupCount = (current.issue_groups || []).length;
   const hasPayrollPreview = Boolean(current.generated_payroll || current.core_calculation?.rows?.length);
-  const items = [["materials", "材料准备", true], ["base-salary", "基本工资", Boolean(current.core_calculation?.rows?.length)], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["reconciliation", "历史工资对账", Boolean(current.files?.baseline && current.core_calculation?.rows?.length)], ["payroll", "工资预览", hasPayrollPreview], ["management", "管理岗位确认", true]];
+  const items = [["materials", "准备材料", true], ["overview", "核对结果", checked], ["issues", `待处理问题${groupCount ? ` (${groupCount})` : ""}`, checked], ["payroll", "工资预览与导出", hasPayrollPreview]];
   return `<nav class="tabs">${items.map(([id, label, enabled]) => `<button class="${tab === id ? "active" : ""}" ${enabled ? `onclick="setTab('${id}')"` : "disabled"}>${label}</button>`).join("")}</nav>`;
 }
 
@@ -585,27 +588,33 @@ function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
   const generateAction = current.generated_payroll
     ? `<button onclick="setTab('payroll')">查看工资预览</button>`
-    : `<button ${current.health.ready ? "" : "disabled"} onclick="preparePayrollPreview()">自动核算并查看预览</button>`;
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">按业务类别准备资料。可以逐项选择，也可以选择资料包文件夹，让系统自动识别并绑定。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="action-bar"><button onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">资料包中的排课、学科组提交、续费和退费结果会自动分开识别。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
+    : `<button ${current.health.ready ? "" : "disabled"} onclick="preparePayrollPreview()">开始核算并查看预览</button>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">把四类材料拖进对应卡片，或直接粘贴文件。系统会自动识别内容并保存到本机。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包</strong><span>可一次拖入多份材料，系统自动归类；也可以只补充某一类材料。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴主流程。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
 }
 
 function productionMaterialCards() {
   const byRole = Object.fromEntries((current.materials || []).map((item) => [item.role, item]));
   const schedule = byRole.schedule;
-  const subjectRows = [byRole.math, byRole.science].filter(Boolean).map((item) => materialCard(item)).join("");
+  const subjectFiles = [byRole.math, byRole.science].filter((item) => item?.file);
   return [
     schedule ? materialCard(schedule) : "",
-    `<article class="material-card material-group-card"><div class="material-top"><strong>学科组提交表</strong><span class="muted">可提供数学、理化或其他已识别的学科组表</span></div><p class="small muted">用于确定本次需要核验的教师和工资表目标。内部会按学科分别读取，但普通使用只需要准备这一类材料。</p><div class="material-grid compact-grid">${subjectRows || '<div class="empty compact">尚未选择学科组提交表</div>'}</div></article>`,
-    businessMaterialCard("renewal", "续费表", current.renewal_reports || [], "续费最终结果由上游确认；导入后只读取、留档并绑定本次核算，不重新判断续费原因。"),
-    businessMaterialCard("refund", "退费表", current.refund_reports || [], "退费最终结果由上游确认；导入后只读取、留档，并可生成待预览的工资批注。"),
+    subjectGroupCard(subjectFiles),
+    businessMaterialCard("renewal", "续费表", current.renewal_reports || [], "读取已经确认的续费结果，不重新判断业务原因。"),
+    businessMaterialCard("refund", "退费表", current.refund_reports || [], "读取已经确认的退费结果，不重新判断责任归属。"),
   ].join("");
 }
 
+function subjectGroupCard(files) {
+  const names = files.map((item) => `<div class="file-name">✓ ${escapeHtml(item.file.name)} <span class="small muted">已识别</span></div>`).join("");
+  return `<article class="material-card material-group-card"><div class="material-top"><strong>学科组提交表</strong><span class="muted">可提供一份或多份</span></div><p class="small muted">拖入或粘贴工资表后，系统会根据表内教师与排课内容自动识别所属学科组。</p><div data-drop-role="subject_group" tabindex="0" role="button" aria-label="拖入学科组提交表文件" class="drop-zone" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer">拖入 Excel 文件，或直接粘贴</div>${names || '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" onclick="choose('subject_group')">选择学科组提交表</button></article>`;
+}
+
 function businessMaterialCard(kind, title, records, description) {
-  const count = Array.isArray(records) ? records.length : 0;
+  const meta = current.material_inputs?.[kind] || {};
+  const count = Array.isArray(records) && records.length ? records.length : Number(meta.records || 0);
   const state = count ? "✓ 已识别" : "可稍后补充";
-  const detail = count ? `已读取 ${count} 条结果，来源和版本已随本次核算保存。` : "选择资料包文件夹后，系统会自动识别这类资料。";
-  return `<article class="material-card"><div class="material-top"><strong>${escapeHtml(title)}</strong><span class="${count ? "ok" : "muted"}">${state}</span></div><p class="small muted">${escapeHtml(description)}</p><div class="empty compact">${escapeHtml(detail)}</div><button class="secondary full" onclick="choosePackage()">${count ? "重新选择资料包" : "选择资料包文件夹"}</button></article>`;
+  const detail = count ? `已读取 ${count} 条结果，来源和版本已保存。` : "尚未选择文件";
+  return `<article class="material-card"><div class="material-top"><strong>${escapeHtml(title)}</strong><span class="${count ? "ok" : "muted"}">${state}</span></div><p class="small muted">${escapeHtml(description)}</p><div data-drop-role="${kind}" tabindex="0" role="button" aria-label="拖入${escapeHtml(title)}文件" class="drop-zone" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer">拖入 Excel 或 CSV 文件，或直接粘贴</div>${meta.name ? `<div class="file-name">${escapeHtml(meta.name)}</div>` : `<div class="empty compact">${escapeHtml(detail)}</div>`}<button class="secondary full" onclick="choose('${kind}')">选择${escapeHtml(title)}</button></article>`;
 }
 
 async function choosePackage() {
@@ -638,15 +647,6 @@ function coverageWarningCard() {
 async function resolvePeriod(decision) {
   try { current = await api(`/api/runs/${current.id}/period-check`, { method: "POST", body: JSON.stringify({ decision }) }); renderRun(); showMessage("已记录月份处理方式。", "success"); }
   catch (error) { showMessage(error.message); }
-}
-
-function materialCard(material) {
-  const copy = roleCopy[material.role];
-  const file = material.file;
-  const stateClass = material.state === "失效" ? "bad" : file ? "ok" : material.required ? "warn" : "muted";
-  const stateText = material.state === "失效" ? "● 已变化，需重新选择" : file ? "✓ 已识别" : material.required ? "○ 必需材料" : "可稍后补充";
-  const risk = file ? [file.missing_cache ? `${file.missing_cache} 个公式结果不可读取` : "", file.external_references ? `${file.external_references} 处依赖其他文件` : ""].filter(Boolean) : [];
-  return `<article class="material-card ${material.state === "失效" ? "stale" : ""}"><div class="material-top"><strong>${escapeHtml(copy[0])}</strong><span class="${stateClass}">${stateText}</span></div><p class="small muted">${escapeHtml(copy[2])}</p>${file ? `<div class="file-name">${escapeHtml(file.name)}</div><div class="facts"><span>${file.records} 条记录</span><span>${file.teachers} 名教师</span></div>${risk.length ? `<p class="small warn">⚠ ${risk.join("；")}</p>` : ""}<details><summary>查看文件信息</summary><p class="small muted">工作表：${file.sheets.map(escapeHtml).join("、")}<br>文件标识：${file.sha256.slice(0, 10)}</p></details>` : '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" onclick="choose('${material.role}')">${escapeHtml(copy[1])}</button></article>`;
 }
 
 function gradeSupportSection(help) {
@@ -867,7 +867,7 @@ function managementPage() {
   const values = Object.fromEntries((current.management || []).map((item) => [item.field, item.value]));
   const person = current.management?.[0]?.confirmed_by || "";
   const fields = ["平均课时", "续推人次", "退费人次", "管理考核说明"];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">人工确认</p><h2>管理岗位考核</h2><p class="muted">系统只提供可靠事实；当前没有可靠自动数据的项目由负责人填写最终确认值。</p></div></div><div class="table-wrap"><table class="table management"><thead><tr><th>项目</th><th>系统参考值</th><th>人工最终确认值</th></tr></thead><tbody>${fields.map((field) => `<tr><td>${field}</td><td class="muted">暂无可靠自动数据</td><td><input id="m-${field}" value="${escapeHtml(values[field] || "")}" placeholder="填写确认值或说明"></td></tr>`).join("")}</tbody></table></div><label class="person-field">确认人<input id="m-person" value="${escapeHtml(person)}" placeholder="填写姓名"></label><div class="action-bar"><span class="muted small">这里不会自动推荐数值，也不会修改工资表。</span><button onclick="saveManagement()">保存人工确认</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">人工确认</p><h2>管理岗位确认</h2><p class="muted">系统只提供可靠事实；当前没有可靠自动数据的项目由负责人填写最终确认值。</p></div></div><div class="table-wrap"><table class="table management"><thead><tr><th>项目</th><th>系统参考值</th><th>人工最终确认值</th></tr></thead><tbody>${fields.map((field) => `<tr><td>${field}</td><td class="muted">暂无可靠自动数据</td><td><input id="m-${field}" value="${escapeHtml(values[field] || "")}" placeholder="填写确认值或说明"></td></tr>`).join("")}</tbody></table></div><label class="person-field">确认人<input id="m-person" value="${escapeHtml(person)}" placeholder="填写姓名"></label><div class="action-bar"><span class="muted small">这里不会自动推荐数值，也不会修改工资表。</span><button onclick="saveManagement()">保存人工确认</button></div></section>`;
 }
 
 async function choose(role) {
@@ -1198,12 +1198,18 @@ function bindMaterialDropZones() {
     zone.addEventListener("dragleave", () => { zone.style.borderColor = ""; });
     zone.addEventListener("drop", async (event) => {
       event.preventDefault(); zone.style.borderColor = "";
-      const file = event.dataTransfer?.files?.[0];
-      if (file) await uploadMaterialFile(zone.dataset.dropRole, file);
+      const files = [...(event.dataTransfer?.files || [])];
+      if (files.length) await uploadMaterialFiles(zone.dataset.dropRole, files);
     });
     zone.addEventListener("paste", async (event) => {
-      const file = event.clipboardData?.files?.[0];
-      if (file) { event.preventDefault(); await uploadMaterialFile(zone.dataset.dropRole, file); }
+      const files = [...(event.clipboardData?.files || [])];
+      if (!files.length) {
+        files.push(...[...(event.clipboardData?.items || [])]
+          .filter((item) => item.kind === "file")
+          .map((item) => item.getAsFile?.())
+          .filter(Boolean));
+      }
+      if (files.length) { event.preventDefault(); await uploadMaterialFiles(zone.dataset.dropRole, files); }
     });
     zone.addEventListener("click", () => choose(zone.dataset.dropRole));
   });
@@ -1216,12 +1222,28 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-async function uploadMaterialFile(role, file) {
+function setMaterialBusy(role, busy) {
+  const zone = document.querySelector(`[data-drop-role="${role}"]`);
+  if (!zone) return;
+  zone.setAttribute("aria-busy", busy ? "true" : "false");
+  zone.textContent = busy ? "正在读取并识别…" : (role === "package" ? "把整套资料拖到这里，系统自动归类" : "拖入文件，或直接粘贴");
+  zone.style.opacity = busy ? "0.65" : "";
+  zone.style.pointerEvents = busy ? "none" : "";
+}
+
+async function uploadMaterialFiles(role, files) {
+  if (materialBusy.has(role)) return;
+  materialBusy.add(role); setMaterialBusy(role, true);
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const uploaded = await api("/api/upload", { method: "POST", body: JSON.stringify({ name: file.name, content_base64: bytesToBase64(bytes) }) });
-    await importMaterialPath(role, uploaded.path);
+    for (const file of files) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const uploaded = await api("/api/upload", { method: "POST", body: JSON.stringify({ name: file.name, content_base64: bytesToBase64(bytes) }) });
+      current = (await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: role, path: uploaded.path }) })).run;
+    }
+    renderRun();
+    showMessage(files.length > 1 ? `已读取 ${files.length} 份材料并自动归类。` : "文件已识别并放入对应材料。", "success");
   } catch (error) { showMessage(error.message); }
+  finally { materialBusy.delete(role); }
 }
 
 // Keep the existing material card markup and add a small, accessible drop target.
@@ -1231,10 +1253,17 @@ function materialCard(material) {
   const stateClass = material.state === "失效" ? "bad" : file ? "ok" : material.required ? "warn" : "muted";
   const stateText = material.state === "失效" ? "● 已变化，需重新选择" : file ? "✓ 已识别" : material.required ? "○ 必需材料" : "可稍后补充";
   const risk = file ? [file.missing_cache ? `${file.missing_cache} 个公式结果不可读取` : "", file.external_references ? `${file.external_references} 处依赖其他文件` : ""].filter(Boolean) : [];
-  return `<article class="material-card ${material.state === "失效" ? "stale" : ""}"><div class="material-top"><strong>${escapeHtml(copy[0])}</strong><span class="${stateClass}">${stateText}</span></div><p class="small muted">${escapeHtml(copy[2])}</p><div data-drop-role="${escapeHtml(material.role)}" tabindex="0" role="button" aria-label="拖入${escapeHtml(copy[0])}文件" style="border:1px dashed #b9c4cf;border-radius:7px;padding:12px;text-align:center;color:#68717d;font-size:13px">拖入 Excel 文件，或点击这里选择</div>${file ? `<div class="file-name">${escapeHtml(file.name)}</div><div class="facts"><span>${file.records} 条记录</span><span>${file.teachers} 名教师</span></div>${risk.length ? `<p class="small warn">⚠ ${risk.join("；")}</p>` : ""}<details><summary>查看文件信息</summary><p class="small muted">工作表：${file.sheets.map(escapeHtml).join("、")}<br>文件标识：${file.sha256.slice(0, 10)}</p></details>` : '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" onclick="choose('${material.role}')">${escapeHtml(copy[1])}</button></article>`;
+  const busy = materialBusy.has(material.role);
+  return `<article class="material-card ${material.state === "失效" ? "stale" : ""}"><div class="material-top"><strong>${escapeHtml(copy[0])}</strong><span class="${stateClass}">${busy ? "正在读取…" : stateText}</span></div><p class="small muted">${escapeHtml(copy[2])}</p><div data-drop-role="${escapeHtml(material.role)}" tabindex="0" role="button" aria-label="拖入${escapeHtml(copy[0])}文件" class="drop-zone" aria-busy="${busy ? "true" : "false"}">${busy ? "正在读取并识别…" : "拖入文件，或直接粘贴"}</div>${file ? `<div class="file-name">${escapeHtml(file.name)}</div><div class="facts"><span>${file.records} 条记录</span><span>${file.teachers} 名教师</span></div>${risk.length ? `<p class="small warn">⚠ ${risk.join("；")}</p>` : ""}<details><summary>查看文件信息</summary><p class="small muted">工作表：${file.sheets.map(escapeHtml).join("、")}<br>文件标识：${file.sha256.slice(0, 10)}</p></details>` : '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" ${busy ? "disabled" : ""} onclick="choose('${material.role}')">${escapeHtml(copy[1])}</button></article>`;
 }
 
 async function importMaterialPath(role, path) {
+  if (["subject_group", "renewal", "refund", "package"].includes(role)) {
+    current = (await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: role, path }) })).run;
+    renderRun();
+    showMessage("文件已识别并放入对应材料。", "success");
+    return;
+  }
   const inspected = await api("/api/inspect", { method: "POST", body: JSON.stringify({ path }) });
   if (role === "schedule") {
     let preview = null;
@@ -1249,8 +1278,11 @@ async function importMaterialPath(role, path) {
 }
 
 async function choose(role) {
+  if (materialBusy.has(role)) return;
+  materialBusy.add(role);
   try {
     const picked = await api("/api/pick", { method: "POST", body: "{}" });
     if (picked.path) await importMaterialPath(role, picked.path);
   } catch (error) { showMessage(error.message); }
+  finally { materialBusy.delete(role); }
 }

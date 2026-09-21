@@ -80,6 +80,23 @@ def test_material_ui_exposes_drag_drop_and_post_file_picker():
     assert 'api("/api/upload"' in source
     assert 'zone.addEventListener("paste"' in source
     assert 'api("/api/pick", { method: "POST", body: "{}" })' in source
+    assert 'data-drop-role="package"' in source
+    assert 'data-drop-role="subject_group"' in source
+    assert 'data-drop-role="${kind}"' in source
+    assert 'businessMaterialCard("renewal"' in source
+    assert 'businessMaterialCard("refund"' in source
+    assert "uploadMaterialFiles" in source
+    assert "materialBusy" in source
+    assert "正在读取并识别" in source
+    assert "选择按钮仅作为备用入口" in source
     assert "学科组提交表" in source
     assert "续费表" in source
     assert "退费表" in source
+
+
+def test_material_ui_uses_previous_month_and_plain_start_action():
+    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "function defaultPayrollPeriod" in source
+    assert "开始核算并查看预览" in source
+    assert "工资表汇总" in source
+    assert "核算日" not in source

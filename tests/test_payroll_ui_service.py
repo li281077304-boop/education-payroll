@@ -547,6 +547,44 @@ def test_browser_shell_uses_plain_language_for_core_workflow():
     assert "历史核算" in home_block
 
 
+def test_user_facing_material_import_keeps_renewal_and_refund_separate(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    renewal = tmp_path / "续费结果.csv"
+    renewal.write_text("教师,续费人数,总学生数\n教师甲,2,4\n", encoding="utf-8-sig")
+    refund = tmp_path / "退费结果.csv"
+    refund.write_text("教师,学生,金额,状态,说明\n教师甲,学生甲,-100,已确认,脱敏测试\n", encoding="utf-8-sig")
+
+    renewal_result = service.import_material_file(run["id"], "renewal", str(renewal))
+    refund_result = service.import_material_file(run["id"], "refund", str(refund))
+    saved = service.get(run["id"])
+
+    assert renewal_result["material_kind"] == "renewal"
+    assert refund_result["material_kind"] == "refund"
+    assert saved["material_inputs"]["renewal"]["name"] == renewal.name
+    assert saved["material_inputs"]["refund"]["name"] == refund.name
+    assert len(saved["renewal_reports"]) == 1
+    assert len(saved["refund_reports"]) == 1
+
+
+def test_user_facing_auto_material_import_classifies_schedule_and_subject_group(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    schedule = FIXTURES / "fake_schedule.xlsx"
+    payroll = tmp_path / "math-submit.xlsx"
+    _payroll_with_only(payroll, 5)
+
+    schedule_result = service.import_material_file(run["id"], "auto", str(schedule))
+    payroll_result = service.import_material_file(run["id"], "auto", str(payroll))
+    saved = service.get(run["id"])
+
+    assert schedule_result["recognized_role"] == "schedule"
+    assert payroll_result["material_kind"] == "subject_group"
+    assert payroll_result["recognized_role"] == "math"
+    assert saved["files"]["schedule"]["name"] == schedule.name
+    assert saved["files"]["math"]["name"] == payroll.name
+
+
 def test_run_binds_effective_rating_version_and_reports_a_rating_mismatch(tmp_path):
     service = PayrollService(tmp_path / "app-data")
     versions = service.save_rating_version("2025-10", "2026-09", "脱敏年度星级评定", "2025-10", [{"teacher": "张三", "rating": 4}])

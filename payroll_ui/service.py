@@ -37,6 +37,7 @@ from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.excel.common import grade_from_class_name, load_student_grade_lookup
 from payroll_core.excel.schedule import read_schedule_excel
+from payroll_core.adapters import read_refund_report, read_renewal_report
 from payroll_core.grade_inference import (
     CourseExportSnapshot,
     StudentGradeEvidence,
@@ -298,6 +299,26 @@ class PayrollService(CoreFlow):
         run["weekly_reports"] = list(package.weekly_reports)
         run["renewal_reports"] = list(package.renewal_reports)
         run["refund_reports"] = list(package.refund_reports)
+        # Keep the user-facing material cards informative even when the
+        # optional folder-package fallback is used.  The package registry
+        # already contains the source-backed file metadata, so this does not
+        # copy or re-read any workbook.
+        run["material_inputs"] = dict(run.get("material_inputs") or {})
+        for kind, report_key, label in (
+            ("renewal", "renewal_reports", "续费表"),
+            ("refund", "refund_reports", "退费表"),
+        ):
+            reports = run[report_key]
+            source_type = kind.upper()
+            source = next((item for item in package.source_registry if item.get("source_type") == source_type), None)
+            if reports and source:
+                run["material_inputs"][kind] = {
+                    "name": source.get("file_name") or Path(source.get("file_path", "")).name,
+                    "path": source.get("file_path", ""),
+                    "sha256": source.get("file_hash", ""),
+                    "records": len(reports),
+                    "label": label,
+                }
         run["assessment_reports"] = list(package.assessment_reports)
         run["package_root"] = str(package.root)
         run["package_inventory"] = package.inventory
@@ -425,6 +446,86 @@ class PayrollService(CoreFlow):
             "star_conflicts": len(package.star_conflicts),
             "grade_evidence": len(package.grade_evidence),
         }
+
+    def _infer_subject_group_role(self, path: Path, run: dict) -> str:
+        """Classify one submitted payroll workbook without exposing departments in UI."""
+        parsed = self._read_for_run("math", path, run)
+        if parsed.errors or not parsed.records:
+            raise ValueError("学科组提交表缺少可读取的教师和工资字段。")
+        teachers = {str(item.teacher).strip() for item in parsed.records if getattr(item, "teacher", "").strip()}
+        schedule_teachers: dict[str, set[str]] = {}
+        schedule_path = run.get("files", {}).get("schedule", {}).get("path")
+        if schedule_path and Path(schedule_path).is_file():
+            schedule = self._read_for_run("schedule", Path(schedule_path), run)
+            for item in schedule.records:
+                schedule_teachers.setdefault(item.teacher, set()).add(str(item.subject or ""))
+        math_words = ("数学", "math")
+        science_words = ("物理", "化学", "理化", "physics", "chemistry", "science")
+        math_score = sum(1 for teacher in teachers if any(word.lower() in subject.lower() for subject in schedule_teachers.get(teacher, set()) for word in math_words))
+        science_score = sum(1 for teacher in teachers if any(word.lower() in subject.lower() for subject in schedule_teachers.get(teacher, set()) for word in science_words))
+        stem = path.stem.lower()
+        if math_score > science_score or (math_score == science_score and any(word.lower() in stem for word in math_words)):
+            return "math"
+        if science_score > math_score or any(word.lower() in stem for word in science_words):
+            return "science"
+        existing = {role for role in ("math", "science") if role in run.get("files", {})}
+        missing = [role for role in ("math", "science") if role not in existing]
+        if len(missing) == 1:
+            return missing[0]
+        raise ValueError("无法自动判断这份学科组提交表属于哪个学科，请确认文件内容后重试。")
+
+    def import_material_file(self, run_id: str, kind: str, path: str) -> dict:
+        """Import a user-facing material and keep the internal role mapping hidden."""
+        run = self._load(run_id)
+        source = Path(path).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError("找不到这份材料，请重新拖入或粘贴文件。")
+        if kind in {"package", "auto"}:
+            inspection = inspect_workbook(source)
+            layout = inspection.records[0].fingerprint.layout if inspection.records else ""
+            if layout == LAYOUTS["schedule"]:
+                kind = "schedule"
+            elif layout == LAYOUTS["math"]:
+                kind = "subject_group"
+            else:
+                renewal = read_renewal_report(source, run["period"])
+                refund = read_refund_report(source, run["period"])
+                if renewal.records and not refund:
+                    kind = "renewal"
+                elif refund and not renewal.records:
+                    kind = "refund"
+                else:
+                    raise ValueError("无法自动识别这份材料。请拖入排课、学科组提交、续费或退费表。")
+        if kind == "subject_group":
+            role = self._infer_subject_group_role(source, run)
+            rendered = self.import_file(run_id, role, str(source))
+            rendered["material_kind"] = "subject_group"
+            rendered["recognized_role"] = role
+            return {"run": rendered, "material_kind": "subject_group", "recognized_role": role}
+        if kind == "schedule":
+            rendered = self.import_file(run_id, "schedule", str(source))
+            return {"run": rendered, "material_kind": "schedule", "recognized_role": "schedule"}
+        if kind not in {"renewal", "refund"}:
+            raise ValueError("无法识别这类材料。")
+        before = version(source)
+        result = read_renewal_report(source, run["period"]) if kind == "renewal" else read_refund_report(source, run["period"])
+        if hasattr(result, "errors") and result.errors:
+            raise ValueError("文件缺少必要列：" + "；".join(issue.message for issue in result.errors))
+        records = list(result.records) if hasattr(result, "records") else list(result)
+        if not records:
+            raise ValueError(f"未识别到有效的{ '续费' if kind == 'renewal' else '退费' }记录，请检查工作表和表头。")
+        if version(source) != before:
+            raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
+        reports = [item.as_dict() for item in records]
+        material = {
+            "name": source.name, "path": str(source), **before,
+            "records": len(reports), "label": "续费表" if kind == "renewal" else "退费表",
+        }
+        run.setdefault("material_inputs", {})[kind] = material
+        run[f"{kind}_reports"] = reports
+        run["last_error"] = ""
+        self.store.save(run)
+        return {"run": self.render(run), "material_kind": kind, "recognized_role": kind, "records": len(reports)}
 
     def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None) -> list[dict]:
         return self.inputs.import_results(input_type, period, path, submitted_by, activation_scope=activation_scope, replace_input_ids=replace_input_ids)
