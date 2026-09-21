@@ -1,11 +1,15 @@
 from dataclasses import replace
+import csv
 
 from openpyxl import load_workbook
 
 from payroll_core.excel.final_workbook_contract import create_empty_template
 from payroll_core.excel.standard_payroll_render import render_generated_payroll
+from payroll_core.final_fields import FINAL_FIELD_CODES
+from payroll_ui.service import PayrollService
 from tests.test_standard_payroll_output import _business_inputs, _generated
 from tests.test_standard_payroll_output import _sanitized_template
+from tests.test_payroll_modes_and_class_rules import _schedule
 
 
 def test_company_renderer_is_current_run_driven_and_does_not_copy_old_rows(tmp_path):
@@ -106,3 +110,45 @@ def test_explicit_manual_adjustment_overrides_only_current_run_field(tmp_path):
     sheet = load_workbook(output, data_only=False).active
     assert sheet["AN5"].value == -50
     assert sheet["C5"].value == "教师甲"
+
+
+def test_manual_adjustment_production_path_reopen_and_revoke(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", "GENERATE")
+    schedule = _schedule(tmp_path / "schedule.xlsx", [["教师甲", "九年级", "数学", "1对1", 1, "已上课"]] * 20)
+    service.import_file(run["id"], "schedule", str(schedule))
+    run = service.store.get(run["id"])
+    run["template_path"] = str(_sanitized_template(tmp_path))
+    service.store.save(run)
+
+    refund = tmp_path / "refund.csv"
+    with refund.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["教师", "headcount_amount", "performance_amount", "student"])
+        writer.writerow(["教师甲", -100, 0, "脱敏学生"])
+    imported = service.import_business_results("REFUND_RESULT", "2026-08", str(refund), "脱敏审核员")[0]
+    imported = service.review_business_input(imported["id"], "START_REVIEW", "脱敏审核员")
+    imported = service.review_business_input(imported["id"], "APPROVE", "脱敏审核员")
+    service.bind_business_input(run["id"], imported["id"])
+
+    adjustment = service.create_manual_adjustment(
+        run["id"], teacher_id="教师甲", field="AN", raw_calculated=-100,
+        adjustment_value=50, final_value=-50,
+        reason="脱敏人工调整回归。", evidence="脱敏退费结果.csv:2", actor="脱敏审核员",
+    )
+    assert adjustment["status"] == "FINAL_CONFIRMED"
+    adjusted_output = tmp_path / "adjusted.xlsx"
+    service.generate_payroll(run["id"], str(adjusted_output))
+    adjusted_sheet = load_workbook(adjusted_output, data_only=False).worksheets[0]
+    an_column = 33 + FINAL_FIELD_CODES.index("AN")
+    assert adjusted_sheet.cell(5, an_column).value == -50
+
+    revoked = dict(adjustment, status="REVOKED")
+    service.store.save_business_input(revoked)
+    run = service.store.get(run["id"])
+    run["business_input_bindings"] = [binding for binding in run.get("business_input_bindings", []) if binding["input_id"] != adjustment["id"]]
+    service.store.save(run)
+    raw_output = tmp_path / "raw.xlsx"
+    service.generate_payroll(run["id"], str(raw_output))
+    raw_sheet = load_workbook(raw_output, data_only=False).worksheets[0]
+    assert raw_sheet.cell(5, an_column).value == -100

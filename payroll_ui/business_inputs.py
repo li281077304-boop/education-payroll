@@ -21,6 +21,15 @@ INPUT_TYPES = {"TEACHER_SUBMISSION", "RENEWAL_RESULT", "REFUND_RESULT", "REFERRA
 TEACHER_ITEM_TYPES = {"排课信息有误", "班课特殊核算", "续费问题", "退费说明", "推荐奖励", "其他"}
 REVIEW_ACTIONS = {"START_REVIEW": "REVIEW", "APPROVE": "APPROVED", "REJECT": "REJECTED", "REQUEST_MORE_INFO": "REQUEST_MORE_INFO"}
 TERMINAL_STATUSES = {"REJECTED", "SUPERSEDED"}
+MANUAL_ADJUSTMENT_STATUSES = {"APPROVED", "ACTIVE", "CONFIRMED", "FINAL_CONFIRMED"}
+
+
+def is_active_business_input(item: dict[str, Any]) -> bool:
+    """Return whether a persisted business input may affect a Run."""
+    status = str(item.get("status") or "").upper()
+    if status == "APPROVED":
+        return True
+    return str(item.get("input_type") or "").upper() == "MANUAL_ADJUSTMENT" and status in MANUAL_ADJUSTMENT_STATUSES
 
 
 def now() -> str:
@@ -174,7 +183,7 @@ class BusinessInputService:
 
     def bind_to_run(self, input_id: str, run: dict, *, persist: bool = True) -> tuple[dict, dict]:
         item = self.store.get_business_input(input_id)
-        if item["status"] != "APPROVED":
+        if not is_active_business_input(item):
             raise ValueError("只有已审核通过的业务输入才能绑定工资核算。")
         if item["period"] != run["period"]:
             raise ValueError("业务输入月份与当前工资核算月份不一致。")
@@ -189,7 +198,7 @@ class BusinessInputService:
 
     def current(self, input_id: str, expected_hash: str = "") -> bool:
         item = self.store.get_business_input(input_id)
-        if item["status"] != "APPROVED":
+        if not is_active_business_input(item):
             return False
         if expected_hash and item.get("source_file_hash") != expected_hash:
             return False

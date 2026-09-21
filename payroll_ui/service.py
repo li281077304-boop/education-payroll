@@ -67,7 +67,7 @@ from payroll_ui.submissions import PayrollSubmissionService
 
 from .storage import RunStore
 from .business import build_groups, build_user_actions, invalidate as invalidate_business_decisions
-from .business_inputs import BusinessInputService
+from .business_inputs import BusinessInputService, is_active_business_input
 from .core_flow import CoreFlow, valid_period
 
 REQUIRED = ("schedule",)
@@ -265,6 +265,50 @@ class PayrollService(CoreFlow):
 
     def business_inputs(self, period: str = "", status: str = "") -> list[dict]:
         return self.inputs.list_admin(period=period, status=status)
+
+    def create_manual_adjustment(
+        self,
+        run_id: str,
+        *,
+        teacher_id: str,
+        field: str,
+        raw_calculated: float,
+        adjustment_value: float,
+        final_value: float,
+        reason: str,
+        evidence: str,
+        actor: str,
+        confirmed_at: str = "",
+    ) -> dict:
+        """Persist and bind one explicitly confirmed Run-scoped adjustment."""
+        run = self._load(run_id)
+        teacher_id = str(teacher_id or "").strip()
+        field = str(field or "").strip().upper()
+        reason, evidence, actor = str(reason or "").strip(), str(evidence or "").strip(), str(actor or "").strip()
+        if not teacher_id or not field or not reason or not evidence or not actor:
+            raise ValueError("人工调整必须包含教师、字段、原因、证据和确认人。")
+        if field not in {"AH", "AI", "AJ", "AK", "AN"}:
+            raise ValueError("当前只允许对已接入的工资业务字段建立人工调整。")
+        raw, delta, final = float(raw_calculated), float(adjustment_value), float(final_value)
+        if abs((raw + delta) - final) > 1e-9:
+            raise ValueError("人工调整的最终值必须等于原始值加调整值。")
+        when = confirmed_at.strip() or datetime.now(timezone.utc).isoformat()
+        item = {
+            "id": uuid.uuid4().hex[:16], "input_type": "MANUAL_ADJUSTMENT",
+            "source_type": "MANUAL_CONFIRMATION", "source_ref": evidence,
+            "source_file_hash": "", "source_row": "", "submitted_by": actor,
+            "submitted_at": when, "status": "FINAL_CONFIRMED",
+            "period": run["period"], "run_id": run_id, "teacher_id": teacher_id,
+            "teacher_name": teacher_id, "field": field,
+            "raw_calculated": raw, "adjustment_value": delta, "final_value": final,
+            "reason": reason, "evidence": evidence, "actor": actor,
+            "confirmed_at": when, "created_at": when, "updated_at": when,
+            "reviewed_by": actor, "reviewed_at": when,
+        }
+        self.store.save_business_input(item)
+        run, _ = self.inputs.bind_to_run(item["id"], run)
+        self.store.save(run)
+        return self.store.get_business_input(item["id"])
 
     def import_package(self, run_id: str, package_path: str) -> dict:
         """Discover a local materials package and bind its star authority.
@@ -1250,12 +1294,13 @@ class PayrollService(CoreFlow):
     def generate_payroll(self, run_id: str, output_path: str, *, confirmed_hours: dict | None = None) -> dict:
         """生成模式：同一套 Core 结果直接渲染成标准工资表。"""
         run = self._load(run_id)
+        business_inputs = self._approved_business_inputs(run)
         if run.get("calculation_engine") == "CONFIGURED_V1":
             if confirmed_hours:
                 raise ValueError("AD 已由 AA + AC 独立计算，不接受手工或工资表 AD 覆盖。")
             checked = self.check(run_id)
             payroll = self._generated_from_checked(checked)
-            path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"))
+            path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"), manual_adjustments=business_inputs)
             run = self.store.get(run_id)
             run["generated_payroll"] = {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(), "rows": [asdict(row) for row in payroll.rows]}
             self.store.save(run)
@@ -1282,7 +1327,7 @@ class PayrollService(CoreFlow):
             base_salary_inputs=run.get("base_salary_inputs") if run.get("base_salary_input_snapshot") else None,
             renewal_snapshot=run.get("run_renewal_result_snapshot"),
         )
-        path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"))
+        path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"), manual_adjustments=business_inputs)
         run["generated_payroll"] = {
             "path": path, "status": payroll.status, "blockers": list(payroll.blockers),
             "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1290,6 +1335,18 @@ class PayrollService(CoreFlow):
         }
         self.store.save(run)
         return {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rows": [asdict(row) for row in payroll.rows], "rule_versions": dict(payroll.rule_versions)}
+
+    def _approved_business_inputs(self, run: dict) -> tuple[dict, ...]:
+        """Return only current, explicitly bound inputs eligible for output."""
+        values: list[dict] = []
+        for binding in run.get("business_input_bindings", []):
+            item = self.store.get_business_input(binding["input_id"])
+            if not is_active_business_input(item):
+                continue
+            if not self.inputs.current(item["id"], binding.get("source_file_hash", "")):
+                continue
+            values.append(item)
+        return tuple(values)
 
     def preview_payroll(self, run_id: str) -> dict:
         """核算并返回完整工资预览，不创建或修改任何输出工作簿."""
@@ -1490,7 +1547,11 @@ class PayrollService(CoreFlow):
     def _generated_from_checked(self, checked: dict):
         """Build the one canonical final-field result used by preview/export."""
         bindings = checked.get("business_input_bindings", [])
-        inputs = [self.store.get_business_input(item["input_id"]) for item in bindings]
+        inputs = [
+            item for binding in bindings
+            for item in (self.store.get_business_input(binding["input_id"]),)
+            if is_active_business_input(item)
+        ]
         base_salary = checked.get("base_salary_inputs") if checked.get("base_salary_input_snapshot") else None
         return generated_from_calculation(checked["core_calculation"], business_inputs=inputs, base_salary_inputs=base_salary, renewal_snapshot=checked.get("run_renewal_result_snapshot"))
 
