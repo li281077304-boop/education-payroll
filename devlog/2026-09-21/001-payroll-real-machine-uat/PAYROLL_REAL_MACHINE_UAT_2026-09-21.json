@@ -1,0 +1,55 @@
+{
+  "run_id": "payroll-real-machine-uat-20260921",
+  "project": "education-payroll",
+  "date": "2026-09-21",
+  "type": "REAL_MACHINE_UI_UAT",
+  "status": "IN_PROGRESS_BLOCKED",
+  "navigation_uat": "PASS",
+  "runtime": {
+    "repo": "/Users/macos/Documents/做表/education-payroll-longrun-20260913",
+    "branch": "night/longrun-20260913",
+    "head": "d06b61b",
+    "server": "local-http-ui"
+  },
+  "observed": {
+    "schedule_ready": true,
+    "baseline_required": false,
+    "final_check_optional": true,
+    "grade_confirmation_warning": true,
+    "schedule_coverage": "2026-08-03..2026-08-30",
+    "preview_result": "PASSED_AFTER_FIX",
+    "fix_commit": "18be701",
+    "targeted_tests": "61 passed",
+    "full_regression": "376 passed, 1 skipped",
+    "full_regression_failure_reason": "",
+    "backend_exception": "UnboundLocalError: exempt is not associated with a value (fixed in 18be701)",
+    "backend_location": "payroll_ui/service.py::_perform_check"
+  },
+  "root_cause": {
+    "kind": "RUNTIME_INITIALIZATION_BUG",
+    "detail": "exempt is initialized only in the non-generate configured-rating branch but is later read by formula-audit handling when the optional baseline is absent"
+  },
+  "blockers": [
+    "preview runtime error (fixed)",
+    "salary-sheet summary add-flow has correct POST wiring; final native picker verification remains",
+    "real historical payroll import must be verified",
+    "xls/xlsx compatibility must be verified",
+    "drag-and-drop upload is implemented and sanitized-tested; real saved Run used the existing .xls/.xlsx files",
+    "file/folder picker must be verified",
+    "native macOS file/folder picker selection still needs visible desktop confirmation"
+  ],
+  "changes_made": [
+    "18be701: initialize exempt for generated payroll preview and add regression test",
+    "UAT working tree: local drag/drop upload endpoint and UI drop zones",
+    "UAT working tree: salary-summary picker POST and loading feedback",
+    "UAT working tree: previous-month default and advanced period controls",
+    "d06b61b: group production materials into schedule, subject-group, renewal, and refund cards",
+    "d06b61b: replace external template dependency in regression tests with a sanitized in-test template contract"
+  ],
+  "safety": {
+    "real_excel_modified": false,
+    "real_data_committed": false,
+    "source_workbook_overwritten": false
+  },
+  "next_action": "On the visible Mac desktop, select one sanitized workbook in the native picker and confirm the add/import path"
+}
