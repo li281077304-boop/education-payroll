@@ -27,6 +27,7 @@ from .payroll_submission import (
     SubmissionSourceKind,
     SubmissionStatus,
 )
+from .manual_adjustments import ManualAdjustment
 
 __all__ = [
     "BusinessInputRecord",
@@ -51,4 +52,5 @@ __all__ = [
     "StandardPayrollSubmission",
     "SubmissionSourceKind",
     "SubmissionStatus",
+    "ManualAdjustment",
 ]

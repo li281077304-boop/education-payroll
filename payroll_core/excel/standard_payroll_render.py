@@ -17,6 +17,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 
 from ..final_fields import FINAL_FIELD_CODES, FIELD_LABELS
+from ..models.manual_adjustments import adjustment_by_teacher_field
 from ..payroll_generation import GeneratedPayroll
 from .golden_baseline import golden_formula_for_row
 from .output_paths import safe_output_path
@@ -95,7 +96,13 @@ def _formula_for_row(row: Any, code: str, row_number: int) -> str:
     raise KeyError(code)
 
 
-def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path, *, template_path: str | Path | None = None) -> str:
+def render_generated_payroll(
+    payroll: GeneratedPayroll,
+    output: str | Path,
+    *,
+    template_path: str | Path | None = None,
+    manual_adjustments: Any = (),
+) -> str:
     # Preserve prior exports; collisions receive the next numbered name.
     target = safe_output_path(output)
     if not payroll.rows:
@@ -104,7 +111,7 @@ def render_generated_payroll(payroll: GeneratedPayroll, output: str | Path, *, t
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if template_path:
-        return _render_with_template(payroll, rows, target, Path(template_path))
+        return _render_with_template(payroll, rows, target, Path(template_path), manual_adjustments=manual_adjustments)
 
     book = Workbook()
     sheet = book.active
@@ -165,7 +172,51 @@ def _template_headers(sheet) -> dict[str, int]:
     return found
 
 
-def _render_with_template(payroll: GeneratedPayroll, rows: tuple[Any, ...], target: Path, template: Path) -> str:
+def _manual_value(row: Any, code: str, adjustments: Mapping[tuple[str, str], Any]) -> object:
+    key = ("".join(str(row.teacher).split()), code)
+    adjustment = adjustments.get(key)
+    if adjustment is not None:
+        return adjustment.final_value
+    return _field_value(row, code)
+
+
+def _refund_comment_for_row(row: Any, inputs: Any) -> str | None:
+    """Build a comment only from an approved current refund input."""
+    teacher = "".join(str(row.teacher).split())
+    comments: list[str] = []
+    for item in inputs or ():
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("input_type") or "").upper() != "REFUND_RESULT":
+            continue
+        if str(item.get("status") or "").upper() != "APPROVED":
+            continue
+        bound = "".join(str(item.get("teacher_id") or item.get("teacher_name") or "").split())
+        if bound != teacher:
+            continue
+        payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else item
+        student = str(payload.get("student") or payload.get("学生") or "").strip()
+        head = payload.get("headcount_amount", payload.get("人头", payload.get("退费人头")))
+        performance = payload.get("performance_amount", payload.get("业绩", payload.get("退费业绩")))
+        parts = []
+        if head not in (None, "", 0, 0.0):
+            parts.append(f"人头{head:g}" if isinstance(head, (int, float)) else f"人头{head}")
+        if performance not in (None, "", 0, 0.0):
+            parts.append(f"业绩{performance:g}" if isinstance(performance, (int, float)) else f"业绩{performance}")
+        detail = " ".join(parts) or str(payload.get("AN") or payload.get("refund_total") or "")
+        source = str(item.get("source_ref") or "当前退费源")
+        comments.append(f"{row.teacher}: {student} 退费 {detail}\n({source})")
+    return "\n".join(comments) if comments else None
+
+
+def _render_with_template(
+    payroll: GeneratedPayroll,
+    rows: tuple[Any, ...],
+    target: Path,
+    template: Path,
+    *,
+    manual_adjustments: Any = (),
+) -> str:
     if not template.is_file():
         raise ValueError("工资模板文件不存在，不能生成模板工资表。")
     try:
@@ -190,9 +241,12 @@ def _render_with_template(payroll: GeneratedPayroll, rows: tuple[Any, ...], targ
     # Clear only the data area, because formulas in the blank template rows
     # would otherwise display stale values from the template itself.
     first_data_row = 5
+    adjustments = adjustment_by_teacher_field(manual_adjustments)
     for row_number in range(first_data_row, sheet.max_row + 1):
         for column in range(1, sheet.max_column + 1):
-            sheet.cell(row_number, column).value = None
+            cell = sheet.cell(row_number, column)
+            cell.value = None
+            cell.comment = None
     if len(rows) > sheet.max_row - first_data_row + 1:
         source_row = sheet.max_row
         for row_number in range(sheet.max_row + 1, first_data_row + len(rows)):
@@ -252,7 +306,11 @@ def _render_with_template(payroll: GeneratedPayroll, rows: tuple[Any, ...], targ
         for index, code in enumerate(FINAL_FIELD_CODES):
             if code in {"AK", "AV"}:
                 continue
-            sheet.cell(row_number, 33 + index).value = _value(_field_value(row, code))
+            sheet.cell(row_number, 33 + index).value = _value(_manual_value(row, code, adjustments))
+        comment = _refund_comment_for_row(row, manual_adjustments)
+        if comment:
+            from openpyxl.comments import Comment
+            sheet.cell(row_number, 33 + FINAL_FIELD_CODES.index("AN")).comment = Comment(comment, "Payroll")
         sheet.cell(row_number, sheet.max_column).value = "；".join(_row_blockers(row)) or ("已计算" if row.final else "待确认")
 
     _write_evidence_sheet(book, payroll, rows)
