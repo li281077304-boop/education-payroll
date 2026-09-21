@@ -12,6 +12,7 @@ from payroll_ui.service import PayrollService
 from payroll_ui.server import PayrollHttpServer
 from tests.test_payroll_modes_and_class_rules import _schedule
 from tests.test_payroll_ui_service import _payroll_with_only
+from tests.test_standard_payroll_output import _sanitized_template
 
 
 def prepared(tmp_path, mode="AUDIT"):
@@ -30,6 +31,10 @@ def prepared(tmp_path, mode="AUDIT"):
             sheet[f"{col}5"] = value
         book.save(target)
         service.import_file(run["id"], "math", str(target))
+    else:
+        run_record = service.store.get(run["id"])
+        run_record["template_path"] = str(_sanitized_template(tmp_path))
+        service.store.save(run_record)
     return service, run, source, target
 
 

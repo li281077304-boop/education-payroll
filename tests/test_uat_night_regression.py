@@ -43,12 +43,13 @@ def _lesson(teacher: str, day: str, class_type: str = "1对1", attended: int = 2
     (date(2026, 9, 12), "2026-08"),
     (date(2026, 9, 19), "2026-08"),
     (date(2026, 9, 20), "2026-08"),
-    (date(2026, 9, 30), "2026-08"),
+    (date(2026, 9, 21), "2026-09"),
+    (date(2026, 9, 30), "2026-09"),
     (date(2026, 1, 10), "2025-12"),
     (date(2026, 1, 20), "2025-12"),
 ])
-def test_default_period_is_always_previous_month(today, expected):
-    """新建工资核算默认使用上一个自然月。"""
+def test_default_period_uses_day_21_cutover(today, expected):
+    """1～20 日默认上月，21 日起默认本月。"""
     assert default_period_for(today) == expected
 
 
@@ -65,7 +66,7 @@ const context = { document: { querySelector() { return null; } }, window: { conf
 vm.createContext(context);
 vm.runInContext(source, context);
 const cases = [['2026-09-01','2026-08'],['2026-09-12','2026-08'],['2026-09-19','2026-08'],
-                ['2026-09-20','2026-08'],['2026-09-30','2026-08'],['2026-01-10','2025-12']];
+                ['2026-09-20','2026-08'],['2026-09-21','2026-09'],['2026-09-30','2026-09'],['2026-01-10','2025-12'],['2026-01-21','2026-01']];
 for (const [day, expected] of cases) {
   const actual = vm.runInContext(`defaultPayrollPeriod(new Date("${day}T09:00:00"))`, context);
   assert.strictEqual(actual, expected, `${day} -> ${actual}, expected ${expected}`);
@@ -127,6 +128,20 @@ def test_keeping_the_month_does_not_silently_switch(tmp_path):
     assert kept["period_check"]["mismatch"] is True, "仍然如实记录月份不一致"
 
 
+def test_conflicting_material_months_block_final_generation_without_guessing(tmp_path):
+    service = PayrollService(tmp_path / "app")
+    run = service.create("2026-09", "GENERATE")
+    stored = service.store.get(run["id"])
+    stored["material_period_evidence"] = [
+        {"role": "schedule", "source_file": "排课-8月.xlsx", "source_month": "2026-08"},
+        {"role": "math", "source_file": "提交-9月.xlsx", "source_month": "2026-09"},
+    ]
+    service._refresh_material_period_check(stored)
+    assert stored["period_check"]["conflict"] is True
+    assert stored["period_check"]["decision"] == "PENDING"
+    assert stored["period_check"]["final_generation_blocked"] is True
+
+
 # ----------------------------------------------------------------------- TEST 6
 def test_partial_month_coverage_is_a_warning_not_a_blocker(tmp_path):
     """8/1–8/30 覆盖不完整 → warning，不是默认 blocker。"""
@@ -140,6 +155,7 @@ def test_partial_month_coverage_is_a_warning_not_a_blocker(tmp_path):
     assert coverage["first_date"] == "2026-08-01" and coverage["last_date"] == "2026-08-30"
     assert coverage["incomplete_tail"] is True
     assert coverage["outside_period"] is False
+    assert imported["period_check"]["final_generation_blocked"] is True
     assert imported["status"] == "FILES_READY", "只是提醒，不能阻止继续核算"
 
 
@@ -201,6 +217,16 @@ def test_generated_payroll_export_is_collision_safe(tmp_path):
     assert Path(second["path"]).name == "工资表 (2).xlsx"
     assert Path(first["path"]).exists() and Path(second["path"]).exists()
     assert first["path"] != second["path"]
+
+
+def test_production_export_requires_the_company_template(tmp_path):
+    service = PayrollService(tmp_path / "app")
+    run = service.create("2026-08", "GENERATE")
+    path = _schedule(tmp_path / "排课.xlsx", [_lesson("张三", "2026-08-31")])
+    service.import_file(run["id"], "schedule", str(path))
+
+    with pytest.raises(ValueError, match="未找到公司工资模板"):
+        service.generate_payroll(run["id"], "", production=True)
 
 
 def test_default_export_location_is_reachable(tmp_path):

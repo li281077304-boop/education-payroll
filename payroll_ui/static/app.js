@@ -147,7 +147,7 @@ async function home() {
     current = null;
     const today = new Date();
     const defaultPeriod = defaultPayrollPeriod(today);
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">默认使用上一个月；如有需要可以改选工资月份。核算周期默认使用该月份自然月。</p></div><div class="create-box"><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用工资月份自然月。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">1～20 日默认上个月，21 日起默认本月。导入材料后系统还会按文件里的真实日期复核月份。</p></div><div class="create-box"><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用工资月份自然月。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -424,6 +424,7 @@ async function createRun() {
 }
 
 function defaultPayrollPeriod(now = new Date()) {
+  if (now.getDate() >= 21) return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   const month = now.getMonth();
   const year = month === 0 ? now.getFullYear() - 1 : now.getFullYear();
   return `${year}-${String(month === 0 ? 12 : month).padStart(2, "0")}`;
@@ -504,7 +505,12 @@ function baseSalaryPage() {
     return `<tr class="base-salary-row" data-teacher="${escapeHtml(row.teacher)}"><td><strong>${escapeHtml(row.teacher)}</strong><input class="base-teacher-id" type="hidden" value="${escapeHtml(entry.teacher_id || row.teacher)}"></td>${fields.map(([code, label]) => `<td><label class="small">${label}<input class="base-${code.toLowerCase()}" type="number" step="0.01" value="${escapeHtml(values[code]?.value ?? "")}" placeholder="${code}"></label></td>`).join("")}<td><strong class="base-m-value">${escapeHtml(entry.m?.value ?? "待填写")}</strong><div class="small muted">M=(G+H+I+J)/K×L，只读计算</div></td><td><span class="status ${mState === "DETERMINED" ? "ok" : "warn"}">${stateLabel}</span></td></tr>`;
   }).join("");
   const deferred = current.base_salary_deferred ? `<div class="banner info"><strong>基本工资暂未录入</strong><span>本次已按你的选择继续生成；M 保持“待补充”，补录 G～L 后可重新生成。</span></div>` : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">按教师确认 G～L；系统只读计算 M 实际基本工资，不接受直接填写 M。缺少资料不会自动填 0。</p></div></div>${deferred}<div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="本次 Run 基本工资确认"></label></div><div class="action-bar"><span class="muted small">${current.base_salary_deferred ? "后续补录后可重新生成。" : "缺少任何 G～L 会将 M 标记为待补充。"}</span><span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存基本工资并重新预览</button><button class="secondary" onclick="deferBaseSalary()" ${rows.length ? "" : "disabled"}>暂不录入基本工资，继续生成工资表</button></span></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">按教师确认 G～L；系统只读计算 M 实际基本工资，不接受直接填写 M。缺少资料不会自动填 0。</p></div></div>${deferred}<div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="本次 Run 基本工资确认"></label></div><div class="action-bar"><span class="muted small">${current.base_salary_deferred ? "后续补录后可重新生成。" : "缺少任何 G～L 会将 M 标记为待补充。"}</span><span><button class="secondary" onclick="focusBaseSalary()" ${rows.length ? "" : "disabled"}>现在录入基本工资</button><button class="secondary" onclick="showMessage('可以稍后回到这里补录，当前不会按 0 计算。', 'success')" ${rows.length ? "" : "disabled"}>稍后补充</button><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存基本工资并重新预览</button><button class="secondary" onclick="deferBaseSalary()" ${rows.length ? "" : "disabled"}>暂不录入，先生成工资表</button></span></div></section>`;
+}
+
+function focusBaseSalary() {
+  document.querySelector(".base-salary-table input")?.focus();
+  document.querySelector(".base-salary-table")?.scrollIntoView({behavior: "smooth", block: "center"});
 }
 
 async function saveBaseSalary() {
@@ -528,6 +534,17 @@ async function deferBaseSalary() {
     renderRun();
     showMessage("已记录暂不录入基本工资；现在可以继续生成工资表。", "success");
   } catch (error) { showMessage(error.message); }
+}
+
+async function deferBaseSalaryQuick() {
+  const person = window.prompt("请填写确认人：", "");
+  if (!person?.trim()) return;
+  const button = document.activeElement;
+  if (button?.tagName === "BUTTON") { button.disabled = true; button.textContent = "正在保存…"; }
+  try {
+    current = await api(`/api/runs/${current.id}/base-salary-defer`, { method: "POST", body: JSON.stringify({ confirmed_by: person.trim(), reason: "用户选择暂不录入基本工资；后续补录后可重新生成。" }) });
+    renderRun(); showMessage("已记录暂不录入基本工资；M 和总工资保持待补充。", "success");
+  } catch (error) { showMessage(error.message); if (button?.isConnected) button.disabled = false; }
 }
 
 async function avSourceMapPage(runId = current?.id || "") {
@@ -601,7 +618,7 @@ function materialsPage() {
   const generateAction = current.generated_payroll
     ? `<button onclick="setTab('payroll')">查看工资预览</button>`
     : `<button ${current.health.ready ? "" : "disabled"} onclick="preparePayrollPreview()">开始核算并查看预览</button>`;
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">把四类材料拖进对应卡片，或直接粘贴文件。系统会自动识别内容并保存到本机。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包</strong><span>可一次拖入多份材料，系统自动归类；也可以只补充某一类材料。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴主流程。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入原始排课数据；学科组提交表、续费表、退费表有则补充。材料可拖入、直接粘贴，选择按钮仅作为备用入口。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包（可选）</strong><span>可一次拖入多份材料，系统自动归类；也可以按下方四类分别补充。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
 }
 
 function productionMaterialCards() {
@@ -645,7 +662,14 @@ async function choosePackage() {
 
 function periodMismatchCard() {
   const check = current?.period_check;
-  if (!check || !check.mismatch || check.decision) return "";
+  if (!check) return "";
+  if (check.conflict) {
+    const details = (check.sources || []).map((item) => `${escapeHtml(item.source_file || item.role)}：${escapeHtml(item.source_month || "未知")}`).join("；");
+    const months = [...new Set((check.sources || []).map((item) => item.source_month).filter(Boolean))];
+    const choices = months.map((month) => `<button onclick="switchPeriodTo('${escapeHtml(month)}')">按 ${escapeHtml(month)} 继续</button>`).join("");
+    return `<section class="card warning-card"><h2>材料月份不一致</h2><p class="muted">系统检测到不同材料对应不同工资月份，不能自动替你选择。${details}</p><p class="small warn">请选择本次实际工资月份；系统不会替你猜测。</p><div class="action-bar">${choices}</div></section>`;
+  }
+  if (!check.mismatch || check.decision) return "";
   const source = check.source_month || "未知月份";
   return `<section class="card"><h2>课表月份需要确认</h2><p class="muted">检测到课表主要属于 ${escapeHtml(source)}，当前核算月份为 ${escapeHtml(check.run_month)}。</p><div class="action-bar"><button onclick="resolvePeriod('SWITCH')">切换到 ${escapeHtml(source)}</button><button class="secondary" onclick="resolvePeriod('KEEP')">仍按 ${escapeHtml(check.run_month)}</button></div></section>`;
 }
@@ -653,12 +677,21 @@ function periodMismatchCard() {
 function coverageWarningCard() {
   const coverage = current?.period_check?.coverage;
   if (!coverage || !coverage.incomplete_tail || current?.period_check?.decision === "PENDING") return "";
-  return `<section class="card"><h2>课表覆盖范围提醒</h2><p class="muted">本次课表覆盖 ${escapeHtml(coverage.first_date || "?")} 至 ${escapeHtml(coverage.last_date || "?")}，请确认是否已包含本月全部排课。此提醒不会阻止继续。</p></section>`;
+  const blocking = current?.period_check?.final_generation_blocked;
+  return `<section class="card ${blocking ? "warning-card" : ""}"><h2>课表覆盖范围${blocking ? "不完整" : "提醒"}</h2><p class="muted">本次课表覆盖 ${escapeHtml(coverage.first_date || "?")} 至 ${escapeHtml(coverage.last_date || "?")}，目标核算周期为 ${escapeHtml(coverage.period_start || current.period)} 至 ${escapeHtml(coverage.period_end || "?")}。</p><p class="small warn">${blocking ? "当前只能查看草稿和问题，不能把结果标记为完整最终工资表；请补齐材料或在高级周期设置中确认实际范围。" : "请确认是否已包含本月全部排课。"}</p></section>`;
 }
 
 async function resolvePeriod(decision) {
   try { current = await api(`/api/runs/${current.id}/period-check`, { method: "POST", body: JSON.stringify({ decision }) }); renderRun(); showMessage("已记录月份处理方式。", "success"); }
   catch (error) { showMessage(error.message); }
+}
+
+async function switchPeriodTo(period) {
+  try {
+    current = await api(`/api/runs/${current.id}/period`, { method: "POST", body: JSON.stringify({ period }) });
+    renderRun();
+    showMessage(`已切换到 ${period}，请继续检查材料月份和覆盖范围。`, "success");
+  } catch (error) { showMessage(error.message); }
 }
 
 function gradeSupportSection(help) {
@@ -741,13 +774,15 @@ function payrollPreviewPage() {
     return `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong><div class="small muted">${escapeHtml(row.status === "FINAL" ? "可导出" : blockers || "仍需确认")}</div><details class="preview-details"><summary>查看其它项目</summary><div class="preview-secondary">${secondary}<div><span>星级</span>${coreCalculationCell({ value: star, state: star === "—" ? "NEEDS_INPUT" : "DETERMINED" })}</div></div></details></td>${fields}</tr>`;
   }).join("");
   const status = generated.status || (current.summary?.core_calculation_complete ? "待导出" : "待确认");
+  const periodCheck = current.period_check || {};
+  const periodNeedsChoice = periodCheck.conflict || (periodCheck.mismatch && !["SWITCHED", "KEPT"].includes(periodCheck.decision));
   const path = generated.path ? `<p class="small muted">最近导出：${escapeHtml(generated.path)}</p>` : "";
   const exportNote = current.mode === "GENERATE"
     ? "导出会自动选择不冲突的新文件名，绝不覆盖已有工资表。状态为草稿时仍可导出，但文件会保留待确认标记。"
     : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
   const renewal = current.run_renewal_result_snapshot;
   const renewalNote = renewal ? `<div class="banner info"><strong>续费结果快照</strong><span>AH 续费一对一 · AI 续费班课 · AJ 领航续费 · AK = AH×1 + AI×1.5 + AJ×0.75；来源已冻结在本次 Run（${escapeHtml(Object.keys(renewal.entries || {}).length)} 位教师）。</span></div>` : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table payroll-preview-table"><thead><tr><th>教师与状态</th><th>M 基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>AV 总工资</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${path}<details class="preview-details"><summary>查看导出说明与规则详情</summary><div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><p class="small muted">核心字段按当前 Run 计算；来源、规则版本和未确认原因可在“问题中心”查看。</p></details><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table payroll-preview-table"><thead><tr><th>教师</th><th>M 基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>AV 总工资</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${path}<details class="preview-details"><summary>查看其它项目与依据</summary><div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><p class="small muted">来源、规则版本和未确认原因已收进详情，不在教师姓名下重复展开。</p></details><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button aria-label="导出工资表" ${current.mode === "GENERATE" && !periodNeedsChoice ? "" : "disabled"} onclick="exportPayroll()">${periodNeedsChoice ? "请先确认工资月份" : "生成工资表"}</button></div></section>`;
 }
 
 function overviewPage() {
@@ -784,7 +819,10 @@ function issuesPage() {
   const afPolicyBlock = current.mode === "GENERATE" && !current.af_policy_confirmation
     ? `<section class="action-first af-policy-confirmation"><h3>本月义务课时政策</h3><p class="muted">默认规则：适用教师全部按 30 小时扣除。没有特殊情况时只确认一次，不需要逐人填写。</p><label>确认人<input id="af-policy-confirmed-by" placeholder="填写姓名"></label><div class="action-bar"><button onclick="confirmAfPolicy()">确认默认：全部按30小时扣除</button><button class="secondary" onclick="document.querySelector('#af-policy-exceptions').open=true">有特殊情况 / 设置例外</button></div><details id="af-policy-exceptions"><summary>设置个别教师例外</summary><p class="small muted">只有特殊人员才勾选；未勾选的教师仍使用默认 30 小时。</p><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>设置例外</th><th>义务课时</th><th>是否扣除</th><th>原因/备注</th></tr></thead><tbody>${exceptionRows || '<tr><td colspan="5" class="muted">核算后才会显示教师名单。</td></tr>'}</tbody></table></div><button onclick="confirmAfPolicy()">保存默认规则和例外</button></details></section>`
     : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${actionSummary}${afPolicyBlock}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 条）</div>${auditDetails}<div id="issue-detail"></div></section>`;
+  const baseSalaryBlock = current.mode === "GENERATE" && !current.base_salary_input_snapshot && !current.base_salary_deferred
+    ? `<section class="action-first base-salary-action"><h3>基本工资还没有录入</h3><p class="muted">可以先完成排课核算；系统不会把缺失的基本工资当成 0，M 和总工资会明确标记“待补充”。</p><div class="action-bar"><button onclick="setTab('base-salary')">现在录入基本工资</button><button class="secondary" onclick="showMessage('可以稍后回到这里补录，当前不会按 0 计算。', 'success')">稍后补充</button><button class="secondary" onclick="deferBaseSalaryQuick()">暂不录入，先生成工资表</button></div></section>`
+    : "";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${baseSalaryBlock}${actionSummary}${afPolicyBlock}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 条）</div>${auditDetails}<div id="issue-detail"></div></section>`;
 }
 
 function issueRow(group) {
@@ -800,6 +838,9 @@ function updateFilters() {
 }
 
 async function confirmAfPolicy() {
+  const buttons = [...document.querySelectorAll(".af-policy-confirmation button")];
+  const original = buttons.map((button) => button.textContent);
+  buttons.forEach((button) => { button.disabled = true; button.textContent = "正在保存…"; });
   try {
     const person = $("#af-policy-confirmed-by")?.value?.trim();
     if (!person) throw new Error("请填写确认人。");
@@ -811,6 +852,7 @@ async function confirmAfPolicy() {
     current = await api(`/api/runs/${current.id}/af-policy`, { method: "POST", body: JSON.stringify({ default_obligation_hours: 30, exceptions, confirmed_by: person, reason: Object.keys(exceptions).length ? "普通教师按30小时扣除；已记录个别特殊情况。" : "本月没有义务课时特殊情况。" }) });
     renderRun(); showMessage("已确认本月普通全职教师按30小时扣除，特殊人员可另设例外。", "success");
   } catch (error) { showMessage(error.message); }
+  finally { buttons.forEach((button, index) => { if (button.isConnected) { button.disabled = false; button.textContent = original[index]; } }); }
 }
 
 async function evidence(id) {
@@ -1199,10 +1241,11 @@ async function classTypeRulesPage(runId = "") {
 async function exportPayroll() {
   const release = markBusy("正在生成文件…");
   let suggested = "";
-  try { suggested = (await api("/api/default-export-path?filename=标准工资表.xlsx")).path; } catch (_) { suggested = "标准工资表.xlsx"; }
-  const output = suggested || "标准工资表.xlsx";
+  const filename = `工资表-${current.period}.xlsx`;
+  try { suggested = (await api(`/api/default-export-path?filename=${encodeURIComponent(filename)}`)).path; } catch (_) { suggested = filename; }
+  const output = suggested || filename;
   try {
-    const result = await api(`/api/runs/${current.id}/generate`, { method: "POST", body: JSON.stringify({ output_path: output }) });
+    const result = await api(`/api/runs/${current.id}/generate`, { method: "POST", body: JSON.stringify({ output_path: output, production: true }) });
     const blockers = [...new Set(result.blockers || [])];
     showMessage(result.status === "FINAL" ? `已生成标准工资表，保存在：${result.path}` : `已生成草稿，仍有待确认项：${blockers.join("、")}`, result.status === "FINAL" ? "success" : "error");
     await openRun(current.id);
@@ -1216,6 +1259,13 @@ const generatePayroll = exportPayroll;
 // Local browser drag/drop uses the same inspected, read-only import path as the
 // native picker.  The uploaded copy is kept in the local run data directory.
 function bindMaterialDropZones() {
+  if (!window.__payrollDropGuard) {
+    window.__payrollDropGuard = true;
+    document.addEventListener("dragover", (event) => event.preventDefault());
+    document.addEventListener("drop", (event) => {
+      if (!event.target?.closest?.("[data-drop-role]")) event.preventDefault();
+    });
+  }
   document.querySelectorAll("[data-drop-role]").forEach((zone) => {
     zone.addEventListener("dragover", (event) => { event.preventDefault(); zone.style.borderColor = "#1f6feb"; });
     zone.addEventListener("dragleave", () => { zone.style.borderColor = ""; });

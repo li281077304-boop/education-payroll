@@ -307,7 +307,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.bind_management_assessment(run_id, str(payload.get("result_id", ""))))
                 if action == "generate":
                     try:
-                        return self._json(self.server.service.generate_payroll(run_id, str(payload.get("output_path", "")), confirmed_hours=payload.get("confirmed_hours")))
+                        return self._json(self.server.service.generate_payroll(run_id, str(payload.get("output_path", "")), confirmed_hours=payload.get("confirmed_hours"), production=True))
                     except (ValueError, OSError):
                         raise
                     except Exception as exc:

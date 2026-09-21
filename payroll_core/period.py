@@ -19,11 +19,15 @@ _ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 def default_period_for(today: date) -> str:
     """Return the default accounting month for a given day.
 
-    新建工资核算默认使用上一个自然月；跨年时 1 月回退到上一年 12 月。
-    用户仍可在页面上主动改选其他工资月份。
+    每月 1～20 日默认上一个自然月，21 日起默认当前月。
+    这只是打开页面时的建议值；文件内容识别和用户确认仍是最终依据。
     """
-    month = today.month - 1 or 12
-    year = today.year if today.month > 1 else today.year - 1
+    if today.day >= 21:
+        month = today.month
+        year = today.year
+    else:
+        month = today.month - 1 or 12
+        year = today.year if today.month > 1 else today.year - 1
     return f"{year:04d}-{month:02d}"
 
 

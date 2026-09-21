@@ -35,8 +35,9 @@ from payroll_core.excel.output_paths import default_output_dir, describe_locatio
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
+from payroll_core.adapters.payroll_sheet import read_payroll_csv
+from payroll_core.adapters.schedule import read_schedule_csv
 from payroll_core.excel.common import grade_from_class_name, load_student_grade_lookup
-from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.adapters import read_refund_report, read_renewal_report
 from payroll_core.grade_inference import (
     CourseExportSnapshot,
@@ -491,9 +492,19 @@ class PayrollService(CoreFlow):
             "grade_evidence": len(package.grade_evidence),
         }
 
+    @staticmethod
+    def _read_csv(role: str, path: Path, period: str):
+        """Read the normalized CSV shapes accepted by the material flow."""
+        try:
+            records = read_schedule_csv(path, period) if role == "schedule" else read_payroll_csv(path, period)
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"CSV 文件缺少必要列或数据格式不正确：{exc}") from exc
+        from payroll_core.models.evidence import AdapterResult
+        return AdapterResult(records=records)
+
     def _infer_subject_group_role(self, path: Path, run: dict) -> str:
         """Classify one submitted payroll workbook without exposing departments in UI."""
-        parsed = self._read_for_run("math", path, run)
+        parsed = self._read_for_run("math", path, run) if path.suffix.lower() != ".csv" else self._read_csv("math", path, run["period"])
         if parsed.errors or not parsed.records:
             raise ValueError("学科组提交表缺少可读取的教师和工资字段。")
         teachers = {str(item.teacher).strip() for item in parsed.records if getattr(item, "teacher", "").strip()}
@@ -525,21 +536,41 @@ class PayrollService(CoreFlow):
         if not source.is_file():
             raise ValueError("找不到这份材料，请重新拖入或粘贴文件。")
         if kind in {"package", "auto"}:
-            inspection = inspect_workbook(source)
-            layout = inspection.records[0].fingerprint.layout if inspection.records else ""
-            if layout == LAYOUTS["schedule"]:
-                kind = "schedule"
-            elif layout == LAYOUTS["math"]:
-                kind = "subject_group"
+            if source.suffix.lower() == ".csv":
+                try:
+                    kind = "schedule" if self._read_csv("schedule", source, run["period"]).records else ""
+                except ValueError:
+                    kind = ""
+                if not kind:
+                    try:
+                        kind = "subject_group" if self._read_csv("math", source, run["period"]).records else ""
+                    except ValueError:
+                        kind = ""
+                if not kind:
+                    renewal = read_renewal_report(source, run["period"])
+                    refund = read_refund_report(source, run["period"])
+                    if renewal.records and not refund:
+                        kind = "renewal"
+                    elif refund and not renewal.records:
+                        kind = "refund"
+                    else:
+                        raise ValueError("无法自动识别这份 CSV。请确认包含排课、学科组提交、续费或退费字段。")
             else:
-                renewal = read_renewal_report(source, run["period"])
-                refund = read_refund_report(source, run["period"])
-                if renewal.records and not refund:
-                    kind = "renewal"
-                elif refund and not renewal.records:
-                    kind = "refund"
+                inspection = inspect_workbook(source)
+                layout = inspection.records[0].fingerprint.layout if inspection.records else ""
+                if layout == LAYOUTS["schedule"]:
+                    kind = "schedule"
+                elif layout == LAYOUTS["math"]:
+                    kind = "subject_group"
                 else:
-                    raise ValueError("无法自动识别这份材料。请拖入排课、学科组提交、续费或退费表。")
+                    renewal = read_renewal_report(source, run["period"])
+                    refund = read_refund_report(source, run["period"])
+                    if renewal.records and not refund:
+                        kind = "renewal"
+                    elif refund and not renewal.records:
+                        kind = "refund"
+                    else:
+                        raise ValueError("无法自动识别这份材料。请拖入排课、学科组提交、续费或退费表。")
         if kind == "subject_group":
             role = self._infer_subject_group_role(source, run)
             rendered = self.import_file(run_id, role, str(source))
@@ -1343,17 +1374,22 @@ class PayrollService(CoreFlow):
         target = default_output_dir(filename)
         return {"path": str(target), "location": describe_location(target), "exists": target.exists()}
 
-    def generate_payroll(self, run_id: str, output_path: str, *, confirmed_hours: dict | None = None) -> dict:
+    def generate_payroll(self, run_id: str, output_path: str, *, confirmed_hours: dict | None = None, production: bool = False) -> dict:
         """生成模式：同一套 Core 结果直接渲染成标准工资表。"""
         run = self._load(run_id)
+        if not str(output_path or "").strip():
+            output_path = str(default_output_dir(f"工资表-{run['period']}.xlsx"))
         if self._bind_template_from_run_files(run):
             self.store.save(run)
+        if production and not run.get("template_path"):
+            raise ValueError("未找到公司工资模板，请补充资料包或学科组提交表中的工资模板后再生成正式工资表。")
         business_inputs = self._approved_business_inputs(run)
         if run.get("calculation_engine") == "CONFIGURED_V1":
             if confirmed_hours:
                 raise ValueError("AD 已由 AA + AC 独立计算，不接受手工或工资表 AD 覆盖。")
             checked = self.check(run_id)
             payroll = self._generated_from_checked(checked)
+            payroll = self._apply_generation_guardrails(payroll, self.store.get(run_id))
             path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"), manual_adjustments=business_inputs)
             run = self.store.get(run_id)
             run["generated_payroll"] = {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(), "rows": [asdict(row) for row in payroll.rows]}
@@ -1381,6 +1417,7 @@ class PayrollService(CoreFlow):
             base_salary_inputs=run.get("base_salary_inputs") if run.get("base_salary_input_snapshot") else None,
             renewal_snapshot=run.get("run_renewal_result_snapshot"),
         )
+        payroll = self._apply_generation_guardrails(payroll, run)
         path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"), manual_adjustments=business_inputs)
         run["generated_payroll"] = {
             "path": path, "status": payroll.status, "blockers": list(payroll.blockers),
@@ -1596,7 +1633,29 @@ class PayrollService(CoreFlow):
         if not checked.get("core_calculation"):
             return checked
         payroll = self._generated_from_checked(checked)
+        payroll = self._apply_generation_guardrails(payroll, checked)
         return {**checked, "generated_payroll": {"status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "rows": [asdict(row) for row in payroll.rows]}}
+
+    @staticmethod
+    def _apply_generation_guardrails(payroll, run: dict):
+        """Prevent an incomplete/mismatched period from being advertised final.
+
+        Core values remain available for review.  The guard only changes the
+        generated artifact status and blocker list; it never changes AA/AC or
+        any payroll formula.
+        """
+        check = run.get("period_check") or {}
+        blockers = set(payroll.blockers)
+        coverage = check.get("coverage") or {}
+        if coverage.get("incomplete_tail"):
+            blockers.add("PERIOD_COVERAGE_INCOMPLETE")
+        if check.get("conflict"):
+            blockers.add("PERIOD_MATERIAL_CONFLICT")
+        if check.get("mismatch") and check.get("decision") not in {"SWITCHED", "KEPT"}:
+            blockers.add("PERIOD_NEEDS_CONFIRMATION")
+        if not blockers:
+            return payroll
+        return replace(payroll, status="NEEDS_CONFIRMATION", blockers=tuple(sorted(blockers)))
 
     def _generated_from_checked(self, checked: dict):
         """Build the one canonical final-field result used by preview/export."""
@@ -1740,18 +1799,23 @@ class PayrollService(CoreFlow):
         run = self._load(run_id)
         if any(key != role and item["sha256"] == before["sha256"] for key, item in run["files"].items()):
             raise ValueError("同一份文件不能同时充当两个材料类别。")
-        inspection = inspect_workbook(source)
-        mapping_capable = self.import_requirement(role) is not None
-        # An unrecognized layout is no longer a dead end for mapping-capable
-        # roles: the semantic engine takes over instead of refusing the file.
-        blocking = [issue for issue in inspection.errors if not (mapping_capable and issue.code == "UNSUPPORTED_LAYOUT")]
-        if blocking or not inspection.records:
-            raise ValueError(self._inspection_error(blocking))
-        workbook = inspection.records[0]
-        if workbook.fingerprint.layout != LAYOUTS[role] and not mapping_capable:
-            raise ValueError(f"文件不属于“{LABELS[role]}”，请检查后重新选择。")
+        is_csv = source.suffix.lower() == ".csv"
+        workbook = None
+        if not is_csv:
+            inspection = inspect_workbook(source)
+            mapping_capable = self.import_requirement(role) is not None
+            # An unrecognized layout is no longer a dead end for mapping-capable
+            # roles: the semantic engine takes over instead of refusing the file.
+            blocking = [issue for issue in inspection.errors if not (mapping_capable and issue.code == "UNSUPPORTED_LAYOUT")]
+            if blocking or not inspection.records:
+                raise ValueError(self._inspection_error(blocking))
+            workbook = inspection.records[0]
+            if workbook.fingerprint.layout != LAYOUTS[role] and not mapping_capable:
+                raise ValueError(f"文件不属于“{LABELS[role]}”，请检查后重新选择。")
         try:
-            if role == "schedule" and mapping_capable:
+            if is_csv:
+                result = self._read_csv(role, source, run["period"])
+            elif role == "schedule" and mapping_capable:
                 profiles = self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name)
                 result, analysis = resolve_schedule_import(
                     source, run["period"], profiles=profiles, confirmed=mapping,
@@ -1783,9 +1847,10 @@ class PayrollService(CoreFlow):
             # Remember the confirmed layout so next month's identical file imports
             # without asking again. Drift is still re-checked on every import.
             self.save_import_profile(str(source), role, dict(mapping.get("mapping", {})), profile_actor, profile_name)
-        run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets), "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets), "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets)}
+        run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets] if workbook is not None else ["CSV"], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets) if workbook is not None else 0, "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets) if workbook is not None else 0, "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets) if workbook is not None else 0}
         if role == "schedule":
             run["period_check"] = self._period_evidence(run, result.records, source.name, source)
+            run.setdefault("material_period_evidence", []).append({"role": role, "source_file": source.name, "source_month": run["period_check"].get("source_month"), "basis": "课表实际课程日期"})
             # Grade resolutions are bound to coordinates in the imported
             # schedule workbook. Replacing that source invalidates them.
             run.pop("schedule_grade_resolutions", None)
@@ -1794,6 +1859,11 @@ class PayrollService(CoreFlow):
                     item["status"] = "NEEDS_RECONFIRMATION"
                     item["invalidated_at"] = datetime.now(timezone.utc).isoformat()
                     run.setdefault("resolution_history", []).append({**item, "history_event": "SOURCE_CHANGED"})
+        else:
+            hint = self._file_period_hint(run, source, workbook)
+            if hint:
+                run.setdefault("material_period_evidence", []).append({"role": role, "source_file": source.name, "source_month": hint, "basis": "材料文件名或工作表月份"})
+        self._refresh_material_period_check(run)
         # Legacy per-field decisions predate business review cards.  They are
         # cleared for backward compatibility; durable business decisions are
         # retained but explicitly require a fresh confirmation.
@@ -1829,9 +1899,55 @@ class PayrollService(CoreFlow):
         return {"run_month": run["period"], "period_start": start, "period_end": end,
                 "period_boundary_source": run.get("period_boundary_source", "LEGACY_CALENDAR_DEFAULT"),
                 "source_month": source_month, "mismatch": mismatch,
+                "source_file": file_name,
                 "file_name_month": file_month, "file_name_has_year": file_has_year,
                 "filename_disagrees": filename_disagrees, "coverage": coverage.as_dict(),
+                "final_generation_blocked": bool(coverage.incomplete_tail),
                 "decision": "" if not mismatch else "PENDING"}
+
+    @staticmethod
+    def _file_period_hint(run: dict, source: Path, workbook=None) -> str | None:
+        """Use a workbook title/file name only as secondary month evidence."""
+        hinted, has_year = month_from_filename(source.name)
+        if hinted:
+            return hinted if has_year else f"{run['period'][:4]}-{int(hinted):02d}"
+        for sheet in getattr(workbook, "sheets", ()) or ():
+            match = re.search(r"(?:20(\d{2})[年-])?(0?[1-9]|1[0-2])月", str(sheet.name))
+            if match:
+                year = match.group(1) or run["period"][:4]
+                return f"20{year}-{int(match.group(2)):02d}"
+        return None
+
+    def _refresh_material_period_check(self, run: dict) -> None:
+        sources = [item for item in run.get("material_period_evidence", []) if item.get("source_month")]
+        months = sorted({item["source_month"] for item in sources})
+        if len(months) > 1:
+            current = run.get("period_check") or {}
+            run["period_check"] = {
+                "run_month": run["period"], "source_month": None, "mismatch": False,
+                "conflict": True, "decision": "PENDING", "sources": sources,
+                "coverage": current.get("coverage", {}),
+                "final_generation_blocked": True,
+                "message": "不同材料判断出的工资月份不一致，不能自动选择。",
+            }
+            return
+        if not sources:
+            return
+        source_month = months[0]
+        current = run.get("period_check") or {}
+        if current.get("source_file") and current.get("coverage"):
+            # Preserve the schedule's precise coverage and only add the
+            # cross-material evidence to the existing check.
+            current["sources"] = sources
+            current["conflict"] = False
+            run["period_check"] = current
+            return
+        run["period_check"] = {
+            "run_month": run["period"], "source_month": source_month,
+            "mismatch": source_month != run["period"], "conflict": False,
+            "decision": "PENDING" if source_month != run["period"] else "",
+            "sources": sources, "final_generation_blocked": False,
+        }
 
     def change_period(self, run_id: str, period: str) -> dict:
         if not valid_period(period):
@@ -1855,8 +1971,9 @@ class PayrollService(CoreFlow):
             item["teachers"] = len({record.teacher for record in result.records if hasattr(record, "teacher")})
             if role == "schedule":
                 run["period_check"] = self._period_evidence(run, result.records, path.name, path)
+        self._refresh_material_period_check(run)
         check = run.get("period_check") or {}
-        if check:
+        if check and not check.get("conflict"):
             check["decision"] = "SWITCHED"
             run["period_check"] = check
         run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
