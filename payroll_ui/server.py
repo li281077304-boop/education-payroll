@@ -6,6 +6,9 @@ judgement remain in the Python core on this computer.
 from __future__ import annotations
 
 import json
+import base64
+import binascii
+import hashlib
 import mimetypes
 import secrets
 import subprocess
@@ -229,6 +232,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json({"path": self._pick_excel()})
             if path == "/api/pick-directory":
                 return self._json({"path": self._pick_directory()})
+            if path == "/api/upload":
+                return self._json(self._save_uploaded_file(payload))
             if path == "/api/inspect":
                 return self._json(self._inspect_path(str(payload.get("path", ""))))
             bits = path.strip("/").split("/")
@@ -326,6 +331,27 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
         except (OSError, subprocess.CalledProcessError):
             return None
+
+    def _save_uploaded_file(self, payload: dict) -> dict:
+        """Persist a browser-selected local copy for the normal read-only import path."""
+        name = Path(str(payload.get("name", ""))).name
+        encoded = str(payload.get("content_base64", ""))
+        if not name or Path(name).suffix.lower() not in {".xls", ".xlsx", ".xlsm", ".csv"}:
+            raise ValueError("只支持 Excel 或 CSV 文件。")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("文件内容无法读取，请重新选择。") from exc
+        if not content:
+            raise ValueError("选择的文件为空。")
+        if len(content) > 100 * 1024 * 1024:
+            raise ValueError("文件太大，请选择 100MB 以内的文件。")
+        upload_dir = self.server.service.root / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        token = secrets.token_hex(12)
+        path = upload_dir / f"{token}{Path(name).suffix.lower()}"
+        path.write_bytes(content)
+        return {"path": str(path), "name": name, "sha256": hashlib.sha256(content).hexdigest()}
 
     @staticmethod
     def _inspect_path(raw: str) -> dict:

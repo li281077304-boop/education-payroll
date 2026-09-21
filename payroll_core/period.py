@@ -1,7 +1,7 @@
 """Payroll period rules: default month, evidence-based month, coverage.
 
 The clock is always passed in, never read from the machine, so tests are
-deterministic and the 20th-of-month rule can be verified for any date.
+deterministic and the default-previous-month rule can be verified for any date.
 """
 from __future__ import annotations
 
@@ -12,9 +12,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Iterable
 
-#: 每月 20 日及以后默认核算当前月；20 日之前默认核算上一个自然月。
-DEFAULT_MONTH_CUTOFF_DAY = 20
-
 _PERIOD = re.compile(r"^(\d{4})-(\d{2})$")
 _ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
@@ -22,10 +19,9 @@ _ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 def default_period_for(today: date) -> str:
     """Return the default accounting month for a given day.
 
-    1–19 日 → 上一个自然月；20 日起 → 当前月。跨年时 1 月回退到上一年 12 月。
+    新建工资核算默认使用上一个自然月；跨年时 1 月回退到上一年 12 月。
+    用户仍可在页面上主动改选其他工资月份。
     """
-    if today.day >= DEFAULT_MONTH_CUTOFF_DAY:
-        return f"{today.year:04d}-{today.month:02d}"
     month = today.month - 1 or 12
     year = today.year if today.month > 1 else today.year - 1
     return f"{year:04d}-{month:02d}"

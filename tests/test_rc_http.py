@@ -1,4 +1,5 @@
 """Exercise the actual local HTTP decision loop with artificial workbooks."""
+import base64
 import json
 from pathlib import Path
 from threading import Thread
@@ -47,3 +48,35 @@ def test_business_decision_http_save_rerun_and_reopen(tmp_path):
     reopened = PayrollService(tmp_path / "app-data").get(run["id"])
     matched = next(g for g in reopened["issue_groups"] if g["root_cause_key"] == group["root_cause_key"])
     assert matched["decision"]["reason"].startswith("人工构造样本")
+
+
+def test_local_drag_drop_upload_stays_in_run_data_and_returns_hash(tmp_path):
+    static = Path(__file__).parents[1] / "payroll_ui" / "static"
+    service = PayrollService(tmp_path / "app-data")
+    server = PayrollHttpServer(("127.0.0.1", 0), service, static)
+    worker = Thread(target=server.serve_forever, daemon=True); worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+        content = b"teacher,grade\nDemo Teacher,Grade 8\n"
+        request = Request(
+            base + "/api/upload",
+            data=json.dumps({"name": "脱敏课表.csv", "content_base64": base64.b64encode(content).decode()}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", "X-Payroll-Token": token},
+        )
+        uploaded = json.loads(urlopen(request).read())
+        path = Path(uploaded["path"])
+        assert path.parent == service.root / "uploads"
+        assert path.read_bytes() == content
+        assert uploaded["sha256"]
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
+
+
+def test_material_ui_exposes_drag_drop_and_post_file_picker():
+    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "data-drop-role" in source
+    assert 'api("/api/upload"' in source
+    assert 'zone.addEventListener("paste"' in source
+    assert 'api("/api/pick", { method: "POST", body: "{}" })' in source

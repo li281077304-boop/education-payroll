@@ -144,7 +144,7 @@ async function home() {
     current = null;
     const today = new Date();
     const defaultPeriod = defaultPayrollPeriod(today);
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">工资月份用于规则与模板；核算周期用于排课和生产数据。两者可以不同。</p></div><div class="create-box"><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">不填写时使用该月份自然月，并标记为 LEGACY_CALENDAR_DEFAULT。</p><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">默认使用上一个月；如有需要可以改选工资月份。核算周期默认使用该月份自然月。</p></div><div class="create-box"><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用工资月份自然月。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">我要核对一份工资表（老师/组长已经做好了）</option><option value="GENERATE">直接帮我生成工资表（没有现成工资表）</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建并导入材料</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -421,7 +421,6 @@ async function createRun() {
 }
 
 function defaultPayrollPeriod(now = new Date()) {
-  if (now.getDate() >= 20) return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   const month = now.getMonth();
   const year = month === 0 ? now.getFullYear() - 1 : now.getFullYear();
   return `${year}-${String(month === 0 ? 12 : month).padStart(2, "0")}`;
@@ -478,6 +477,7 @@ function setTab(next) { tab = next; renderRun(); }
 function renderTab() {
   const view = $("#view");
   if (tab === "materials") view.innerHTML = materialsPage();
+  if (tab === "materials") bindMaterialDropZones();
   if (tab === "base-salary") view.innerHTML = baseSalaryPage();
   if (tab === "overview") view.innerHTML = overviewPage();
   if (tab === "issues") view.innerHTML = issuesPage();
@@ -590,6 +590,8 @@ function materialsPage() {
 }
 
 async function choosePackage() {
+  const button = document.querySelector("[data-action='choose-package']");
+  if (button) { button.disabled = true; button.textContent = "正在读取…"; }
   try {
     const picked = await api("/api/pick-directory", { method: "POST", body: "{}" });
     if (!picked.path) return;
@@ -598,6 +600,7 @@ async function choosePackage() {
     renderRun();
     showMessage("资料包已自动识别并绑定到本次核算。", "success");
   } catch (error) { showMessage(error.message); }
+  finally { if (button) { button.disabled = false; button.textContent = "选择资料包文件夹"; } }
 }
 
 function periodMismatchCard() {
@@ -1062,13 +1065,16 @@ async function payrollSheetsPage() {
   try {
     const batches = await api("/api/payroll-submissions");
     const rows = batches.map((batch) => `<tr><td>${escapeHtml(batch.period)}</td><td>${escapeHtml(batch.status)}</td><td>${(batch.files || []).length}</td><td>${escapeHtml(batch.output_workbook || "—")}</td><td><button class="quiet" onclick="previewBatch('${batch.id}')">看合并预览</button></td></tr>`).join("");
-    shell(`<section class="section-head"><div><p class="eyebrow">教师个人工资表</p><h1>多表合并成标准工资表</h1><p class="muted">单个老师的表、多个老师的表、已汇总的总表，都先转成标准内部数据，再生成统一工资表。系统不复制粘贴单元格。</p></div><button class="secondary" onclick="home()">返回工作台</button></section><section class="card"><h2>待上传</h2><p class="muted small">可反复点击添加；格式有歧义时系统会停下来让你确认，确认过的格式下次自动复用。</p><div class="action-bar"><button class="secondary" onclick="addSheetPath()">添加工资表</button><span class="muted small">已添加 ${sheetPaths.length} 份</span><button ${sheetPaths.length ? "" : "disabled"} onclick="importSheets()">导入并合并</button></div></section><section class="card"><h2>批次</h2><div class="table-wrap"><table class="table"><thead><tr><th>月份</th><th>状态</th><th>文件数</th><th>标准工资表</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">暂无批次。</td></tr>'}</tbody></table></div></section>`, true);
+    shell(`<section class="section-head"><div><p class="eyebrow">教师个人工资表</p><h1>多表合并成标准工资表</h1><p class="muted">单个老师的表、多个老师的表、已汇总的总表，都先转成标准内部数据，再生成统一工资表。系统不复制粘贴单元格。</p></div><button class="secondary" onclick="home()">返回工作台</button></section><section class="card"><h2>待上传</h2><p class="muted small">可反复点击添加；格式有歧义时系统会停下来让你确认，确认过的格式下次自动复用。</p><div class="action-bar"><button id="add-payroll-sheet" class="secondary" onclick="addSheetPath()">添加工资表</button><span class="muted small">已添加 ${sheetPaths.length} 份</span><button ${sheetPaths.length ? "" : "disabled"} onclick="importSheets()">导入并合并</button></div></section><section class="card"><h2>批次</h2><div class="table-wrap"><table class="table"><thead><tr><th>月份</th><th>状态</th><th>文件数</th><th>标准工资表</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">暂无批次。</td></tr>'}</tbody></table></div></section>`, true);
   } catch (error) { showMessage(error.message); }
 }
 
 async function addSheetPath() {
-  try { const picked = await api("/api/pick"); if (picked.path) { sheetPaths.push(picked.path); await payrollSheetsPage(); } }
+  const button = $("#add-payroll-sheet");
+  if (button) { button.disabled = true; button.textContent = "正在选择…"; }
+  try { const picked = await api("/api/pick", { method: "POST", body: "{}" }); if (picked.path) { sheetPaths.push(picked.path); await payrollSheetsPage(); } }
   catch (error) { showMessage(error.message); }
+  finally { if (button) { button.disabled = false; button.textContent = "添加工资表"; } }
 }
 
 async function importSheets() {
@@ -1164,3 +1170,68 @@ async function exportPayroll() {
 
 // Backward-compatible name for callers from older local pages.
 const generatePayroll = exportPayroll;
+
+// Local browser drag/drop uses the same inspected, read-only import path as the
+// native picker.  The uploaded copy is kept in the local run data directory.
+function bindMaterialDropZones() {
+  document.querySelectorAll("[data-drop-role]").forEach((zone) => {
+    zone.addEventListener("dragover", (event) => { event.preventDefault(); zone.style.borderColor = "#1f6feb"; });
+    zone.addEventListener("dragleave", () => { zone.style.borderColor = ""; });
+    zone.addEventListener("drop", async (event) => {
+      event.preventDefault(); zone.style.borderColor = "";
+      const file = event.dataTransfer?.files?.[0];
+      if (file) await uploadMaterialFile(zone.dataset.dropRole, file);
+    });
+    zone.addEventListener("paste", async (event) => {
+      const file = event.clipboardData?.files?.[0];
+      if (file) { event.preventDefault(); await uploadMaterialFile(zone.dataset.dropRole, file); }
+    });
+    zone.addEventListener("click", () => choose(zone.dataset.dropRole));
+  });
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunk) binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+  return btoa(binary);
+}
+
+async function uploadMaterialFile(role, file) {
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const uploaded = await api("/api/upload", { method: "POST", body: JSON.stringify({ name: file.name, content_base64: bytesToBase64(bytes) }) });
+    await importMaterialPath(role, uploaded.path);
+  } catch (error) { showMessage(error.message); }
+}
+
+// Keep the existing material card markup and add a small, accessible drop target.
+function materialCard(material) {
+  const copy = roleCopy[material.role];
+  const file = material.file;
+  const stateClass = material.state === "失效" ? "bad" : file ? "ok" : material.required ? "warn" : "muted";
+  const stateText = material.state === "失效" ? "● 已变化，需重新选择" : file ? "✓ 已识别" : material.required ? "○ 必需材料" : "可稍后补充";
+  const risk = file ? [file.missing_cache ? `${file.missing_cache} 个公式结果不可读取` : "", file.external_references ? `${file.external_references} 处依赖其他文件` : ""].filter(Boolean) : [];
+  return `<article class="material-card ${material.state === "失效" ? "stale" : ""}"><div class="material-top"><strong>${escapeHtml(copy[0])}</strong><span class="${stateClass}">${stateText}</span></div><p class="small muted">${escapeHtml(copy[2])}</p><div data-drop-role="${escapeHtml(material.role)}" tabindex="0" role="button" aria-label="拖入${escapeHtml(copy[0])}文件" style="border:1px dashed #b9c4cf;border-radius:7px;padding:12px;text-align:center;color:#68717d;font-size:13px">拖入 Excel 文件，或点击这里选择</div>${file ? `<div class="file-name">${escapeHtml(file.name)}</div><div class="facts"><span>${file.records} 条记录</span><span>${file.teachers} 名教师</span></div>${risk.length ? `<p class="small warn">⚠ ${risk.join("；")}</p>` : ""}<details><summary>查看文件信息</summary><p class="small muted">工作表：${file.sheets.map(escapeHtml).join("、")}<br>文件标识：${file.sha256.slice(0, 10)}</p></details>` : '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" onclick="choose('${material.role}')">${escapeHtml(copy[1])}</button></article>`;
+}
+
+async function importMaterialPath(role, path) {
+  const inspected = await api("/api/inspect", { method: "POST", body: JSON.stringify({ path }) });
+  if (role === "schedule") {
+    let preview = null;
+    try { preview = await api(`/api/import-mapping?path=${encodeURIComponent(path)}&role=schedule&period=${encodeURIComponent(current.period)}`); } catch (_) { preview = null; }
+    if (preview && preview.status !== "KNOWN_LAYOUT" && preview.status !== "MAPPED") return mappingPage(path, role, preview);
+    if (preview && preview.status === "MAPPED" && preview.profile_id) showMessage("已按之前确认过的格式识别字段。", "success");
+  }
+  if (!inspected.recognized && role !== "schedule") throw new Error(`无法识别这张表。检测到的工作表：${inspected.sheets.join("、") || "无"}。${inspected.missing.join("；")}`);
+  current = await api(`/api/runs/${current.id}/files`, { method: "POST", body: JSON.stringify({ role, path }) });
+  showMessage(`已将文件识别为“${roleCopy[role][0]}”。`, "success");
+  renderRun();
+}
+
+async function choose(role) {
+  try {
+    const picked = await api("/api/pick", { method: "POST", body: "{}" });
+    if (picked.path) await importMaterialPath(role, picked.path);
+  } catch (error) { showMessage(error.message); }
+}

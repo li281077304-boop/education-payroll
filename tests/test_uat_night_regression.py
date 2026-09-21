@@ -42,13 +42,13 @@ def _lesson(teacher: str, day: str, class_type: str = "1对1", attended: int = 2
     (date(2026, 9, 1), "2026-08"),
     (date(2026, 9, 12), "2026-08"),
     (date(2026, 9, 19), "2026-08"),
-    (date(2026, 9, 20), "2026-09"),
-    (date(2026, 9, 30), "2026-09"),
+    (date(2026, 9, 20), "2026-08"),
+    (date(2026, 9, 30), "2026-08"),
     (date(2026, 1, 10), "2025-12"),
-    (date(2026, 1, 20), "2026-01"),
+    (date(2026, 1, 20), "2025-12"),
 ])
-def test_default_period_follows_the_twentieth(today, expected):
-    """20 日之前默认核算上一个自然月，20 日起默认核算当前月。"""
+def test_default_period_is_always_previous_month(today, expected):
+    """新建工资核算默认使用上一个自然月。"""
     assert default_period_for(today) == expected
 
 
@@ -65,7 +65,7 @@ const context = { document: { querySelector() { return null; } }, window: { conf
 vm.createContext(context);
 vm.runInContext(source, context);
 const cases = [['2026-09-01','2026-08'],['2026-09-12','2026-08'],['2026-09-19','2026-08'],
-                ['2026-09-20','2026-09'],['2026-09-30','2026-09'],['2026-01-10','2025-12']];
+                ['2026-09-20','2026-08'],['2026-09-30','2026-08'],['2026-01-10','2025-12']];
 for (const [day, expected] of cases) {
   const actual = vm.runInContext(`defaultPayrollPeriod(new Date("${day}T09:00:00"))`, context);
   assert.strictEqual(actual, expected, `${day} -> ${actual}, expected ${expected}`);
