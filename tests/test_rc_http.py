@@ -80,3 +80,6 @@ def test_material_ui_exposes_drag_drop_and_post_file_picker():
     assert 'api("/api/upload"' in source
     assert 'zone.addEventListener("paste"' in source
     assert 'api("/api/pick", { method: "POST", body: "{}" })' in source
+    assert "学科组提交表" in source
+    assert "续费表" in source
+    assert "退费表" in source

@@ -586,7 +586,26 @@ function materialsPage() {
   const generateAction = current.generated_payroll
     ? `<button onclick="setTab('payroll')">查看工资预览</button>`
     : `<button ${current.health.ready ? "" : "disabled"} onclick="preparePayrollPreview()">自动核算并查看预览</button>`;
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">可以逐项选择文件，也可以一次选择资料包文件夹，系统会自动绑定年级、星级、人员和经营数据。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="action-bar"><button onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">优先使用资料包导入；也可继续逐项选择文件。</span></div><div class="material-grid">${current.materials.map(materialCard).join("")}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">按业务类别准备资料。可以逐项选择，也可以选择资料包文件夹，让系统自动识别并绑定。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="action-bar"><button onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">资料包中的排课、学科组提交、续费和退费结果会自动分开识别。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
+}
+
+function productionMaterialCards() {
+  const byRole = Object.fromEntries((current.materials || []).map((item) => [item.role, item]));
+  const schedule = byRole.schedule;
+  const subjectRows = [byRole.math, byRole.science].filter(Boolean).map((item) => materialCard(item)).join("");
+  return [
+    schedule ? materialCard(schedule) : "",
+    `<article class="material-card material-group-card"><div class="material-top"><strong>学科组提交表</strong><span class="muted">可提供数学、理化或其他已识别的学科组表</span></div><p class="small muted">用于确定本次需要核验的教师和工资表目标。内部会按学科分别读取，但普通使用只需要准备这一类材料。</p><div class="material-grid compact-grid">${subjectRows || '<div class="empty compact">尚未选择学科组提交表</div>'}</div></article>`,
+    businessMaterialCard("renewal", "续费表", current.renewal_reports || [], "续费最终结果由上游确认；导入后只读取、留档并绑定本次核算，不重新判断续费原因。"),
+    businessMaterialCard("refund", "退费表", current.refund_reports || [], "退费最终结果由上游确认；导入后只读取、留档，并可生成待预览的工资批注。"),
+  ].join("");
+}
+
+function businessMaterialCard(kind, title, records, description) {
+  const count = Array.isArray(records) ? records.length : 0;
+  const state = count ? "✓ 已识别" : "可稍后补充";
+  const detail = count ? `已读取 ${count} 条结果，来源和版本已随本次核算保存。` : "选择资料包文件夹后，系统会自动识别这类资料。";
+  return `<article class="material-card"><div class="material-top"><strong>${escapeHtml(title)}</strong><span class="${count ? "ok" : "muted"}">${state}</span></div><p class="small muted">${escapeHtml(description)}</p><div class="empty compact">${escapeHtml(detail)}</div><button class="secondary full" onclick="choosePackage()">${count ? "重新选择资料包" : "选择资料包文件夹"}</button></article>`;
 }
 
 async function choosePackage() {

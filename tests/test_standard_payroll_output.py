@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from dataclasses import replace
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 import pytest
 
 from payroll_core.calculation import CompensationProfile, RatingAuthority, calculate_payroll
@@ -20,6 +20,30 @@ from payroll_core.excel.standard_payroll_render import (
 from payroll_core.models.records import ScheduleRecord
 from payroll_core.payroll_generation import GeneratedPayroll, base_salary_field, build_generated_payroll, generated_from_calculation
 from payroll_ui.service import PayrollService
+
+
+def _sanitized_template(tmp_path: Path) -> Path:
+    """Build a non-sensitive template contract for template-render tests."""
+    path = tmp_path / "脱敏工资模板.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Sheet1"
+    sheet["A1"] = "脱敏工资模板"
+    sheet["G2"] = "月份："
+    sheet["H2"] = "2026-08"
+    headers = {
+        "B3": "教师级别", "C3": "姓名",
+        "G3": "基本工资", "H3": "岗位津贴", "I3": "工龄工资/教师等级",
+        "J3": "其他待遇", "K3": "应出勤", "L3": "实际出勤", "M3": "实际基本工资",
+        "AA3": "折算小时数", "AC3": "班课折算小时数", "AD3": "最终授课小时数据",
+        "AE3": "该档每小时金额", "AF3": "总课时费", "AV3": "总工资数", "AW3": "状态",
+    }
+    for cell, value in headers.items():
+        sheet[cell] = value
+    for row in range(4, 6):
+        sheet.cell(row, 1).value = None
+    book.save(path)
+    return path
 
 
 def _generated(*, reference_rating: bool = False, business_inputs=()):
@@ -177,7 +201,7 @@ def test_reference_rating_is_visible_and_determined(tmp_path: Path):
 def test_template_output_keeps_auditable_excel_formulas(tmp_path: Path):
     payroll = _generated()
     payroll = replace(payroll, formula_inputs={"one_to_one_counts": {"教师甲": {"九年级": 16}}})
-    template = Path("/Users/macos/Desktop/payroll_read_test/薪资表模板.xlsx")
+    template = _sanitized_template(tmp_path)
     output = tmp_path / "formula-output.xlsx"
     render_generated_payroll(payroll, output, template_path=template)
     sheet = load_workbook(output, data_only=False)["Sheet1"]
@@ -206,7 +230,7 @@ def test_template_output_writes_base_salary_inputs_and_m_formula(tmp_path: Path)
         base_salary_inputs={"教师甲": {"source": "工资资料包", "fields": {code: {"value": value} for code, value in {"G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18}.items()}}},
     )
     output = tmp_path / "base-salary-formula.xlsx"
-    render_generated_payroll(payroll, output, template_path=Path("/Users/macos/Desktop/payroll_read_test/薪资表模板.xlsx"))
+    render_generated_payroll(payroll, output, template_path=_sanitized_template(tmp_path))
     sheet = load_workbook(output, data_only=False)["Sheet1"]
     assert [sheet[f"{column}5"].value for column in "GHIJKL"] == [6000, 500, 200, 300, 20, 18]
     assert sheet["M5"].value == "=(G5+H5+I5+J5)/K5*L5"
@@ -228,7 +252,7 @@ def test_calculation_derives_template_grade_inputs_from_accepted_one_to_one_cour
     )
     assert generated.formula_inputs["one_to_one_counts"]["教师甲"]["九年级"] == 6
     output = tmp_path / "formula-inputs.xlsx"
-    render_generated_payroll(generated, output, template_path=Path("/Users/macos/Desktop/payroll_read_test/薪资表模板.xlsx"))
+    render_generated_payroll(generated, output, template_path=_sanitized_template(tmp_path))
     sheet = load_workbook(output, data_only=False)["Sheet1"]
     # 九年级 maps to V; two accepted lessons become six count units (2 * 3).
     assert sheet["V5"].value == 6
