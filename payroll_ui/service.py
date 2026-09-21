@@ -1832,6 +1832,7 @@ class PayrollService(CoreFlow):
             checks += total_salary_read_checks(payroll)
         rating_version = self._rating_version_for_run(run)
         ratings = [TeacherRating(item["teacher"], item["rating"], item.get("role", "教师"), rating_version["effective_from"], rating_version["effective_to"], rating_version["source"], rating_version["source_version"], allow_blank_payroll_rating=item.get("allow_blank_payroll_rating", False)) for item in rating_version.get("ratings", [])] if rating_version else []
+        exempt = set()
         if not is_generate:
             rating_checks = rating_and_rate_checks(payroll, ratings, default_compensation_bands(), run["period"])
             if configured:

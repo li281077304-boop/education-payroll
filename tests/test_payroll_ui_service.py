@@ -304,6 +304,24 @@ def test_generate_mode_excludes_payroll_reconciliation_issues(tmp_path):
     assert not any(item["status"] in {"MISSING_PAYROLL_VALUE", "RATING_MISMATCH", "RATE_MISMATCH"} for item in checked["issues"])
 
 
+def test_generate_preview_without_optional_baseline_does_not_use_uninitialized_exempt(tmp_path):
+    """An optional subject sheet must not block preview when baseline is absent."""
+    schedule = tmp_path / "schedule.xlsx"
+    copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    math = tmp_path / "math.xlsx"
+    _payroll_with_only(math, 5)
+
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    service.import_file(run["id"], "schedule", str(schedule))
+    service.import_file(run["id"], "math", str(math))
+
+    preview = service.preview_payroll(run["id"])
+
+    assert "baseline" not in preview["files"]
+    assert preview["generated_payroll"]["rows"]
+
+
 def test_ui_marks_run_stale_when_original_file_changes(tmp_path):
     service, run, schedule = _prepared_run(tmp_path)
     with schedule.open("ab") as handle:
