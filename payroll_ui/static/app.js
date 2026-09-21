@@ -503,7 +503,8 @@ function baseSalaryPage() {
     const stateLabel = mState === "DETERMINED" ? "已确定" : entry.fields ? "待补齐" : "待确认";
     return `<tr class="base-salary-row" data-teacher="${escapeHtml(row.teacher)}"><td><strong>${escapeHtml(row.teacher)}</strong><input class="base-teacher-id" type="hidden" value="${escapeHtml(entry.teacher_id || row.teacher)}"></td>${fields.map(([code, label]) => `<td><label class="small">${label}<input class="base-${code.toLowerCase()}" type="number" step="0.01" value="${escapeHtml(values[code]?.value ?? "")}" placeholder="${code}"></label></td>`).join("")}<td><strong class="base-m-value">${escapeHtml(entry.m?.value ?? "待填写")}</strong><div class="small muted">M=(G+H+I+J)/K×L，只读计算</div></td><td><span class="status ${mState === "DETERMINED" ? "ok" : "warn"}">${stateLabel}</span></td></tr>`;
   }).join("");
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">按教师确认 G～L；系统只读计算 M 实际基本工资，不接受直接填写 M。保存后形成当前 Run 的 BASE_SALARY_INPUT_SNAPSHOT。</p></div></div><div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="本次 Run 基本工资确认"></label></div><div class="action-bar"><span class="muted small">缺少任何 G～L 会阻塞该教师的 M，不会自动填 0。</span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存基本工资快照并重新预览</button></div></section>`;
+  const deferred = current.base_salary_deferred ? `<div class="banner info"><strong>基本工资暂未录入</strong><span>本次已按你的选择继续生成；M 保持“待补充”，补录 G～L 后可重新生成。</span></div>` : "";
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">按教师确认 G～L；系统只读计算 M 实际基本工资，不接受直接填写 M。缺少资料不会自动填 0。</p></div></div>${deferred}<div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="本次 Run 基本工资确认"></label></div><div class="action-bar"><span class="muted small">${current.base_salary_deferred ? "后续补录后可重新生成。" : "缺少任何 G～L 会将 M 标记为待补充。"}</span><span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存基本工资并重新预览</button><button class="secondary" onclick="deferBaseSalary()" ${rows.length ? "" : "disabled"}>暂不录入基本工资，继续生成工资表</button></span></div></section>`;
 }
 
 async function saveBaseSalary() {
@@ -515,6 +516,17 @@ async function saveBaseSalary() {
     });
     current = await api(`/api/runs/${current.id}/base-salary`, {method: "POST", body: JSON.stringify({inputs, confirmed_by: $("#base-salary-confirmed-by").value, source: $("#base-salary-source").value})});
     renderRun(); showMessage("基本工资输入已保存并冻结到当前 Run。", "success");
+  } catch (error) { showMessage(error.message); }
+}
+
+async function deferBaseSalary() {
+  try {
+    const person = $("#base-salary-confirmed-by")?.value?.trim();
+    if (!person) throw new Error("请填写确认人，才能暂不录入基本工资并继续生成。");
+    if (!window.confirm("确认暂不录入基本工资？系统会继续生成，但相关教师的 M 会明确标记为待补充，不会按 0 计算。")) return;
+    current = await api(`/api/runs/${current.id}/base-salary-defer`, { method: "POST", body: JSON.stringify({ confirmed_by: person, reason: "用户选择暂不录入基本工资；后续补录后可重新生成。" }) });
+    renderRun();
+    showMessage("已记录暂不录入基本工资；现在可以继续生成工资表。", "success");
   } catch (error) { showMessage(error.message); }
 }
 
@@ -719,11 +731,14 @@ function payrollPreviewPage() {
     return `<section class="card"><h2>工资预览尚未生成</h2><p class="muted">请先完成材料准备并自动核算。</p><div class="action-bar"><button onclick="setTab('materials')">返回材料准备</button></div></section>`;
   }
   const rowHtml = rows.map((row) => {
-    const fields = ["M", "AA", "AC", "AD", "AE", "AF", "AH", "AI", "AJ", "AK", "AV", "PART_TIME"].map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code))}</td>`).join("");
+    const primaryCodes = ["M", "AA", "AC", "AD", "AE", "AF", "AV"];
+    const fields = primaryCodes.map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code))}</td>`).join("");
     const starEvidence = (row.fields?.AE?.evidence || []).map((item) => item?.inputs?.rating).find((value) => value != null && value !== "");
     const star = row.star ?? starEvidence ?? "—";
     const blockers = (row.blockers || []).join("、");
-    return `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong><div class="small muted">${escapeHtml(row.status === "FINAL" ? "可导出" : blockers || "仍需确认")}</div></td>${fields}<td>${coreCalculationCell({ value: star, state: star === "—" ? "NEEDS_INPUT" : "DETERMINED" })}</td></tr>`;
+    const secondaryLabels = { AH: "AH 续费一对一", AI: "AI 续费班课", AJ: "AJ 领航续费", AK: "AK 推荐续费奖", PART_TIME: "兼职按节课时费" };
+    const secondary = ["AH", "AI", "AJ", "AK", "PART_TIME"].map((code) => `<div><span>${secondaryLabels[code]}</span>${coreCalculationCell(payrollPreviewField(row, code))}</div>`).join("");
+    return `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong><div class="small muted">${escapeHtml(row.status === "FINAL" ? "可导出" : blockers || "仍需确认")}</div><details class="preview-details"><summary>查看其它项目</summary><div class="preview-secondary">${secondary}<div><span>星级</span>${coreCalculationCell({ value: star, state: star === "—" ? "NEEDS_INPUT" : "DETERMINED" })}</div></div></details></td>${fields}</tr>`;
   }).join("");
   const status = generated.status || (current.summary?.core_calculation_complete ? "待导出" : "待确认");
   const path = generated.path ? `<p class="small muted">最近导出：${escapeHtml(generated.path)}</p>` : "";
@@ -732,7 +747,7 @@ function payrollPreviewPage() {
     : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
   const renewal = current.run_renewal_result_snapshot;
   const renewalNote = renewal ? `<div class="banner info"><strong>续费结果快照</strong><span>AH 续费一对一 · AI 续费班课 · AJ 领航续费 · AK = AH×1 + AI×1.5 + AJ×0.75；来源已冻结在本次 Run（${escapeHtml(Object.keys(renewal.entries || {}).length)} 位教师）。</span></div>` : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · 核算周期 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师与导出状态</th><th>M 实际基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>AH 续费一对一</th><th>AI 续费班课</th><th>AJ 领航续费</th><th>AK 推荐续费奖</th><th>AV</th><th>兼职按节课时费</th><th>星级</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${path}<div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="table-wrap"><table class="table core-calculation-table payroll-preview-table"><thead><tr><th>教师与状态</th><th>M 基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF</th><th>AV 总工资</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${path}<details class="preview-details"><summary>查看导出说明与规则详情</summary><div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div><p class="small muted">核心字段按当前 Run 计算；来源、规则版本和未确认原因可在“问题中心”查看。</p></details><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button ${current.mode === "GENERATE" ? "" : "disabled"} onclick="exportPayroll()">导出工资表</button></div></section>`;
 }
 
 function overviewPage() {
@@ -756,15 +771,18 @@ function issuesPage() {
   const groupsById = new Map(rows.map((group) => [group.id, group]));
   const actionBlocks = actions.map((action) => {
     const members = (action.group_ids || []).map((id) => groupsById.get(id)).filter(Boolean);
-    return `<details class="user-action"><summary>${escapeHtml(action.title)}：${action.teacher_count} 位教师</summary><p class="small muted">展开后查看对应教师级问题和证据入口。</p>${issueTable(members)}</details>`;
+    return `<details class="user-action"><summary><span><strong>${escapeHtml(action.title)}：${action.teacher_count} 位教师</strong></span><span class="action-cta">点击处理</span></summary><p class="small muted">展开后查看对应教师级问题和证据入口。</p>${issueTable(members)}</details>`;
   }).join("");
   const actionSummary = actions.length
     ? `<div class="action-summary"><strong>需要完成 ${actions.length} 个核查动作</strong><span class="muted">先处理以下业务动作；教师级问题只在展开动作后显示。</span><div class="action-list">${actionBlocks}</div></div>`
     : '<div class="empty success">当前没有需要人工处理的核算异常。</div>';
   const auditDetails = rows.length ? `<details class="audit-details"><summary>查看审计明细（${rows.length} 个业务问题，${fieldCount} 条字段记录）</summary><p class="small muted">审计明细仅用于追溯，不代表需要逐条人工处理。</p>${issueTable(rows)}</details>` : "";
   const afAction = actions.find((action) => action.cause === "compensation_fee_policy");
-  const afPolicyBlock = current.mode === "GENERATE" && afAction && !current.af_policy_confirmation
-    ? `<section class="action-first af-policy-confirmation"><h3>确认本月义务课时政策</h3><p class="muted">普通全职教师默认按 30 小时扣除；如有特殊人员，可在确认后单独设置例外。</p><label>确认人<input id="af-policy-confirmed-by" placeholder="填写姓名"></label><div class="action-bar"><button onclick="confirmAfPolicy()">确认没有特殊情况，全部按30小时扣除</button></div></section>`
+  const afTeachers = [...new Set((current.core_calculation?.rows || []).map((row) => row.teacher).filter(Boolean))];
+  const afExceptions = current.af_policy_confirmation?.exceptions || {};
+  const exceptionRows = afTeachers.map((teacher) => { const item = afExceptions[teacher] || {}; return `<tr><td>${escapeHtml(teacher)}</td><td><input class="af-exception-enabled" data-teacher="${escapeHtml(teacher)}" type="checkbox" ${Object.keys(item).length ? "checked" : ""}></td><td><input class="af-exception-hours" data-teacher="${escapeHtml(teacher)}" type="number" min="0" step="0.01" value="${escapeHtml(item.obligation_hours ?? 30)}"></td><td><label class="inline-check"><input class="af-exception-deduct" data-teacher="${escapeHtml(teacher)}" type="checkbox" ${item.deduction_enabled !== false ? "checked" : ""}>扣除</label></td><td><input class="af-exception-reason" data-teacher="${escapeHtml(teacher)}" value="${escapeHtml(item.reason || "")}" placeholder="填写原因"></td></tr>`; }).join("");
+  const afPolicyBlock = current.mode === "GENERATE" && !current.af_policy_confirmation
+    ? `<section class="action-first af-policy-confirmation"><h3>本月义务课时政策</h3><p class="muted">默认规则：适用教师全部按 30 小时扣除。没有特殊情况时只确认一次，不需要逐人填写。</p><label>确认人<input id="af-policy-confirmed-by" placeholder="填写姓名"></label><div class="action-bar"><button onclick="confirmAfPolicy()">确认默认：全部按30小时扣除</button><button class="secondary" onclick="document.querySelector('#af-policy-exceptions').open=true">有特殊情况 / 设置例外</button></div><details id="af-policy-exceptions"><summary>设置个别教师例外</summary><p class="small muted">只有特殊人员才勾选；未勾选的教师仍使用默认 30 小时。</p><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>设置例外</th><th>义务课时</th><th>是否扣除</th><th>原因/备注</th></tr></thead><tbody>${exceptionRows || '<tr><td colspan="5" class="muted">核算后才会显示教师名单。</td></tr>'}</tbody></table></div><button onclick="confirmAfPolicy()">保存默认规则和例外</button></details></section>`
     : "";
   return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${actionSummary}${afPolicyBlock}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 条）</div>${auditDetails}<div id="issue-detail"></div></section>`;
 }
@@ -785,7 +803,12 @@ async function confirmAfPolicy() {
   try {
     const person = $("#af-policy-confirmed-by")?.value?.trim();
     if (!person) throw new Error("请填写确认人。");
-    current = await api(`/api/runs/${current.id}/af-policy`, { method: "POST", body: JSON.stringify({ default_obligation_hours: 30, confirmed_by: person, reason: "本月没有义务课时特殊情况。" }) });
+    const exceptions = {};
+    document.querySelectorAll(".af-exception-enabled:checked").forEach((node) => {
+      const teacher = node.dataset.teacher;
+      exceptions[teacher] = { obligation_hours: Number(document.querySelector(`.af-exception-hours[data-teacher="${CSS.escape(teacher)}"]`)?.value || 30), deduction_enabled: document.querySelector(`.af-exception-deduct[data-teacher="${CSS.escape(teacher)}"]`)?.checked !== false, reason: document.querySelector(`.af-exception-reason[data-teacher="${CSS.escape(teacher)}"]`)?.value?.trim() || "" };
+    });
+    current = await api(`/api/runs/${current.id}/af-policy`, { method: "POST", body: JSON.stringify({ default_obligation_hours: 30, exceptions, confirmed_by: person, reason: Object.keys(exceptions).length ? "普通教师按30小时扣除；已记录个别特殊情况。" : "本月没有义务课时特殊情况。" }) });
     renderRun(); showMessage("已确认本月普通全职教师按30小时扣除，特殊人员可另设例外。", "success");
   } catch (error) { showMessage(error.message); }
 }

@@ -30,7 +30,7 @@ from payroll_core.models.class_type_rules import (
 )
 from payroll_core.payroll_generation import build_legacy_generated_payroll, generated_from_calculation
 from payroll_core.final_fields import renewal_snapshot_entry, renewal_fields_from_snapshot
-from payroll_core.excel.standard_payroll_render import render_generated_payroll
+from payroll_core.excel.standard_payroll_render import is_payroll_template, render_generated_payroll
 from payroll_core.excel.output_paths import default_output_dir, describe_location, safe_output_path
 from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
@@ -543,6 +543,19 @@ class PayrollService(CoreFlow):
         if kind == "subject_group":
             role = self._infer_subject_group_role(source, run)
             rendered = self.import_file(run_id, role, str(source))
+            # In the normal four-material flow there is no separate baseline
+            # upload.  A submitted .xlsx that satisfies the final workbook
+            # contract may provide layout only; the renderer clears its data
+            # area and writes the current Run, so no prior payroll value is
+            # copied into the generated workbook.
+            if not rendered.get("template_path") and is_payroll_template(source):
+                rendered["template_path"] = str(source)
+                rendered["template"] = {
+                    "name": source.name,
+                    "path": str(source),
+                    "source": "学科组提交表中的工资模板结构（仅保留版式）",
+                }
+                self.store.save(rendered)
             rendered["material_kind"] = "subject_group"
             rendered["recognized_role"] = role
             return {"run": rendered, "material_kind": "subject_group", "recognized_role": role}
@@ -570,6 +583,31 @@ class PayrollService(CoreFlow):
         run["last_error"] = ""
         self.store.save(run)
         return {"run": self.render(run), "material_kind": kind, "recognized_role": kind, "records": len(reports)}
+
+    @staticmethod
+    def _bind_template_from_run_files(run: dict) -> bool:
+        """Bind a structure-only template for older Runs at export time.
+
+        Existing Runs may have been imported before the material-flow fix and
+        therefore have no ``template_path``.  Re-inspect the already-bound
+        subject-group files instead of requiring a new Run or re-import.  The
+        production renderer still clears the workbook data area before writing
+        current Core values.
+        """
+        if run.get("template_path") and Path(run["template_path"]).is_file():
+            return True
+        for role in ("math", "science"):
+            item = run.get("files", {}).get(role) or {}
+            path = Path(item.get("path", "")) if item.get("path") else None
+            if path and path.is_file() and is_payroll_template(path):
+                run["template_path"] = str(path.resolve())
+                run["template"] = {
+                    "name": path.name,
+                    "path": str(path.resolve()),
+                    "source": "既有学科组提交表中的工资模板结构（仅保留版式）",
+                }
+                return True
+        return False
 
     def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None) -> list[dict]:
         return self.inputs.import_results(input_type, period, path, submitted_by, activation_scope=activation_scope, replace_input_ids=replace_input_ids)
@@ -775,7 +813,7 @@ class PayrollService(CoreFlow):
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
         window = normalize_period_window(period, period_start, period_end, period_boundary_source)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "base_salary_inputs": {}, "base_salary_input_snapshot": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "base_salary_inputs": {}, "base_salary_input_snapshot": None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
         self.store.save(run)
@@ -878,6 +916,20 @@ class PayrollService(CoreFlow):
         invalidate_business_decisions(run.setdefault("business_decisions", []))
         self.store.save(run)
         return self.check(run_id) if self._materials_ready(run) else self.render(run)
+
+    def defer_base_salary(self, run_id: str, confirmed_by: str, reason: str = "") -> dict:
+        """Allow an explicit generate-now decision without inventing M=0."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        actor = str(confirmed_by or "").strip()
+        if not actor:
+            raise ValueError("请填写确认人，才能暂不录入基本工资并继续生成。")
+        run["base_salary_deferred"] = True
+        run["base_salary_deferred_by"] = actor
+        run["base_salary_deferred_at"] = datetime.now(timezone.utc).isoformat()
+        run["base_salary_deferred_reason"] = str(reason or "用户选择暂不录入基本工资；后续补录后可重新生成。")
+        self.store.save(run)
+        return self.render(run)
 
     def list(self) -> list[dict]:
         return [self.render(self._load(item["id"])) for item in self.store.list()]
@@ -1294,6 +1346,8 @@ class PayrollService(CoreFlow):
     def generate_payroll(self, run_id: str, output_path: str, *, confirmed_hours: dict | None = None) -> dict:
         """生成模式：同一套 Core 结果直接渲染成标准工资表。"""
         run = self._load(run_id)
+        if self._bind_template_from_run_files(run):
+            self.store.save(run)
         business_inputs = self._approved_business_inputs(run)
         if run.get("calculation_engine") == "CONFIGURED_V1":
             if confirmed_hours:
@@ -1552,7 +1606,15 @@ class PayrollService(CoreFlow):
             for item in (self.store.get_business_input(binding["input_id"]),)
             if is_active_business_input(item)
         ]
-        base_salary = checked.get("base_salary_inputs") if checked.get("base_salary_input_snapshot") else None
+        # An empty mapping is deliberate: it asks the shared generator to
+        # expose M as MISSING rather than omitting it or treating it as zero.
+        if "base_salary_input_snapshot" in checked:
+            base_salary = checked.get("base_salary_inputs") if checked.get("base_salary_input_snapshot") else {}
+        else:
+            # Minimal calculation fixtures from older callers do not include
+            # production Run input metadata; preserve their historical final
+            # field semantics.
+            base_salary = None
         return generated_from_calculation(checked["core_calculation"], business_inputs=inputs, base_salary_inputs=base_salary, renewal_snapshot=checked.get("run_renewal_result_snapshot"))
 
     def writeback_to_generated(self, run_id: str, candidate_ids: list[str], output_path: str, reviewer: str, strategy: str = "APPEND") -> dict:

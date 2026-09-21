@@ -280,6 +280,12 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         str(payload.get("confirmed_by", "")),
                         str(payload.get("source", "本次 Run 基本工资确认")),
                     ))
+                if action == "base-salary-defer":
+                    return self._json(self.server.service.defer_base_salary(
+                        run_id,
+                        str(payload.get("confirmed_by", "")),
+                        str(payload.get("reason", "")),
+                    ))
                 if action == "period":
                     return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
                 if action == "period-check":

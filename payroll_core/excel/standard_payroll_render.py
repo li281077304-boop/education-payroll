@@ -172,6 +172,23 @@ def _template_headers(sheet) -> dict[str, int]:
     return found
 
 
+def is_payroll_template(path: str | Path) -> bool:
+    """Return whether a local workbook satisfies the production template contract.
+
+    This is intentionally a read-only shape check.  It does not treat any
+    values in the workbook as payroll authority; the renderer clears the data
+    area and writes the current Run's Core result.
+    """
+    try:
+        book = load_workbook(path, data_only=False, read_only=False, keep_links=True)
+        if not book.worksheets:
+            return False
+        _template_headers(book.worksheets[0])
+        return True
+    except Exception:
+        return False
+
+
 def _manual_value(row: Any, code: str, adjustments: Mapping[tuple[str, str], Any]) -> object:
     key = ("".join(str(row.teacher).split()), code)
     adjustment = adjustments.get(key)

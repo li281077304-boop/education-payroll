@@ -585,6 +585,33 @@ def test_user_facing_auto_material_import_classifies_schedule_and_subject_group(
     assert saved["files"]["math"]["name"] == payroll.name
 
 
+def test_subject_group_template_shape_is_bound_for_production_export(tmp_path, monkeypatch):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    schedule = FIXTURES / "fake_schedule.xlsx"
+    payroll = tmp_path / "math-template.xlsx"
+    _payroll_with_only(payroll, 5)
+    service.import_material_file(run["id"], "auto", str(schedule))
+    monkeypatch.setattr("payroll_ui.service.is_payroll_template", lambda _path: True)
+
+    result = service.import_material_file(run["id"], "subject_group", str(payroll))
+    saved = service.get(run["id"])
+
+    assert result["material_kind"] == "subject_group"
+    assert saved["template_path"] == str(payroll.resolve())
+    assert saved["template"]["source"].startswith("学科组提交表中的工资模板结构")
+
+
+def test_missing_base_salary_can_be_explicitly_deferred_without_zero_snapshot(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    deferred = service.defer_base_salary(run["id"], "测试确认人")
+
+    assert deferred["base_salary_deferred"] is True
+    assert deferred["base_salary_input_snapshot"] is None
+    assert deferred["base_salary_inputs"] == {}
+
+
 def test_run_binds_effective_rating_version_and_reports_a_rating_mismatch(tmp_path):
     service = PayrollService(tmp_path / "app-data")
     versions = service.save_rating_version("2025-10", "2026-09", "脱敏年度星级评定", "2025-10", [{"teacher": "张三", "rating": 4}])
