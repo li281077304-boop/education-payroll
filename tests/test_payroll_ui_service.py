@@ -114,6 +114,27 @@ def test_base_salary_snapshot_is_run_scoped_and_calculates_m_without_zero_fallba
     assert fresh["base_salary_inputs"]["张三"]["m"]["value"] == 6300.0
 
 
+def test_base_salary_profiles_keep_historical_effective_months(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    august = service.create("2026-08", mode="GENERATE")
+    fields = {code: {"value": value, "source": "脱敏基本工资资料"} for code, value in {
+        "G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18,
+    }.items()}
+    service.save_base_salary_inputs(august["id"], [{"teacher": "教师甲", "fields": fields, "effective_from": "2026-08"}], "脱敏确认人")
+
+    october = service.create("2026-10", mode="GENERATE")
+    fields_october = {code: {"value": value, "source": "脱敏基本工资调整"} for code, value in {
+        "G": 6500, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18,
+    }.items()}
+    service.save_base_salary_inputs(october["id"], [{"teacher": "教师甲", "fields": fields_october, "effective_from": "2026-10"}], "脱敏确认人")
+
+    september = service.create("2026-09", mode="GENERATE")
+    assert september["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 6000
+    assert september["base_salary_inputs"]["教师甲"]["m"]["value"] == 6300
+    assert service.create("2026-10", mode="GENERATE")["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 6500
+    assert service.store.get(august["id"])["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 6000
+
+
 def test_real_package_template_is_bound_to_run(tmp_path):
     package_dir = tmp_path / "package"
     package_dir.mkdir()
@@ -652,6 +673,42 @@ def test_registered_company_template_is_reused_by_second_run(tmp_path):
     assert Path(exported["path"]).exists()
     assert managed_path.exists()
     assert service.store.get(second["id"])["template"]["source"] == "已登记公司工资模板"
+
+
+def test_second_month_only_schedule_is_a_real_production_chain(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    template = _sanitized_template(tmp_path)
+    registered = service.register_company_template(str(template), "脱敏管理员")
+    template.unlink()
+    service.save_rating_version(
+        "2025-10", "2026-09", "脱敏年度星级", "2025-10", [{"teacher": "教师甲", "rating": 4}],
+    )
+
+    august = service.create("2026-08", mode="GENERATE")
+    fields = {code: {"value": value, "source": "脱敏基本工资资料"} for code, value in {
+        "G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18,
+    }.items()}
+    service.save_base_salary_inputs(august["id"], [{"teacher": "教师甲", "fields": fields}], "脱敏确认人")
+    service.confirm_af_policy(august["id"], "脱敏确认人")
+    schedule = _simple_schedule(tmp_path / "august-schedule.xlsx")
+    service.import_file(august["id"], "schedule", str(schedule))
+    service.check(august["id"])
+    assert service.preview_payroll(august["id"])["generated_payroll"]["rows"]
+    first_export = service.generate_payroll(august["id"], str(tmp_path / "august-output.xlsx"), production=True)
+    assert Path(first_export["path"]).exists()
+
+    september = service.create("2026-09", mode="GENERATE")
+    service.import_file(september["id"], "schedule", str(schedule))
+    checked = service.check(september["id"])
+    preview = service.preview_payroll(september["id"])
+    generated = service.generate_payroll(september["id"], str(tmp_path / "september-output.xlsx"), production=True)
+
+    assert checked["rating_version_id"]
+    assert checked["base_salary_inputs"]["教师甲"]["m"]["state"] == "DETERMINED"
+    assert checked["af_policy_confirmation"]["default_obligation_hours"] == 30
+    assert preview["generated_payroll"]["rows"]
+    assert Path(generated["path"]).exists()
+    assert service.store.get(september["id"])["template"]["source"] == "已登记公司工资模板"
 
 
 def test_missing_base_salary_can_be_explicitly_deferred_without_zero_snapshot(tmp_path):

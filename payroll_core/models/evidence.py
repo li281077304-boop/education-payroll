@@ -51,7 +51,10 @@ class AdapterResult(Generic[T]):
     records: list[T] = field(default_factory=list)
     warnings: list[AdapterIssue] = field(default_factory=list)
     errors: list[AdapterIssue] = field(default_factory=list)
-    coverage: Mapping[str, int] = field(default_factory=dict)
+    # Adapters may expose small, non-sensitive evidence metadata here (for
+    # example all source dates before period filtering).  Keep the result
+    # generic because some adapters also report counts and ranges.
+    coverage: Mapping[str, Any] = field(default_factory=dict)
     unsupported_fields: tuple[str, ...] = ()
     comments: list[CommentRecord] = field(default_factory=list)
 

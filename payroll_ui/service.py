@@ -18,7 +18,7 @@ from openpyxl import load_workbook
 
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.excel.package import discover_payroll_package
-from payroll_core.period import coverage_for, dominant_month, month_from_filename, normalize_period_window
+from payroll_core.period import coverage_for, dominant_month, month_from_filename, normalize_period_window, previous_period
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.mapping.schedule import read_schedule_with_mapping
 from payroll_core.models.evidence import AdapterIssue
@@ -37,7 +37,7 @@ from payroll_core.excel.inspect import inspect_workbook
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.adapters.payroll_sheet import read_payroll_csv
-from payroll_core.adapters.schedule import read_schedule_csv
+from payroll_core.adapters.schedule import read_schedule_csv_result
 from payroll_core.excel.common import grade_from_class_name, load_student_grade_lookup
 from payroll_core.adapters import read_refund_report, read_renewal_report
 from payroll_core.grade_inference import (
@@ -497,7 +497,9 @@ class PayrollService(CoreFlow):
     def _read_csv(role: str, path: Path, period: str, *, period_start: str | None = None, period_end: str | None = None):
         """Read the normalized CSV shapes accepted by the material flow."""
         try:
-            records = read_schedule_csv(path, period, period_start=period_start, period_end=period_end) if role == "schedule" else read_payroll_csv(path, period)
+            if role == "schedule":
+                return read_schedule_csv_result(path, period, period_start=period_start, period_end=period_end)
+            records = read_payroll_csv(path, period)
         except (KeyError, ValueError) as exc:
             raise ValueError(f"CSV 文件缺少必要列或数据格式不正确：{exc}") from exc
         from payroll_core.models.evidence import AdapterResult
@@ -930,8 +932,20 @@ class PayrollService(CoreFlow):
             effective_to = str(item.get("effective_to") or "9999-12")
             for old in self.store.list_teacher_base_salary_profiles():
                 if old.get("status", "ACTIVE") == "ACTIVE" and old.get("teacher") == teacher:
-                    old["status"] = "SUPERSEDED"
-                    self.store.save_teacher_base_salary_profile(old)
+                    old_from = str(old.get("effective_from") or "")
+                    old_to = str(old.get("effective_to") or "9999-12")
+                    if old_from == effective_from:
+                        # Re-confirming the same effective month replaces the
+                        # prior version without changing older periods.
+                        old["status"] = "SUPERSEDED"
+                        self.store.save_teacher_base_salary_profile(old)
+                    elif old_from < effective_from <= old_to:
+                        # Close the old version immediately before the new
+                        # version.  It remains ACTIVE for historical months.
+                        old["effective_to"] = previous_period(effective_from)
+                        self.store.save_teacher_base_salary_profile(old)
+                    elif effective_from < old_from <= effective_to:
+                        raise ValueError(f"{teacher} 的基本工资版本生效期重叠，请先明确旧版本有效期。")
             self.store.save_teacher_base_salary_profile({
                 "id": uuid.uuid4().hex[:16], "teacher": teacher,
                 "effective_from": effective_from, "effective_to": effective_to,
@@ -1889,6 +1903,16 @@ class PayrollService(CoreFlow):
                 result = self._read_for_run(role, source, run)
         except OSError as exc:
             raise ValueError(self._file_error(exc)) from exc
+        if is_csv and role == "schedule" and not result.records:
+            # An all-out-of-period CSV is still useful month evidence and may
+            # be confirmed/switchable.  A CSV with no usable in-period rows
+            # for any other reason must not masquerade as a valid schedule.
+            if not any(issue.code == "OUT_OF_PERIOD_ROWS_EXCLUDED" for issue in result.warnings):
+                message = next(
+                    (issue.message for issue in result.warnings if issue.code == "UNPARSEABLE_LESSON_DATE"),
+                    "这份排课表没有识别到有效课程记录，请检查日期和文件格式。",
+                )
+                raise ValueError(message)
         if result.errors:
             raise ValueError("文件缺少当前核对所需字段：" + "；".join(issue.message for issue in result.errors))
         try:
@@ -1907,7 +1931,10 @@ class PayrollService(CoreFlow):
             self.save_import_profile(str(source), role, dict(mapping.get("mapping", {})), profile_actor, profile_name)
         run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets] if workbook is not None else ["CSV"], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets) if workbook is not None else 0, "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets) if workbook is not None else 0, "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets) if workbook is not None else 0}
         if role == "schedule":
-            run["period_check"] = self._period_evidence(run, result.records, source.name, source)
+            run["period_check"] = self._period_evidence(
+                run, result.records, source.name, source,
+                evidence_dates=result.coverage.get("all_lesson_dates", ()) if is_csv else (),
+            )
             run.setdefault("material_period_evidence", []).append({"role": role, "source_file": source.name, "source_month": run["period_check"].get("source_month"), "basis": "课表实际课程日期"})
             # Grade resolutions are bound to coordinates in the imported
             # schedule workbook. Replacing that source invalidates them.
@@ -1935,8 +1962,8 @@ class PayrollService(CoreFlow):
         self.store.save(run)
         return self.render(run)
 
-    def _period_evidence(self, run: dict, records, file_name: str, source_path: Path | None = None) -> dict:
-        dates = [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in records]
+    def _period_evidence(self, run: dict, records, file_name: str, source_path: Path | None = None, *, evidence_dates=()) -> dict:
+        dates = list(evidence_dates) or [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in records]
         if not dates and source_path is not None:
             # A source whose rows were filtered out for the selected month
             # still needs month evidence so the UI can offer a safe switch.
@@ -2028,10 +2055,13 @@ class PayrollService(CoreFlow):
             item["records"] = len(result.records)
             item["teachers"] = len({record.teacher for record in result.records if hasattr(record, "teacher")})
             if role == "schedule":
-                run["period_check"] = self._period_evidence(run, result.records, path.name, path)
+                run["period_check"] = self._period_evidence(
+                    run, result.records, path.name, path,
+                    evidence_dates=result.coverage.get("all_lesson_dates", ()) if path.suffix.lower() == ".csv" else (),
+                )
         self._refresh_material_period_check(run)
         check = run.get("period_check") or {}
-        if check and not check.get("conflict"):
+        if check and not check.get("conflict") and not check.get("mismatch"):
             check["decision"] = "SWITCHED"
             run["period_check"] = check
         run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
@@ -2044,7 +2074,13 @@ class PayrollService(CoreFlow):
         if not check.get("mismatch"):
             return self.render(run)
         if decision == "SWITCH":
-            return self.change_period(run_id, check["source_month"])
+            self.change_period(run_id, check["source_month"])
+            stored = self._load(run_id)
+            stored_check = stored.get("period_check") or {}
+            stored_check["decision"] = "SWITCHED"
+            stored["period_check"] = stored_check
+            self.store.save(stored)
+            return self.render(stored)
         if decision == "KEEP":
             check["decision"] = "KEPT"
             run["period_check"] = check
@@ -3367,6 +3403,8 @@ class PayrollService(CoreFlow):
             "EXTERNAL_REFERENCE_UNRESOLVED": "部分结果依赖其他 Excel 文件，目前无法确认是否最新。",
             "GRADE_UNRESOLVED": "部分排课无法确定年级，需要人工确认。",
             "MISSING_ATTENDANCE": "部分排课缺少可读取的实到人数，需要人工确认。",
+            "UNPARSEABLE_LESSON_DATE": "有已上课排课无法识别上课日期，已排除，请修正日期后重新导入。",
+            "OUT_OF_PERIOD_ROWS_EXCLUDED": "部分排课不属于当前工资月份，已按月份排除。",
         }.get(code, "存在需要查看的材料提示。")
 
     @staticmethod
