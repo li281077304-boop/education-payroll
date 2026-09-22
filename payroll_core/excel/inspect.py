@@ -98,6 +98,8 @@ class _XlrdSheet:
         while number:
             number, remainder = divmod(number - 1, 26)
             letters = chr(65 + remainder) + letters
+        if row < 1 or column < 1 or row > self.max_row or column > self.max_column:
+            return _XlrdCell(None, f"{letters}{row}")
         return _XlrdCell(self._sheet.cell_value(row - 1, column - 1), f"{letters}{row}")
 
     def __getitem__(self, coordinate: str) -> _XlrdCell:

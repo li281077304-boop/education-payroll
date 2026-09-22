@@ -226,7 +226,7 @@ def test_production_export_requires_the_company_template(tmp_path):
     path = _schedule(tmp_path / "排课.xlsx", [_lesson("张三", "2026-08-31")])
     service.import_file(run["id"], "schedule", str(path))
 
-    with pytest.raises(ValueError, match="未找到公司工资模板"):
+    with pytest.raises(ValueError, match="尚未设置公司工资模板"):
         service.generate_payroll(run["id"], "", production=True)
 
 

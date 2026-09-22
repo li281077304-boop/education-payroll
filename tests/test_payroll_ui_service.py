@@ -88,7 +88,8 @@ def test_run_level_af_policy_collapses_default_review_and_supports_exceptions(tm
     assert ten_result["rows"][0]["fields"]["AF"]["value"] < after["rows"][0]["fields"]["AF"]["value"]
 
     new_run = service.create("2026-08", mode="GENERATE")
-    assert new_run["af_policy_confirmation"] is None
+    assert new_run["af_policy_confirmation"]["default_obligation_hours"] == 30
+    assert new_run["af_policy_confirmation"]["exceptions"] == {}
 
 
 def test_base_salary_snapshot_is_run_scoped_and_calculates_m_without_zero_fallback(tmp_path):
@@ -107,10 +108,10 @@ def test_base_salary_snapshot_is_run_scoped_and_calculates_m_without_zero_fallba
     assert entry["m"]["value"] == 6300.0
     assert saved["base_salary_input_snapshot"]["sha256"]
 
-    # A fresh Run starts with no inherited base-salary confirmation.
+    # A fresh Run reuses the dated long-term profile and freezes a new snapshot.
     fresh = service.create("2026-08", mode="GENERATE")
-    assert fresh["base_salary_input_snapshot"] is None
-    assert fresh["base_salary_inputs"] == {}
+    assert fresh["base_salary_input_snapshot"]["version"] == "BASE_SALARY_INPUT_SNAPSHOT/v1"
+    assert fresh["base_salary_inputs"]["张三"]["m"]["value"] == 6300.0
 
 
 def test_real_package_template_is_bound_to_run(tmp_path):
@@ -369,6 +370,27 @@ def test_loopback_ui_bootstrap_and_create_run(tmp_path):
         server.shutdown(); server.server_close(); worker.join()
 
 
+def test_company_template_can_be_set_from_ui_and_survives_source_deletion(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    static = Path(__file__).parents[1] / "payroll_ui" / "static"
+    server = PayrollHttpServer(("127.0.0.1", 0), service, static)
+    worker = Thread(target=server.serve_forever, daemon=True); worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    template = _sanitized_template(tmp_path)
+    try:
+        token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+        registered = _post_json(base, token, "/api/company-template", {"path": str(template), "actor": "脱敏管理员"})
+        managed = Path(registered["managed_path"])
+        assert managed.is_file()
+        template.unlink()
+        run = _post_json(base, token, "/api/runs", {"period": "2026-09", "mode": "GENERATE"})
+        saved = service.store.get(run["id"])
+        assert saved["template_path"] == str(managed.resolve())
+        assert saved["template"]["source"] == "已登记公司工资模板"
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
+
+
 def test_http_generate_unexpected_error_is_json_and_server_survives(tmp_path, monkeypatch):
     service = PayrollService(tmp_path / "app-data")
     static = Path(__file__).parents[1] / "payroll_ui" / "static"
@@ -615,17 +637,20 @@ def test_registered_company_template_is_reused_by_second_run(tmp_path):
     template = _sanitized_template(tmp_path)
     registered = service.register_company_template(str(template), "脱敏管理员")
     assert registered["status"] == "ACTIVE"
+    managed_path = Path(registered["managed_path"])
+    template.unlink()
 
     first = service.create("2026-08", mode="GENERATE")
     schedule = _simple_schedule(tmp_path / "schedule.xlsx")
     service.import_material_file(first["id"], "schedule", str(schedule))
     first_saved = service.store.get(first["id"])
-    assert "template_path" not in first_saved
+    assert first_saved["template"]["source"] == "已登记公司工资模板"
 
     second = service.create("2026-09", mode="GENERATE")
     service.import_material_file(second["id"], "schedule", str(schedule))
     exported = service.generate_payroll(second["id"], str(tmp_path / "second.xlsx"), production=True)
     assert Path(exported["path"]).exists()
+    assert managed_path.exists()
     assert service.store.get(second["id"])["template"]["source"] == "已登记公司工资模板"
 
 

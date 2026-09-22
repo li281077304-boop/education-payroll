@@ -38,6 +38,8 @@ class RunStore:
             # grade facts by themselves.
             db.execute("CREATE TABLE IF NOT EXISTS course_export_snapshots (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS company_payroll_templates (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS teacher_base_salary_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS af_default_policies (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -230,6 +232,18 @@ class RunStore:
 
     def list_company_payroll_templates(self) -> list[dict]:
         return self._list_entities("company_payroll_templates")
+
+    def save_teacher_base_salary_profile(self, item: dict) -> None:
+        self._upsert("teacher_base_salary_profiles", item)
+
+    def list_teacher_base_salary_profiles(self) -> list[dict]:
+        return self._list_entities("teacher_base_salary_profiles")
+
+    def save_af_default_policy(self, item: dict) -> None:
+        self._upsert("af_default_policies", item)
+
+    def list_af_default_policies(self) -> list[dict]:
+        return self._list_entities("af_default_policies")
 
     def list_import_profiles(self, requirement: str = "") -> list[dict]:
         items = self._list_entities("import_profiles")

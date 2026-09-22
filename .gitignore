@@ -20,6 +20,7 @@ outputs/
 !tests/fixtures/
 !tests/fixtures/excel/
 !tests/fixtures/excel/*.xlsx
+!tests/fixtures/excel/*.xls
 
 # Local/runtime files
 .DS_Store

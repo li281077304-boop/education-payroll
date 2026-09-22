@@ -236,3 +236,13 @@ def test_duration_is_not_required_for_two_hour_default(tmp_path):
     # The class-value calculation itself carries the two-hour default.
     value, calculation = class_value_contribution(records[1])
     assert value is not None and calculation.endswith(f"× 2 = {value:g}")
+
+
+def test_real_binary_xls_schedule_and_semantic_mapping():
+    path = FIXTURES / "sanitized_schedule.xls"
+    analysis = analyze_mapping(path, SCHEDULE_AC_REQUIREMENT)
+    assert analysis.ready is True
+    assert analysis.mapping["teacher"] == 15
+    result = read_schedule_excel(path, "2026-08", period_start="2026-08-01", period_end="2026-08-31")
+    assert len(result.records) == 1
+    assert result.records[0].lesson_date == "2026-08-10"

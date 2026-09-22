@@ -7,6 +7,7 @@ import io
 import json
 import math
 import re
+import shutil
 import uuid
 from dataclasses import asdict, replace
 from datetime import date, datetime, timezone
@@ -493,10 +494,10 @@ class PayrollService(CoreFlow):
         }
 
     @staticmethod
-    def _read_csv(role: str, path: Path, period: str):
+    def _read_csv(role: str, path: Path, period: str, *, period_start: str | None = None, period_end: str | None = None):
         """Read the normalized CSV shapes accepted by the material flow."""
         try:
-            records = read_schedule_csv(path, period) if role == "schedule" else read_payroll_csv(path, period)
+            records = read_schedule_csv(path, period, period_start=period_start, period_end=period_end) if role == "schedule" else read_payroll_csv(path, period)
         except (KeyError, ValueError) as exc:
             raise ValueError(f"CSV 文件缺少必要列或数据格式不正确：{exc}") from exc
         from payroll_core.models.evidence import AdapterResult
@@ -609,7 +610,7 @@ class PayrollService(CoreFlow):
         for item in self.store.list_company_payroll_templates():
             if item.get("status") != "ACTIVE":
                 continue
-            path = Path(item.get("path", "")) if item.get("path") else None
+            path = Path(item.get("managed_path") or item.get("path", "")) if (item.get("managed_path") or item.get("path")) else None
             if not path or not path.is_file() or version(path)["sha256"] != item.get("sha256"):
                 continue
             run["template_path"] = str(path.resolve())
@@ -626,12 +627,18 @@ class PayrollService(CoreFlow):
             raise ValueError("该文件不符合公司工资模板结构，不能登记。")
         digest = version(source)
         now = datetime.now(timezone.utc).isoformat()
+        managed_dir = self.root / "company-templates"
+        managed_dir.mkdir(parents=True, exist_ok=True)
+        managed_path = managed_dir / f"{uuid.uuid4().hex[:16]}-{source.name}"
+        shutil.copy2(source, managed_path)
+        if version(managed_path)["sha256"] != digest["sha256"]:
+            raise ValueError("公司工资模板复制校验失败，请重试。")
         for item in self.store.list_company_payroll_templates():
             if item.get("status") == "ACTIVE":
                 item["status"] = "SUPERSEDED"
                 self.store.save_company_payroll_template(item)
         item = {"id": uuid.uuid4().hex[:16], "status": "ACTIVE", "name": source.name,
-                "path": str(source), "sha256": digest["sha256"], "size": digest["size"],
+                "path": str(source), "managed_path": str(managed_path), "sha256": digest["sha256"], "size": digest["size"],
                 "mtime_ns": digest["mtime_ns"], "registered_by": actor or "管理员",
                 "created_at": now, "source": "明确登记的公司工资模板"}
         self.store.save_company_payroll_template(item)
@@ -841,11 +848,41 @@ class PayrollService(CoreFlow):
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules.sort(key=lambda item: item["effective_from"], reverse=True)
         window = normalize_period_window(period, period_start, period_end, period_boundary_source)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": None, "base_salary_inputs": {}, "base_salary_input_snapshot": None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
+        persisted_salary = self._effective_base_salary_inputs(period)
+        persisted_af = self._effective_af_policy(period)
+        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": persisted_af, "base_salary_inputs": persisted_salary, "base_salary_input_snapshot": self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
         run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
+        self._bind_template_from_run_files(run)
         self.store.save(run)
         return self.render(run)
+
+    def _base_salary_snapshot(self, period: str, inputs: dict[str, dict]) -> dict:
+        snapshot = {"version": "BASE_SALARY_INPUT_SNAPSHOT/v1", "run_id": "AUTO_PROFILE", "period": period, "confirmed_by": "长期教师基本工资资料", "confirmed_at": datetime.now(timezone.utc).isoformat(), "source": "已确认的长期教师基本工资资料", "inputs": inputs}
+        snapshot["sha256"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return snapshot
+
+    def _effective_base_salary_inputs(self, period: str) -> dict[str, dict]:
+        grouped: dict[str, list[dict]] = {}
+        for item in self.store.list_teacher_base_salary_profiles():
+            if item.get("status", "ACTIVE") != "ACTIVE" or not item.get("effective_from", "") <= period <= item.get("effective_to", "9999-12"):
+                continue
+            grouped.setdefault(str(item.get("teacher", "")), []).append(item)
+        result: dict[str, dict] = {}
+        for teacher, profiles in grouped.items():
+            distinct = {json.dumps(p.get("entry", {}), ensure_ascii=False, sort_keys=True) for p in profiles}
+            if teacher and len(distinct) == 1:
+                result[teacher] = profiles[-1]["entry"]
+        return result
+
+    def _effective_af_policy(self, period: str) -> dict | None:
+        policies = [item for item in self.store.list_af_default_policies() if item.get("status", "ACTIVE") == "ACTIVE" and item.get("effective_from", "") <= period <= item.get("effective_to", "9999-12")]
+        if not policies:
+            return None
+        selected = copy.deepcopy(sorted(policies, key=lambda item: item.get("effective_from", ""), reverse=True)[0])
+        selected["exceptions"] = {}
+        selected["effective_to"] = selected.get("effective_to", "9999-12")
+        return selected
 
     def save_base_salary_inputs(self, run_id: str, inputs: list[dict], confirmed_by: str, source: str = "本次 Run 基本工资确认") -> dict:
         """Persist and freeze the source-backed G:L inputs used to calculate M."""
@@ -889,6 +926,18 @@ class PayrollService(CoreFlow):
             entry = {"teacher_id": str(item.get("teacher_id") or teacher), "display_name": teacher, "fields": fields, "source": source, "provenance": {"kind": "RUN_BASE_SALARY_INPUT", "confirmed_by": actor, "confirmed_at": now}}
             entry["m"] = base_salary_field(teacher, {teacher: entry})
             normalized[teacher] = entry
+            effective_from = str(item.get("effective_from") or run["period"])
+            effective_to = str(item.get("effective_to") or "9999-12")
+            for old in self.store.list_teacher_base_salary_profiles():
+                if old.get("status", "ACTIVE") == "ACTIVE" and old.get("teacher") == teacher:
+                    old["status"] = "SUPERSEDED"
+                    self.store.save_teacher_base_salary_profile(old)
+            self.store.save_teacher_base_salary_profile({
+                "id": uuid.uuid4().hex[:16], "teacher": teacher,
+                "effective_from": effective_from, "effective_to": effective_to,
+                "source": source, "confirmed_by": actor, "version": "TEACHER_BASE_SALARY/v1",
+                "status": "ACTIVE", "entry": entry, "created_at": now,
+            })
         snapshot = {"version": "BASE_SALARY_INPUT_SNAPSHOT/v1", "run_id": run_id, "period": run["period"], "confirmed_by": actor, "confirmed_at": now, "source": source, "inputs": normalized}
         snapshot["sha256"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         run["base_salary_inputs"] = normalized
@@ -941,6 +990,7 @@ class PayrollService(CoreFlow):
             "reason": str(reason or "普通全职教师按默认义务课时扣除；特殊人员按例外配置。"),
             "exceptions": cleaned,
         }
+        self.store.save_af_default_policy({**run["af_policy_confirmation"], "id": uuid.uuid4().hex[:16], "effective_to": "9999-12", "status": "ACTIVE", "version": "AF_DEFAULT_POLICY/v1"})
         invalidate_business_decisions(run.setdefault("business_decisions", []))
         self.store.save(run)
         return self.check(run_id) if self._materials_ready(run) else self.render(run)
@@ -1379,7 +1429,7 @@ class PayrollService(CoreFlow):
         if self._bind_template_from_run_files(run):
             self.store.save(run)
         if production and not run.get("template_path"):
-            raise ValueError("未找到公司工资模板，请补充资料包或学科组提交表中的工资模板后再生成正式工资表。")
+            raise ValueError("尚未设置公司工资模板，请先到基础资料中设置一次。")
         business_inputs = self._approved_business_inputs(run)
         if run.get("calculation_engine") == "CONFIGURED_V1":
             if confirmed_hours:
@@ -1822,7 +1872,7 @@ class PayrollService(CoreFlow):
                 raise ValueError(f"文件不属于“{LABELS[role]}”，请检查后重新选择。")
         try:
             if is_csv:
-                result = self._read_csv(role, source, run["period"])
+                result = self._read_for_run(role, source, run)
             elif role == "schedule" and mapping_capable:
                 profiles = self.store.list_import_profiles(SCHEDULE_AC_REQUIREMENT.name)
                 result, analysis = resolve_schedule_import(
@@ -1971,7 +2021,7 @@ class PayrollService(CoreFlow):
             if not path.is_file():
                 run.setdefault("stale_files", []).append(role)
                 continue
-            result = self._read(role, path, period)
+            result = self._read_for_run(role, path, run)
             if result.errors:
                 run.setdefault("stale_files", []).append(role)
                 continue
@@ -2854,7 +2904,7 @@ class PayrollService(CoreFlow):
         that needed field mapping keeps using it on every later read.
         """
         if path.suffix.lower() == ".csv":
-            return self._read_csv(role, path, period)
+            return self._read_csv(role, path, period, period_start=period_start, period_end=period_end)
         if role == "schedule":
             # This is deliberately a local authority file, never a repository
             # fixture.  Empty/missing means the adapter leaves such grades
