@@ -135,7 +135,7 @@ function statusBadge(run) {
 }
 
 function shell(content, historyButton = true) {
-  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="home()">工作台</button><button class="quiet" onclick="payrollSheetsPage()">工资表汇总</button></div></header>${content}</div>`;
+  $("#app").innerHTML = `<div class="shell"><header class="top"><div><div class="brand">工资核算助手</div><div class="muted small">文件只在本机读取，不修改原工资表</div></div><div><button class="quiet" onclick="home()">工作台</button></div></header>${content}</div>`;
 }
 
 async function home() {

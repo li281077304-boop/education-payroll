@@ -17,6 +17,7 @@ from openpyxl import Workbook
 from payroll_core.excel.output_paths import safe_output_path
 from payroll_core.period import coverage_for, default_period_for, dominant_month, month_from_filename
 from payroll_ui.service import PayrollService
+from tests.test_standard_payroll_output import _sanitized_template
 
 
 HEADERS = ["任课老师", "年级", "学科", "课程所属班型", "实到人数", "上课状态", "上课时间"]
@@ -227,6 +228,22 @@ def test_production_export_requires_the_company_template(tmp_path):
 
     with pytest.raises(ValueError, match="未找到公司工资模板"):
         service.generate_payroll(run["id"], "", production=True)
+
+
+def test_incomplete_period_blocks_production_export_but_not_preview(tmp_path):
+    service = PayrollService(tmp_path / "app")
+    run = service.create("2026-08", "GENERATE", period_start="2026-08-01", period_end="2026-08-31")
+    path = _schedule(tmp_path / "排课.xlsx", [_lesson("张三", "2026-08-01"), _lesson("张三", "2026-08-30")])
+    service.import_file(run["id"], "schedule", str(path))
+    saved = service.store.get(run["id"])
+    saved["template_path"] = str(_sanitized_template(tmp_path))
+    service.store.save(saved)
+
+    preview = service.preview_payroll(run["id"])
+    assert "PERIOD_COVERAGE_INCOMPLETE" in preview["generated_payroll"]["blockers"]
+    with pytest.raises(ValueError, match="排课周期不完整，请补齐后再生成最终工资表"):
+        service.generate_payroll(run["id"], str(tmp_path / "should-not-exist.xlsx"), production=True)
+    assert not (tmp_path / "should-not-exist.xlsx").exists()
 
 
 def test_default_export_location_is_reachable(tmp_path):

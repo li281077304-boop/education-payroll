@@ -9,13 +9,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from hashlib import sha256
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from openpyxl import load_workbook
-
 from ..excel.common import GRADE_TOKENS
+from ..excel.inspect import load_workbook_pair
 from .requirements import ImportRequirement
 
 
@@ -162,7 +160,7 @@ def analyze_mapping(
     try:
         # Read through BytesIO: real exports are often OOXML content inside a
         # .xls filename, which openpyxl refuses when handed a path.
-        workbook = load_workbook(BytesIO(source.read_bytes()), data_only=True, read_only=False, keep_links=True)
+        workbook, _cached_workbook = load_workbook_pair(source)
     except Exception as exc:  # noqa: BLE001 - surfaced to the user, never hidden
         return MappingAnalysis(status="UNREADABLE", message=f"无法读取文件：{source.name}（{type(exc).__name__}: {exc}）")
     try:
@@ -259,4 +257,5 @@ def analyze_mapping(
             profile_id=profile_id, profile_drift=drift, message=message,
         )
     finally:
-        workbook.close()
+        if hasattr(workbook, "close"):
+            workbook.close()

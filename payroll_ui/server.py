@@ -139,6 +139,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.policy_versions())
             if parsed.path == "/api/authorities":
                 return self._json(self.server.service.authority_catalog())
+            if parsed.path == "/api/company-template":
+                return self._json(self.server.service.store.list_company_payroll_templates())
             if parsed.path == "/api/class-type-rules":
                 return self._json(self.server.service.class_type_rule_versions())
             if parsed.path == "/api/core-rules":
@@ -220,6 +222,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.save_rating_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), str(payload.get("source_version", "")), payload.get("ratings", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
             if path == "/api/policies":
                 return self._json(self.server.service.save_policy_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), payload.get("profiles", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
+            if path == "/api/company-template":
+                return self._json(self.server.service.register_company_template(str(payload.get("path", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)
             if path == "/api/teacher-access":
                 return self._json(self.server.service.create_teacher_access(str(payload.get("teacher_id", "")), str(payload.get("display_name", ""))), HTTPStatus.CREATED)
             if path == "/api/payroll-submissions":

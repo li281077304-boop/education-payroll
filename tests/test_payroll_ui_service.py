@@ -12,9 +12,20 @@ from payroll_ui.service import PayrollService
 from payroll_ui.core_flow import CoreFlow
 from payroll_core.models.records import PayrollRecord
 from payroll_core.reconcile.payroll_scope import FieldCheck
+from tests.test_standard_payroll_output import _sanitized_template
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "excel"
+
+
+def _simple_schedule(path: Path) -> Path:
+    book = __import__("openpyxl").Workbook()
+    sheet = book.active
+    sheet.append(["任课老师", "年级", "学科", "课程所属班型", "实到人数", "上课状态"])
+    for _ in range(20):
+        sheet.append(["教师甲", "九年级", "数学", "1对1", 1, "已上课"])
+    book.save(path)
+    return path
 
 
 def test_generate_summary_does_not_count_determined_or_not_applicable_as_manual_review():
@@ -585,21 +596,37 @@ def test_user_facing_auto_material_import_classifies_schedule_and_subject_group(
     assert saved["files"]["math"]["name"] == payroll.name
 
 
-def test_subject_group_template_shape_is_bound_for_production_export(tmp_path, monkeypatch):
+def test_subject_group_does_not_become_company_template_implicitly(tmp_path, monkeypatch):
     service = PayrollService(tmp_path / "app-data")
     run = service.create("2026-08", mode="GENERATE")
     schedule = FIXTURES / "fake_schedule.xlsx"
     payroll = tmp_path / "math-template.xlsx"
     _payroll_with_only(payroll, 5)
     service.import_material_file(run["id"], "auto", str(schedule))
-    monkeypatch.setattr("payroll_ui.service.is_payroll_template", lambda _path: True)
-
     result = service.import_material_file(run["id"], "subject_group", str(payroll))
     saved = service.get(run["id"])
 
     assert result["material_kind"] == "subject_group"
-    assert saved["template_path"] == str(payroll.resolve())
-    assert saved["template"]["source"].startswith("学科组提交表中的工资模板结构")
+    assert "template_path" not in saved
+
+
+def test_registered_company_template_is_reused_by_second_run(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    template = _sanitized_template(tmp_path)
+    registered = service.register_company_template(str(template), "脱敏管理员")
+    assert registered["status"] == "ACTIVE"
+
+    first = service.create("2026-08", mode="GENERATE")
+    schedule = _simple_schedule(tmp_path / "schedule.xlsx")
+    service.import_material_file(first["id"], "schedule", str(schedule))
+    first_saved = service.store.get(first["id"])
+    assert "template_path" not in first_saved
+
+    second = service.create("2026-09", mode="GENERATE")
+    service.import_material_file(second["id"], "schedule", str(schedule))
+    exported = service.generate_payroll(second["id"], str(tmp_path / "second.xlsx"), production=True)
+    assert Path(exported["path"]).exists()
+    assert service.store.get(second["id"])["template"]["source"] == "已登记公司工资模板"
 
 
 def test_missing_base_salary_can_be_explicitly_deferred_without_zero_snapshot(tmp_path):

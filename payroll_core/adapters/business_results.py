@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openpyxl import load_workbook
+from ..excel.inspect import load_workbook_pair
 
 
 @dataclass(frozen=True)
@@ -71,10 +71,13 @@ def read_business_result(path: str | Path, *, period: str | None = None) -> list
                 evidence={"source_file": source.name, "sheet": "CSV", "row": str(index), "headers": list(row), "display_name": teacher},
             ))
         return output
-    if suffix not in {".xlsx", ".xlsm"}:
-        raise ValueError("目前只支持 CSV、.xlsx 或 .xlsm 的最终结果表。")
-    workbook = load_workbook(source, data_only=False, read_only=True, keep_links=True)
-    cached_workbook = load_workbook(source, data_only=True, read_only=True, keep_links=True)
+    if suffix not in {".xlsx", ".xlsm", ".xls"}:
+        raise ValueError("目前只支持 CSV、.xlsx、.xlsm 或 .xls 的最终结果表。")
+    workbook, cached_workbook = load_workbook_pair(source)
+
+    def rows_for(sheet):
+        return [[cell.value for cell in row] for row in sheet.iter_rows()]
+
     records: list[ImportedBusinessResult] = []
     sheets = list(workbook.worksheets)
     cached_sheets = {sheet.title: sheet for sheet in cached_workbook.worksheets}
@@ -85,10 +88,10 @@ def read_business_result(path: str | Path, *, period: str | None = None) -> list
         if selected:
             sheets = selected
     for sheet in sheets:
-        values = list(sheet.iter_rows(values_only=True))
+        values = rows_for(sheet)
         if not values:
             continue
-        cached_values = list(cached_sheets.get(sheet.title, sheet).iter_rows(values_only=True))
+        cached_values = rows_for(cached_sheets.get(sheet.title, sheet))
         headers = [str(value).strip() if value is not None else "" for value in values[0]]
         # The production renewal workbook uses grouped two-row headers.  Give
         # the three subtotal columns stable semantic names without changing
@@ -123,4 +126,7 @@ def read_business_result(path: str | Path, *, period: str | None = None) -> list
             records.append(ImportedBusinessResult(str(payload.get("teacher_id") or teacher), str(row_number), payload, {"source_file": source.name, "sheet": sheet.title, "row": str(row_number), "headers": headers, "display_name": teacher}))
     if not records:
         raise ValueError("结果表没有可识别的教师列或有效记录。")
+    for opened in (workbook, cached_workbook):
+        if hasattr(opened, "close"):
+            opened.close()
     return records

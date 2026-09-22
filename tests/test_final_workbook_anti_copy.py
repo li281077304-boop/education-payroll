@@ -44,6 +44,23 @@ def test_empty_template_has_no_historical_data_or_formula_cache(tmp_path):
     assert values["AK5"].value is None
 
 
+def test_unresolved_m_or_renewal_components_do_not_restore_derived_formulas(tmp_path):
+    payroll = _generated()
+    row = payroll.rows[0]
+    fields = {key: dict(value) for key, value in row.final_fields.items()}
+    fields["M"] = {**fields.get("M", {}), "state": "HUMAN_REQUIRED", "value": None}
+    fields["AV"] = {**fields.get("AV", {}), "state": "HUMAN_REQUIRED", "value": None}
+    fields["AK"] = {**fields.get("AK", {}), "state": "HUMAN_REQUIRED", "value": None}
+    blocked = replace(payroll, rows=(replace(row, final_fields=fields),))
+    output = tmp_path / "blocked-derived-fields.xlsx"
+    render_generated_payroll(blocked, output, template_path=_sanitized_template(tmp_path))
+
+    sheet = load_workbook(output, data_only=False).active
+    assert sheet["M5"].value is None
+    assert sheet["AV5"].value is None
+    assert sheet["AK5"].value is None
+
+
 def test_mutated_current_source_changes_final_workbook(tmp_path):
     first_inputs = _business_inputs(complete=True)
     first = _generated(business_inputs=first_inputs)

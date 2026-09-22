@@ -3,18 +3,21 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
+from openpyxl import load_workbook
 from payroll_ui.service import AV_SOURCE_DEFINITIONS, PayrollService, _template_av_evidence
+from tests.test_standard_payroll_output import _sanitized_template
 
 
-TEMPLATE = Path("/Users/macos/Desktop/payroll_read_test/薪资表模板.xlsx")
-
-
-def test_template_av_evidence_reads_real_formula_without_mutation():
-    if not TEMPLATE.is_file():
-        pytest.skip("real UAT template is not available")
-    evidence = _template_av_evidence(TEMPLATE)
+def test_template_av_evidence_reads_sanitized_formula_without_mutation(tmp_path):
+    template = _sanitized_template(tmp_path)
+    book = load_workbook(template)
+    sheet = book.active
+    sheet["M5"] = "=(G5+H5+I5+J5)/K5*L5"
+    sheet["AF5"] = "=(AD5-30)*AE5"
+    sheet["AK5"] = "=AH5*1+AI5*1.5+AJ5*0.75"
+    sheet["AV5"] = "=M5+AF5+AG5+AK5+AL5+AN5+AO5+AP5+AQ5+AR5+AS5+AT5+AU5+AM5"
+    book.save(template)
+    evidence = _template_av_evidence(template)
     assert evidence["exists"] is True
     assert evidence["formula"].startswith("=M5+AF5+AG5+AK5")
     assert evidence["field_formulas"]["M"] == "=(G5+H5+I5+J5)/K5*L5"

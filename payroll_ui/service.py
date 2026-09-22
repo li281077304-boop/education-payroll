@@ -574,19 +574,6 @@ class PayrollService(CoreFlow):
         if kind == "subject_group":
             role = self._infer_subject_group_role(source, run)
             rendered = self.import_file(run_id, role, str(source))
-            # In the normal four-material flow there is no separate baseline
-            # upload.  A submitted .xlsx that satisfies the final workbook
-            # contract may provide layout only; the renderer clears its data
-            # area and writes the current Run, so no prior payroll value is
-            # copied into the generated workbook.
-            if not rendered.get("template_path") and is_payroll_template(source):
-                rendered["template_path"] = str(source)
-                rendered["template"] = {
-                    "name": source.name,
-                    "path": str(source),
-                    "source": "学科组提交表中的工资模板结构（仅保留版式）",
-                }
-                self.store.save(rendered)
             rendered["material_kind"] = "subject_group"
             rendered["recognized_role"] = role
             return {"run": rendered, "material_kind": "subject_group", "recognized_role": role}
@@ -615,30 +602,40 @@ class PayrollService(CoreFlow):
         self.store.save(run)
         return {"run": self.render(run), "material_kind": kind, "recognized_role": kind, "records": len(reports)}
 
-    @staticmethod
-    def _bind_template_from_run_files(run: dict) -> bool:
-        """Bind a structure-only template for older Runs at export time.
-
-        Existing Runs may have been imported before the material-flow fix and
-        therefore have no ``template_path``.  Re-inspect the already-bound
-        subject-group files instead of requiring a new Run or re-import.  The
-        production renderer still clears the workbook data area before writing
-        current Core values.
-        """
+    def _bind_template_from_run_files(self, run: dict) -> bool:
+        """Bind an explicit package or persistent company template only."""
         if run.get("template_path") and Path(run["template_path"]).is_file():
             return True
-        for role in ("math", "science"):
-            item = run.get("files", {}).get(role) or {}
+        for item in self.store.list_company_payroll_templates():
+            if item.get("status") != "ACTIVE":
+                continue
             path = Path(item.get("path", "")) if item.get("path") else None
-            if path and path.is_file() and is_payroll_template(path):
-                run["template_path"] = str(path.resolve())
-                run["template"] = {
-                    "name": path.name,
-                    "path": str(path.resolve()),
-                    "source": "既有学科组提交表中的工资模板结构（仅保留版式）",
-                }
-                return True
+            if not path or not path.is_file() or version(path)["sha256"] != item.get("sha256"):
+                continue
+            run["template_path"] = str(path.resolve())
+            run["template"] = {"name": path.name, "path": str(path.resolve()), "source": "已登记公司工资模板", "template_id": item.get("id")}
+            return True
         return False
+
+    def register_company_template(self, path: str, actor: str = "") -> dict:
+        """Explicitly register a reusable company payroll template."""
+        source = Path(path).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError("找不到公司工资模板。")
+        if not is_payroll_template(source):
+            raise ValueError("该文件不符合公司工资模板结构，不能登记。")
+        digest = version(source)
+        now = datetime.now(timezone.utc).isoformat()
+        for item in self.store.list_company_payroll_templates():
+            if item.get("status") == "ACTIVE":
+                item["status"] = "SUPERSEDED"
+                self.store.save_company_payroll_template(item)
+        item = {"id": uuid.uuid4().hex[:16], "status": "ACTIVE", "name": source.name,
+                "path": str(source), "sha256": digest["sha256"], "size": digest["size"],
+                "mtime_ns": digest["mtime_ns"], "registered_by": actor or "管理员",
+                "created_at": now, "source": "明确登记的公司工资模板"}
+        self.store.save_company_payroll_template(item)
+        return item
 
     def import_business_results(self, input_type: str, period: str, path: str, submitted_by: str, activation_scope: str = "SUPPLEMENT", replace_input_ids: list[str] | None = None) -> list[dict]:
         return self.inputs.import_results(input_type, period, path, submitted_by, activation_scope=activation_scope, replace_input_ids=replace_input_ids)
@@ -1390,6 +1387,7 @@ class PayrollService(CoreFlow):
             checked = self.check(run_id)
             payroll = self._generated_from_checked(checked)
             payroll = self._apply_generation_guardrails(payroll, self.store.get(run_id))
+            self._ensure_production_export_allowed(payroll, production)
             path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"), manual_adjustments=business_inputs)
             run = self.store.get(run_id)
             run["generated_payroll"] = {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rule_versions": dict(payroll.rule_versions), "created_at": datetime.now(timezone.utc).isoformat(), "rows": [asdict(row) for row in payroll.rows]}
@@ -1418,6 +1416,7 @@ class PayrollService(CoreFlow):
             renewal_snapshot=run.get("run_renewal_result_snapshot"),
         )
         payroll = self._apply_generation_guardrails(payroll, run)
+        self._ensure_production_export_allowed(payroll, production)
         path = render_generated_payroll(payroll, safe_output_path(output_path), template_path=run.get("template_path"), manual_adjustments=business_inputs)
         run["generated_payroll"] = {
             "path": path, "status": payroll.status, "blockers": list(payroll.blockers),
@@ -1426,6 +1425,15 @@ class PayrollService(CoreFlow):
         }
         self.store.save(run)
         return {"path": path, "status": payroll.status, "blockers": list(payroll.blockers), "rows": [asdict(row) for row in payroll.rows], "rule_versions": dict(payroll.rule_versions)}
+
+    @staticmethod
+    def _ensure_production_export_allowed(payroll, production: bool) -> None:
+        if not production:
+            return
+        if "PERIOD_COVERAGE_INCOMPLETE" in payroll.blockers:
+            raise ValueError("排课周期不完整，请补齐后再生成最终工资表。")
+        if "PERIOD_MATERIAL_CONFLICT" in payroll.blockers or "PERIOD_NEEDS_CONFIRMATION" in payroll.blockers:
+            raise ValueError("材料所属月份尚未确认，确认后再生成最终工资表。")
 
     def _approved_business_inputs(self, run: dict) -> tuple[dict, ...]:
         """Return only current, explicitly bound inputs eligible for output."""
@@ -2256,6 +2264,8 @@ class PayrollService(CoreFlow):
             for field in ("ae", "af")
             if field in item.provenance
         }
+        if Path(path).suffix.lower() == ".csv":
+            return []
         return [item for item in audit_payroll_formulas(path) if (item.sheet, item.cell) in cells]
 
     @staticmethod
@@ -2843,6 +2853,8 @@ class PayrollService(CoreFlow):
         The check phase must see the same rows the import produced, so a layout
         that needed field mapping keeps using it on every later read.
         """
+        if path.suffix.lower() == ".csv":
+            return self._read_csv(role, path, period)
         if role == "schedule":
             # This is deliberately a local authority file, never a repository
             # fixture.  Empty/missing means the adapter leaves such grades

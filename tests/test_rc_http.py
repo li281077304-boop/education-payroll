@@ -98,5 +98,5 @@ def test_material_ui_uses_previous_month_and_plain_start_action():
     source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text(encoding="utf-8")
     assert "function defaultPayrollPeriod" in source
     assert "开始核算并查看预览" in source
-    assert "工资表汇总" in source
+    assert "工资表汇总" not in source
     assert "核算日" not in source

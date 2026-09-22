@@ -318,8 +318,16 @@ def _render_with_template(
             _formula_for_row(row, "M", row_number)
             if m_field.get("state") == "DETERMINED" else None
         )
-        sheet.cell(row_number, columns["av"]).value = _formula_for_row(row, "AV", row_number)
-        sheet.cell(row_number, 37).value = _formula_for_row(row, "AK", row_number)
+        av_field = row.final_fields.get("AV", {}) if isinstance(getattr(row, "final_fields", None), Mapping) else {}
+        ak_field = row.final_fields.get("AK", {}) if isinstance(getattr(row, "final_fields", None), Mapping) else {}
+        sheet.cell(row_number, columns["av"]).value = (
+            _formula_for_row(row, "AV", row_number)
+            if av_field.get("state") == "DETERMINED" else None
+        )
+        sheet.cell(row_number, 37).value = (
+            _formula_for_row(row, "AK", row_number)
+            if ak_field.get("state") == "DETERMINED" else None
+        )
         for index, code in enumerate(FINAL_FIELD_CODES):
             if code in {"AK", "AV"}:
                 continue
@@ -372,7 +380,8 @@ def validate_template_payroll_workbook(path: str | Path, payroll: GeneratedPayro
             code = {"aa": "AA", "ad": "AD", "af": "AF", "av": "AV"}.get(name)
             actual = sheet.cell(offset, mapped[name]).value
             if code:
-                expected_formula = golden_formula_for_row(expected, code, offset)
+                state = (expected.final_fields.get(code, {}) if isinstance(getattr(expected, "final_fields", None), Mapping) else {}).get("state")
+                expected_formula = golden_formula_for_row(expected, code, offset) if code != "AV" or state == "DETERMINED" else None
                 if actual != expected_formula:
                     errors.append(f"{expected.teacher} 的模板 {name} 公式不一致")
                 continue

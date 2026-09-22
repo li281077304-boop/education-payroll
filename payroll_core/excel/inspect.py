@@ -73,8 +73,9 @@ def load_workbook_pair(path: str | Path):
 
 
 class _XlrdCell:
-    def __init__(self, value):
+    def __init__(self, value, coordinate: str = ""):
         self.value = value
+        self.coordinate = coordinate
         self.comment = None
 
 
@@ -92,7 +93,12 @@ class _XlrdSheet:
         self.data_validations = type("Validations", (), {"dataValidation": ()})()
 
     def cell(self, row: int, column: int) -> _XlrdCell:
-        return _XlrdCell(self._sheet.cell_value(row - 1, column - 1))
+        number = column
+        letters = ""
+        while number:
+            number, remainder = divmod(number - 1, 26)
+            letters = chr(65 + remainder) + letters
+        return _XlrdCell(self._sheet.cell_value(row - 1, column - 1), f"{letters}{row}")
 
     def __getitem__(self, coordinate: str) -> _XlrdCell:
         """Provide the small coordinate lookup used by the inspector.
@@ -112,7 +118,7 @@ class _XlrdSheet:
 
     def iter_rows(self):
         for row in range(self.max_row):
-            yield tuple(_XlrdCell(self._sheet.cell_value(row, column)) for column in range(self.max_column))
+            yield tuple(self.cell(row + 1, column + 1) for column in range(self.max_column))
 
 
 class _XlrdWorkbook:

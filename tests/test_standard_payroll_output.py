@@ -209,8 +209,8 @@ def test_template_output_keeps_auditable_excel_formulas(tmp_path: Path):
     assert sheet["AA5"].value.startswith("=(N5+O5+P5+Q5+R5+S5)")
     assert sheet["AD5"].value == "=AA5+AC5"
     assert sheet["AF5"].value.startswith("=MAX(0,(AD5-")
-    assert sheet["AK5"].value == "=AH5*1+AI5*1.5+AJ5*0.75"
-    assert sheet["AV5"].value.startswith("=M5+AF5+AG5+AK5")
+    assert sheet["AK5"].value is None
+    assert sheet["AV5"].value is None
 
 
 def test_template_output_writes_base_salary_inputs_and_m_formula(tmp_path: Path):
