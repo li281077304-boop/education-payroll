@@ -627,10 +627,13 @@ function formatNumber(value) { return value == null ? "—" : Number(value).toFi
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
+  const periodNeedsChoice = periodNeedsDecision();
+  const blockedLabel = current.period_check?.conflict ? "请先确认材料月份" : "请先确认工资月份";
   const generateAction = current.generated_payroll
     ? `<button onclick="setTab('payroll')">查看工资预览</button>`
-    : `<button ${current.health.ready ? "" : "disabled"} onclick="preparePayrollPreview()">开始核算并查看预览</button>`;
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入原始排课数据；学科组提交表、续费表、退费表有则补充。材料可拖入、直接粘贴，选择按钮仅作为备用入口。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包（可选）</strong><span>可一次拖入多份材料，系统自动归类；也可以按下方四类分别补充。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : `<button ${current.health.ready ? "" : "disabled"} onclick="recheck()">开始核对</button>`}</div></div></section>${gradeSupportSection(current.grade_help)}`;
+    : `<button ${current.health.ready && !periodNeedsChoice ? "" : "disabled"} onclick="preparePayrollPreview()">${periodNeedsChoice ? blockedLabel : "开始核算并查看预览"}</button>`;
+  const auditAction = `<button ${current.health.ready && !periodNeedsChoice ? "" : "disabled"} onclick="recheck()">${periodNeedsChoice ? blockedLabel : "开始核对"}</button>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入原始排课数据；学科组提交表、续费表、退费表有则补充。材料可拖入、直接粘贴，选择按钮仅作为备用入口。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包（可选）</strong><span>可一次拖入多份材料，系统自动归类；也可以按下方四类分别补充。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : auditAction}</div></div></section>${gradeSupportSection(current.grade_help)}`;
 }
 
 function productionMaterialCards() {
@@ -681,9 +684,15 @@ function periodMismatchCard() {
     const choices = months.map((month) => `<button onclick="switchPeriodTo('${escapeHtml(month)}')">按 ${escapeHtml(month)} 继续</button>`).join("");
     return `<section class="card warning-card"><h2>材料月份不一致</h2><p class="muted">系统检测到不同材料对应不同工资月份，不能自动替你选择。${details}</p><p class="small warn">请选择本次实际工资月份；系统不会替你猜测。</p><div class="action-bar">${choices}</div></section>`;
   }
-  if (!check.mismatch || check.decision) return "";
+  // PENDING means the user still needs to choose.  Only an explicit choice
+  // may dismiss this card.
+  if (!check.mismatch || ["SWITCHED", "KEPT"].includes(check.decision)) return "";
   const source = check.source_month || "未知月份";
   return `<section class="card"><h2>课表月份需要确认</h2><p class="muted">检测到课表主要属于 ${escapeHtml(source)}，当前核算月份为 ${escapeHtml(check.run_month)}。</p><div class="action-bar"><button onclick="resolvePeriod('SWITCH')">切换到 ${escapeHtml(source)}</button><button class="secondary" onclick="resolvePeriod('KEEP')">仍按 ${escapeHtml(check.run_month)}</button></div></section>`;
+}
+
+function periodNeedsDecision(check = current?.period_check) {
+  return Boolean(check && (check.conflict || (check.mismatch && !["SWITCHED", "KEPT"].includes(check.decision))));
 }
 
 function coverageWarningCard() {
@@ -809,11 +818,19 @@ function fieldRow(field) {
   return `<tr><td><strong>${escapeHtml(field.label)}</strong></td><td>${mark(field.read)}</td><td>${mark(field.authority)}</td><td>${mark(field.computed)}</td><td>${mark(field.compared)}</td><td><span class="field-state">${escapeHtml(field.state)}</span><div class="small muted">${escapeHtml(field.note)}</div></td></tr>`;
 }
 
-function issuesPage() {
+function issueResultState() {
   const groups = current.issue_groups || [];
-  const rows = groups.filter((group) => !filters.teacher || String(group.teacher || "").includes(filters.teacher.trim()));
-  const actions = (current.user_actions || []).filter((action) => !filters.teacher || (action.teachers || []).some((teacher) => String(teacher).includes(filters.teacher.trim())));
-  const fieldCount = current.issues?.length || groups.reduce((total, group) => total + (group.count || group.field_records?.length || 0), 0);
+  const teacher = filters.teacher.trim();
+  return {
+    groups,
+    rows: groups.filter((group) => !teacher || String(group.teacher || "").includes(teacher)),
+    actions: (current.user_actions || []).filter((action) => !teacher || (action.teachers || []).some((name) => String(name).includes(teacher))),
+    fieldCount: current.issues?.length || groups.reduce((total, group) => total + (group.count || group.field_records?.length || 0), 0),
+  };
+}
+
+function issueResultsMarkup() {
+  const { groups, rows, actions, fieldCount } = issueResultState();
   const issueTable = (items) => items.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>问题</th><th>教师</th><th>影响字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>${items.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>';
   const groupsById = new Map(rows.map((group) => [group.id, group]));
   const actionBlocks = actions.map((action) => {
@@ -822,19 +839,33 @@ function issuesPage() {
   }).join("");
   const actionSummary = actions.length
     ? `<div class="action-summary"><strong>需要完成 ${actions.length} 个核查动作</strong><span class="muted">先处理以下业务动作；教师级问题只在展开动作后显示。</span><div class="action-list">${actionBlocks}</div></div>`
-    : '<div class="empty success">当前没有需要人工处理的核算异常。</div>';
+    : (filters.teacher.trim() ? '<div class="empty">没有符合筛选条件的教师或待处理问题。</div>' : '<div class="empty success">当前没有需要人工处理的核算异常。</div>');
   const auditDetails = rows.length ? `<details class="audit-details"><summary>查看审计明细（${rows.length} 个业务问题，${fieldCount} 条字段记录）</summary><p class="small muted">审计明细仅用于追溯，不代表需要逐条人工处理。</p>${issueTable(rows)}</details>` : "";
-  const afAction = actions.find((action) => action.cause === "compensation_fee_policy");
+  return `${actionSummary}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 条）</div>${auditDetails}`;
+}
+
+function afPolicyBlock() {
+  if (current.mode !== "GENERATE") return "";
   const afTeachers = [...new Set((current.core_calculation?.rows || []).map((row) => row.teacher).filter(Boolean))];
   const afExceptions = current.af_policy_confirmation?.exceptions || {};
   const exceptionRows = afTeachers.map((teacher) => { const item = afExceptions[teacher] || {}; return `<tr><td>${escapeHtml(teacher)}</td><td><input class="af-exception-enabled" data-teacher="${escapeHtml(teacher)}" type="checkbox" ${Object.keys(item).length ? "checked" : ""}></td><td><input class="af-exception-hours" data-teacher="${escapeHtml(teacher)}" type="number" min="0" step="0.01" value="${escapeHtml(item.obligation_hours ?? 30)}"></td><td><label class="inline-check"><input class="af-exception-deduct" data-teacher="${escapeHtml(teacher)}" type="checkbox" ${item.deduction_enabled !== false ? "checked" : ""}>扣除</label></td><td><input class="af-exception-reason" data-teacher="${escapeHtml(teacher)}" value="${escapeHtml(item.reason || "")}" placeholder="填写原因"></td></tr>`; }).join("");
-  const afPolicyBlock = current.mode === "GENERATE" && !current.af_policy_confirmation
-    ? `<section class="action-first af-policy-confirmation"><h3>本月义务课时政策</h3><p class="muted">默认规则：适用教师全部按 30 小时扣除。没有特殊情况时只确认一次，不需要逐人填写。</p><label>确认人<input id="af-policy-confirmed-by" placeholder="填写姓名"></label><div class="action-bar"><button onclick="confirmAfPolicy()">确认默认：全部按30小时扣除</button><button class="secondary" onclick="document.querySelector('#af-policy-exceptions').open=true">有特殊情况 / 设置例外</button></div><details id="af-policy-exceptions"><summary>设置个别教师例外</summary><p class="small muted">只有特殊人员才勾选；未勾选的教师仍使用默认 30 小时。</p><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>设置例外</th><th>义务课时</th><th>是否扣除</th><th>原因/备注</th></tr></thead><tbody>${exceptionRows || '<tr><td colspan="5" class="muted">核算后才会显示教师名单。</td></tr>'}</tbody></table></div><button onclick="confirmAfPolicy()">保存默认规则和例外</button></details></section>`
-    : "";
+  const confirmation = current.af_policy_confirmation;
+  const confirmed = Boolean(confirmation);
+  const confirmationNote = confirmed
+    ? `本月已按默认 30 小时扣除。${confirmation.confirmed_by ? `上次确认人：${escapeHtml(confirmation.confirmed_by)}。` : ""}如有个别教师特殊情况，可在本月单独设置例外。`
+    : "默认规则：适用教师全部按 30 小时扣除。没有特殊情况时只确认一次，不需要逐人填写。";
+  const primaryAction = confirmed
+    ? '<button class="secondary" onclick="openAfPolicyExceptions()">查看/修改本月例外</button>'
+    : '<button onclick="confirmAfPolicy()">确认默认：全部按30小时扣除</button><button class="secondary" onclick="openAfPolicyExceptions()">有特殊情况 / 设置例外</button>';
+  const saveLabel = confirmed ? "保存本月例外" : "保存默认规则和例外";
+  return `<section class="action-first af-policy-confirmation"><h3>本月义务课时政策</h3><p class="muted">${confirmationNote}</p><div class="action-bar">${primaryAction}</div><details id="af-policy-exceptions"><summary>${confirmed ? "查看或修改个别教师例外" : "设置个别教师例外"}</summary><p class="small muted">只有特殊人员才勾选；未勾选的教师仍使用默认 30 小时。</p><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>设置例外</th><th>义务课时</th><th>是否扣除</th><th>原因/备注</th></tr></thead><tbody>${exceptionRows || '<tr><td colspan="5" class="muted">核算后才会显示教师名单。</td></tr>'}</tbody></table></div><label>本次确认人<input id="af-policy-confirmed-by" value="${escapeHtml(confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button onclick="confirmAfPolicy()">${saveLabel}</button></div></details></section>`;
+}
+
+function issuesPage() {
   const baseSalaryBlock = current.mode === "GENERATE" && !current.base_salary_input_snapshot && !current.base_salary_deferred
     ? `<section class="action-first base-salary-action"><h3>基本工资还没有录入</h3><p class="muted">可以先完成排课核算；系统不会把缺失的基本工资当成 0，M 和总工资会明确标记“待补充”。</p><div class="action-bar"><button onclick="setTab('base-salary')">现在录入基本工资</button><button class="secondary" onclick="showMessage('可以稍后回到这里补录，当前不会按 0 计算。', 'success')">稍后补充</button><button class="secondary" onclick="deferBaseSalaryQuick()">暂不录入，先生成工资表</button></div></section>`
     : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters()"></label></div>${baseSalaryBlock}${actionSummary}${afPolicyBlock}<div class="result-count">后台记录 ${rows.length} 个业务问题（字段核查记录 ${fieldCount} 条）</div>${auditDetails}<div id="issue-detail"></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters(event)" oncompositionend="updateFilters(event)"></label></div>${baseSalaryBlock}<div id="issues-content">${issueResultsMarkup()}</div>${afPolicyBlock()}<div id="issue-detail"></div></section>`;
 }
 
 function issueRow(group) {
@@ -842,11 +873,18 @@ function issueRow(group) {
   return `<tr><td><span class="${severity}">${escapeHtml(group.severity_label)}</span></td><td>${escapeHtml(group.title)}<div class="small muted">${escapeHtml(group.decision_label || "待处理")}</div></td><td>${escapeHtml(group.teacher)}</td><td>${escapeHtml((group.fields || []).join("、"))}</td><td>${escapeHtml(group.expected ?? "—")}</td><td>${escapeHtml(group.actual ?? "—")}</td><td>${escapeHtml(group.difference ?? "—")}</td><td><button class="quiet" aria-label="查看 ${escapeHtml(group.teacher)}：${escapeHtml(group.title)} 的明细" onclick="evidence('${group.id}')">查看明细</button></td></tr>`;
 }
 
-function updateFilters() {
+function updateFilters(event = null) {
+  if (event?.isComposing) return;
   filters.teacher = $("#filter-teacher")?.value || "";
-  const scroll = window.scrollY;
-  renderTab();
-  window.scrollTo(0, scroll);
+  const content = $("#issues-content");
+  if (content) content.innerHTML = issueResultsMarkup();
+}
+
+function openAfPolicyExceptions() {
+  const details = $("#af-policy-exceptions");
+  if (!details) return;
+  details.open = true;
+  details.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
 }
 
 async function confirmAfPolicy() {
@@ -1009,6 +1047,12 @@ async function refreshRun() {
 }
 
 async function recheck() {
+  if (periodNeedsDecision()) {
+    tab = "materials";
+    renderRun();
+    showMessage("请先确认材料对应的工资月份，再开始核对。");
+    return;
+  }
   const release = markBusy("正在核对…");
   try { current = await api(`/api/runs/${current.id}/check`, { method: "POST", body: "{}" }); tab = (current.issue_groups || []).length ? "issues" : (current.mode === "GENERATE" ? "payroll" : "overview"); renderRun(); showMessage("已重新核对全部材料。", "success"); }
   catch (error) { await refreshAfterError(error); }
@@ -1025,6 +1069,12 @@ function markBusy(label) {
 }
 
 async function preparePayrollPreview() {
+  if (periodNeedsDecision()) {
+    tab = "materials";
+    renderRun();
+    showMessage("请先确认材料对应的工资月份，再开始核算。");
+    return;
+  }
   const release = markBusy("正在自动核算…");
   try {
     current = await api(`/api/runs/${current.id}/preview`, { method: "POST", body: "{}" });
