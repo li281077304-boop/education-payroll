@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import date, timedelta
 import pytest
 
 from payroll_ui.service import PayrollService
@@ -69,6 +70,37 @@ def test_csv_schedule_filters_each_salary_month_without_relabeling_dates(tmp_pat
     assert checked["core_calculation"]["rows"]
     records = service._read_for_run("schedule", schedule, service.store.get(run["id"])).records
     assert [record.lesson_date for record in records] == ["2026-09-01"]
+
+
+def test_mixed_month_csv_coverage_uses_only_in_period_records(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    dates = [date(2026, 8, 1) + timedelta(days=index) for index in range(30)]
+    rows = [["教师甲", "九年级", "数学", "1对1", 1, "已上课", item.isoformat() + " 10:00"] for item in dates]
+    rows.append(["教师甲", "九年级", "数学", "1对1", 1, "已上课", "2026-09-01 10:00"])
+    schedule = _write_csv(
+        tmp_path / "august-with-september-row.csv",
+        ["teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"],
+        rows,
+    )
+
+    august = service.import_file(run["id"], "schedule", str(schedule))
+    check = august["period_check"]
+    assert august["files"]["schedule"]["records"] == 30
+    assert check["source_months"] == ["2026-08", "2026-09"]
+    assert check["coverage"]["first_date"] == "2026-08-01"
+    assert check["coverage"]["last_date"] == "2026-08-30"
+    assert check["coverage"]["incomplete_tail"] is True
+
+    september = service.change_period(run["id"], "2026-09")
+    check = september["period_check"]
+    assert september["files"]["schedule"]["records"] == 1
+    assert check["source_months"] == ["2026-08", "2026-09"]
+    assert check["source_month"] == "2026-09"
+    assert check["mismatch"] is False
+    assert check["conflict"] is False
+    assert check["coverage"]["first_date"] == "2026-09-01"
+    assert check["coverage"]["last_date"] == "2026-09-01"
 
 
 def test_august_csv_on_september_run_retains_source_month_and_can_switch(tmp_path):

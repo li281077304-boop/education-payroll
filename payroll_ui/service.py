@@ -1963,8 +1963,13 @@ class PayrollService(CoreFlow):
         return self.render(run)
 
     def _period_evidence(self, run: dict, records, file_name: str, source_path: Path | None = None, *, evidence_dates=()) -> dict:
-        dates = list(evidence_dates) or [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in records]
-        if not dates and source_path is not None:
+        # Keep source-month evidence separate from the dates that actually
+        # survived the current Run's period filter.  A mixed-month source can
+        # identify the file without allowing an out-of-period row to make the
+        # selected month's coverage look complete.
+        raw_source_dates = list(evidence_dates)
+        in_period_dates = [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in records]
+        if not raw_source_dates and source_path is not None:
             # A source whose rows were filtered out for the selected month
             # still needs month evidence so the UI can offer a safe switch.
             analysis = analyze_mapping(source_path, SCHEDULE_AC_REQUIREMENT)
@@ -1974,20 +1979,34 @@ class PayrollService(CoreFlow):
                     requirement=SCHEDULE_AC_REQUIREMENT,
                     sheet_name=analysis.sheet, header_row=analysis.header_row,
                 )
-                dates = [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in all_rows.records]
-        source_month = dominant_month(dates) or dominant_month([getattr(record, "period", "") for record in records])
+                raw_source_dates = [getattr(record, "lesson_date", "") or getattr(record, "lesson_time", "") for record in all_rows.records]
+        if not raw_source_dates:
+            raw_source_dates = list(in_period_dates)
+        raw_months = sorted({month for month in (dominant_month([item]) for item in raw_source_dates) if month})
+        if len(raw_months) == 1:
+            source_month = raw_months[0]
+        elif run["period"] in raw_months:
+            # A mixed source is usable for an explicitly selected month when
+            # that month has effective rows.  Keep all months visible as
+            # evidence, but do not force a switch to the dominant month.
+            source_month = run["period"]
+        else:
+            source_month = None
         file_month, file_has_year = month_from_filename(file_name)
         start, end = self._period_window(run)
-        coverage = coverage_for(run["period"], dates, period_start=start, period_end=end)
+        coverage = coverage_for(run["period"], in_period_dates, period_start=start, period_end=end)
         mismatch = bool(source_month and source_month != run["period"])
         filename_disagrees = bool(file_month and source_month and (file_month != source_month if file_has_year else file_month != source_month[5:7]))
+        source_conflict = len(raw_months) > 1 and run["period"] not in raw_months
         return {"run_month": run["period"], "period_start": start, "period_end": end,
                 "period_boundary_source": run.get("period_boundary_source", "LEGACY_CALENDAR_DEFAULT"),
                 "source_month": source_month, "mismatch": mismatch,
+                "source_months": raw_months, "source_conflict": source_conflict,
                 "source_file": file_name,
                 "file_name_month": file_month, "file_name_has_year": file_has_year,
                 "filename_disagrees": filename_disagrees, "coverage": coverage.as_dict(),
-                "final_generation_blocked": bool(coverage.incomplete_tail),
+                "final_generation_blocked": bool(coverage.incomplete_tail) or source_conflict,
+                "conflict": source_conflict,
                 "decision": "" if not mismatch else "PENDING"}
 
     @staticmethod
@@ -2055,10 +2074,20 @@ class PayrollService(CoreFlow):
             item["records"] = len(result.records)
             item["teachers"] = len({record.teacher for record in result.records if hasattr(record, "teacher")})
             if role == "schedule":
-                run["period_check"] = self._period_evidence(
+                period_evidence = self._period_evidence(
                     run, result.records, path.name, path,
                     evidence_dates=result.coverage.get("all_lesson_dates", ()) if path.suffix.lower() == ".csv" else (),
                 )
+                run["period_check"] = period_evidence
+                run["material_period_evidence"] = [
+                    evidence for evidence in run.get("material_period_evidence", [])
+                    if not (evidence.get("role") == "schedule" and evidence.get("source_file") == path.name)
+                ]
+                run["material_period_evidence"].append({
+                    "role": "schedule", "source_file": path.name,
+                    "source_month": period_evidence.get("source_month"),
+                    "basis": "课表实际课程日期",
+                })
         self._refresh_material_period_check(run)
         check = run.get("period_check") or {}
         if check and not check.get("conflict") and not check.get("mismatch"):

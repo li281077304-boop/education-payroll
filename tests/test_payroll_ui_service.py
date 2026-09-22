@@ -3,6 +3,7 @@ from shutil import copyfile
 from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from calendar import monthrange
 import json
 
 from openpyxl import load_workbook
@@ -24,6 +25,26 @@ def _simple_schedule(path: Path) -> Path:
     sheet.append(["任课老师", "年级", "学科", "课程所属班型", "实到人数", "上课状态"])
     for _ in range(20):
         sheet.append(["教师甲", "九年级", "数学", "1对1", 1, "已上课"])
+    book.save(path)
+    return path
+
+
+def _dated_schedule(path: Path, period: str) -> Path:
+    """Create a sanitized known-layout schedule spanning the requested month."""
+    year, month = (int(value) for value in period.split("-"))
+    last_day = monthrange(year, month)[1]
+    book = __import__("openpyxl").Workbook()
+    sheet = book.active
+    sheet.append(["上课班级", "上课课程", "教学形式", "上课校区", "上课时间", "上课时长", "上课状态", "点名人", "实到", "应到", "上课学员", "上课科目", "上课方式", "上课教室", "任课老师"])
+    for index in range(20):
+        day = min(1 + index, last_day)
+        if index == 19:
+            day = last_day
+        sheet.append([
+            "九年级1v1_教师甲", "一对一课程", "一对一", "脱敏校区",
+            f"{year:04d}-{month:02d}-{day:02d} 10:00~12:00", "2小时", "已上课",
+            "脱敏点名人", 1, 1, "脱敏学生", "02-数学", "线下课", "脱敏教室", "教师甲",
+        ])
     book.save(path)
     return path
 
@@ -690,19 +711,24 @@ def test_second_month_only_schedule_is_a_real_production_chain(tmp_path):
     }.items()}
     service.save_base_salary_inputs(august["id"], [{"teacher": "教师甲", "fields": fields}], "脱敏确认人")
     service.confirm_af_policy(august["id"], "脱敏确认人")
-    schedule = _simple_schedule(tmp_path / "august-schedule.xlsx")
-    service.import_file(august["id"], "schedule", str(schedule))
+    august_schedule = _dated_schedule(tmp_path / "august-schedule.xlsx", "2026-08")
+    service.import_file(august["id"], "schedule", str(august_schedule))
     service.check(august["id"])
     assert service.preview_payroll(august["id"])["generated_payroll"]["rows"]
     first_export = service.generate_payroll(august["id"], str(tmp_path / "august-output.xlsx"), production=True)
     assert Path(first_export["path"]).exists()
 
     september = service.create("2026-09", mode="GENERATE")
-    service.import_file(september["id"], "schedule", str(schedule))
+    september_schedule = _dated_schedule(tmp_path / "september-schedule.xlsx", "2026-09")
+    imported = service.import_file(september["id"], "schedule", str(september_schedule))
     checked = service.check(september["id"])
     preview = service.preview_payroll(september["id"])
     generated = service.generate_payroll(september["id"], str(tmp_path / "september-output.xlsx"), production=True)
 
+    assert imported["period_check"]["source_month"] == "2026-09"
+    assert imported["period_check"]["mismatch"] is False
+    assert all(record.lesson_date.startswith("2026-09-") for record in service._read_for_run("schedule", september_schedule, service.store.get(september["id"])).records)
+    assert not any(record.lesson_date.startswith("2026-08-") for record in service._read_for_run("schedule", september_schedule, service.store.get(september["id"])).records)
     assert checked["rating_version_id"]
     assert checked["base_salary_inputs"]["教师甲"]["m"]["state"] == "DETERMINED"
     assert checked["af_policy_confirmation"]["default_obligation_hours"] == 30
