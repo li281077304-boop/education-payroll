@@ -156,6 +156,59 @@ def test_base_salary_profiles_keep_historical_effective_months(tmp_path):
     assert service.store.get(august["id"])["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 6000
 
 
+def test_base_salary_batch_failure_does_not_partially_persist_profiles(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    fields = {code: {"value": value, "source": "脱敏基本工资资料"} for code, value in {
+        "G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18,
+    }.items()}
+    existing = service.create("2026-09", mode="GENERATE")
+    service.save_base_salary_inputs(existing["id"], [{"teacher": "教师乙", "fields": fields, "effective_from": "2026-09"}], "脱敏确认人")
+    target = service.create("2026-08", mode="GENERATE")
+
+    # 乙's requested range overlaps the existing September version.  甲 is
+    # listed first specifically to guard against a partial write.
+    import pytest
+    with pytest.raises(ValueError, match="生效期重叠"):
+        service.save_base_salary_inputs(target["id"], [
+            {"teacher": "教师甲", "fields": fields, "effective_from": "2026-08"},
+            {"teacher": "教师乙", "fields": fields, "effective_from": "2026-08", "effective_to": "2026-10"},
+        ], "脱敏确认人")
+
+    assert {item["teacher"] for item in service.store.list_teacher_base_salary_profiles()} == {"教师乙"}
+    stored = service.store.get(target["id"])
+    assert stored["base_salary_inputs"] == {}
+    assert stored["base_salary_input_snapshot"] is None
+
+
+def test_change_period_rebinds_dated_authorities_and_clears_monthly_exceptions(tmp_path):
+    service = PayrollService(tmp_path / "app-data")
+    service.save_rating_version("2026-08", "2026-08", "脱敏八月星级", "v8", [{"teacher": "教师甲", "rating": 2}])
+    rating_september = service.save_rating_version("2026-09", "2026-09", "脱敏九月星级", "v9", [{"teacher": "教师甲", "rating": 4}])[0]
+    service.save_policy_version("2026-08", "2026-08", "脱敏八月政策", [{"teacher": "教师甲", "role": "教师", "obligation_hours": 30, "obligation_hours_deduction_enabled": True}])
+    policy_september = service.save_policy_version("2026-09", "2026-09", "脱敏九月政策", [{"teacher": "教师甲", "role": "教师", "obligation_hours": 20, "obligation_hours_deduction_enabled": True}])[0]
+    fields_august = {code: {"value": value, "source": "脱敏八月工资"} for code, value in {"G": 6000, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18}.items()}
+    fields_september = {code: {"value": value, "source": "脱敏九月工资"} for code, value in {"G": 6500, "H": 500, "I": 200, "J": 300, "K": 20, "L": 18}.items()}
+    august = service.create("2026-08", mode="GENERATE")
+    service.save_base_salary_inputs(august["id"], [{"teacher": "教师甲", "fields": fields_august, "effective_from": "2026-08"}], "脱敏确认人")
+    september_setup = service.create("2026-09", mode="GENERATE")
+    service.save_base_salary_inputs(september_setup["id"], [{"teacher": "教师甲", "fields": fields_september, "effective_from": "2026-09"}], "脱敏确认人")
+    switcher = service.create("2026-08", mode="GENERATE")
+    service.confirm_af_policy(switcher["id"], "脱敏确认人", exceptions={"教师甲": {"obligation_hours": 0, "reason": "八月特批"}})
+
+    changed = service.change_period(switcher["id"], "2026-09")
+
+    assert changed["rating_version_id"] == rating_september["id"]
+    assert changed["policy_version_id"] == policy_september["id"]
+    assert changed["run_policy_snapshot"]["period"] == "2026-09"
+    assert changed["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 6500
+    assert changed["af_policy_confirmation"]["exceptions"] == {}
+    assert service.store.get(august["id"])["period"] == "2026-08"
+    assert service.store.get(august["id"])["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 6000
+    reopened = PayrollService(tmp_path / "app-data").get(switcher["id"])
+    assert reopened["rating_version_id"] == rating_september["id"]
+    assert reopened["run_policy_snapshot"]["period"] == "2026-09"
+
+
 def test_real_package_template_is_bound_to_run(tmp_path):
     package_dir = tmp_path / "package"
     package_dir.mkdir()

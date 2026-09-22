@@ -124,6 +124,34 @@ def test_august_csv_on_september_run_retains_source_month_and_can_switch(tmp_pat
     assert switched["period_check"]["decision"] == "SWITCHED"
 
 
+def test_replacing_one_material_removes_its_old_month_evidence(tmp_path):
+    """A mistaken replacement must not leave a permanent month conflict."""
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    august = _write_csv(
+        tmp_path / "august.csv",
+        ["teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"],
+        [["教师甲", "九年级", "数学", "1对1", 1, "已上课", "2026-08-10 10:00"]],
+    )
+    september = _write_csv(
+        tmp_path / "september.csv",
+        ["teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"],
+        [["教师甲", "九年级", "数学", "1对1", 1, "已上课", "2026-09-10 10:00"]],
+    )
+
+    service.import_file(run["id"], "schedule", str(august))
+    wrong = service.import_file(run["id"], "schedule", str(september))
+    assert [item["source_month"] for item in wrong["material_period_evidence"]] == ["2026-09"]
+    restored = service.import_file(run["id"], "schedule", str(august))
+
+    assert [item["source_month"] for item in restored["material_period_evidence"]] == ["2026-08"]
+    assert restored["period_check"]["conflict"] is False
+    assert restored["period_check"]["mismatch"] is False
+    reopened = PayrollService(tmp_path / "app-data").get(run["id"])
+    assert [item["source_month"] for item in reopened["material_period_evidence"]] == ["2026-08"]
+    assert len(reopened["material_period_evidence_history"]) == 2
+
+
 def test_csv_schedule_date_formats_and_unparseable_attended_rows_fail_closed(tmp_path):
     service = PayrollService(tmp_path / "app-data")
     run = service.create("2026-08", mode="GENERATE")

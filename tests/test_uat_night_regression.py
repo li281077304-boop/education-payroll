@@ -77,6 +77,45 @@ for (const [day, expected] of cases) {
     assert result.returncode == 0, result.stderr
 
 
+def test_real_ui_keeps_pending_month_prompt_and_reachable_af_exceptions():
+    """Exercise the production JS guards, not just server-side flags."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const elements = {
+  '#filter-teacher': { value: '教师甲' },
+  '#issues-content': { innerHTML: '' },
+};
+const context = {
+  document: { querySelector(selector) { return elements[selector] || null; } },
+  window: { confirm() { return true; }, clearTimeout() {}, setTimeout() {} },
+  console,
+};
+vm.createContext(context);
+vm.runInContext(source, context);
+vm.runInContext(`current = {
+  mode: 'GENERATE',
+  period_check: { mismatch: true, decision: 'PENDING', source_month: '2026-08', run_month: '2026-09' },
+  issue_groups: [], user_actions: [], issues: [],
+  af_policy_confirmation: { confirmed: true, confirmed_by: '脱敏确认人', exceptions: {} },
+  core_calculation: { rows: [] },
+};`, context);
+const card = vm.runInContext('periodMismatchCard()', context);
+assert(card.includes('切换到 2026-08'), 'PENDING must retain the visible switch action');
+assert.strictEqual(vm.runInContext('periodNeedsDecision()', context), true);
+const af = vm.runInContext('afPolicyBlock()', context);
+assert(af.includes('查看/修改本月例外'), 'confirmed default policy must retain exception access');
+vm.runInContext('updateFilters({ isComposing: false })', context);
+assert(elements['#issues-content'].innerHTML.includes('没有符合筛选条件'), 'filter refreshes only results');
+'''
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 # ------------------------------------------------------------------- TEST 3/4/5
 def test_uploading_a_previous_month_schedule_detects_the_mismatch(tmp_path):
     """UI 9 月 + 8 月真实课表 → 检测到冲突，但不报错终止。"""

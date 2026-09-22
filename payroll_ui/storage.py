@@ -236,6 +236,35 @@ class RunStore:
     def save_teacher_base_salary_profile(self, item: dict) -> None:
         self._upsert("teacher_base_salary_profiles", item)
 
+    def save_base_salary_profiles_and_run(self, profiles: list[dict], run: dict) -> None:
+        """Persist one base-salary batch and its Run snapshot atomically.
+
+        A rejected batch must not leave the first few teachers silently
+        available to future months.  This is intentionally separate from the
+        single-profile helper because this workflow has a user-visible
+        all-or-nothing promise.
+        """
+        timestamp = datetime.now(timezone.utc).isoformat()
+        run["updated_at"] = timestamp
+        run_payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            for item in profiles:
+                identifier = str(item["id"])
+                created = str(item.get("created_at") or timestamp)
+                item.setdefault("created_at", created)
+                item["updated_at"] = timestamp
+                payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                db.execute(
+                    "INSERT INTO teacher_base_salary_profiles(id,created_at,payload) VALUES(?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                    (identifier, created, payload),
+                )
+            db.execute(
+                "INSERT INTO runs(id,created_at,payload) VALUES(?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                (run["id"], run["created_at"], run_payload),
+            )
+
     def list_teacher_base_salary_profiles(self) -> list[dict]:
         return self._list_entities("teacher_base_salary_profiles")
 

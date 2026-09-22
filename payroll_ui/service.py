@@ -898,6 +898,11 @@ class PayrollService(CoreFlow):
         from payroll_core.payroll_generation import BASE_SALARY_FIELDS, base_salary_field
         now = datetime.now(timezone.utc).isoformat()
         normalized: dict[str, dict] = {}
+        # Stage every profile mutation in memory first.  A batch is one user
+        # decision: saving teacher A and then rejecting teacher B must never
+        # make A quietly available to next month's Run.
+        existing_profiles = self.store.list_teacher_base_salary_profiles()
+        profile_writes: dict[str, dict] = {}
         for item in inputs:
             teacher = str(item.get("teacher") or item.get("display_name") or "").strip()
             if not teacher or teacher in normalized:
@@ -930,7 +935,10 @@ class PayrollService(CoreFlow):
             normalized[teacher] = entry
             effective_from = str(item.get("effective_from") or run["period"])
             effective_to = str(item.get("effective_to") or "9999-12")
-            for old in self.store.list_teacher_base_salary_profiles():
+            if not valid_period(effective_from) or not valid_period(effective_to) or effective_to < effective_from:
+                raise ValueError(f"{teacher} 的基本工资生效月份无效。")
+            for old_source in existing_profiles:
+                old = copy.deepcopy(old_source)
                 if old.get("status", "ACTIVE") == "ACTIVE" and old.get("teacher") == teacher:
                     old_from = str(old.get("effective_from") or "")
                     old_to = str(old.get("effective_to") or "9999-12")
@@ -938,20 +946,21 @@ class PayrollService(CoreFlow):
                         # Re-confirming the same effective month replaces the
                         # prior version without changing older periods.
                         old["status"] = "SUPERSEDED"
-                        self.store.save_teacher_base_salary_profile(old)
+                        profile_writes[old["id"]] = old
                     elif old_from < effective_from <= old_to:
                         # Close the old version immediately before the new
                         # version.  It remains ACTIVE for historical months.
                         old["effective_to"] = previous_period(effective_from)
-                        self.store.save_teacher_base_salary_profile(old)
+                        profile_writes[old["id"]] = old
                     elif effective_from < old_from <= effective_to:
                         raise ValueError(f"{teacher} 的基本工资版本生效期重叠，请先明确旧版本有效期。")
-            self.store.save_teacher_base_salary_profile({
+            profile = {
                 "id": uuid.uuid4().hex[:16], "teacher": teacher,
                 "effective_from": effective_from, "effective_to": effective_to,
                 "source": source, "confirmed_by": actor, "version": "TEACHER_BASE_SALARY/v1",
                 "status": "ACTIVE", "entry": entry, "created_at": now,
-            })
+            }
+            profile_writes[profile["id"]] = profile
         snapshot = {"version": "BASE_SALARY_INPUT_SNAPSHOT/v1", "run_id": run_id, "period": run["period"], "confirmed_by": actor, "confirmed_at": now, "source": source, "inputs": normalized}
         snapshot["sha256"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         run["base_salary_inputs"] = normalized
@@ -961,7 +970,7 @@ class PayrollService(CoreFlow):
         # derived M value for every submitted teacher.
         for teacher in normalized:
             base_salary_field(teacher, normalized)
-        self.store.save(run)
+        self.store.save_base_salary_profiles_and_run(list(profile_writes.values()), run)
         return self.render(run)
 
     def confirm_af_policy(self, run_id: str, confirmed_by: str, *, default_obligation_hours: float = 30, exceptions: dict | None = None, reason: str = "") -> dict:
@@ -1935,7 +1944,10 @@ class PayrollService(CoreFlow):
                 run, result.records, source.name, source,
                 evidence_dates=result.coverage.get("all_lesson_dates", ()) if is_csv else (),
             )
-            run.setdefault("material_period_evidence", []).append({"role": role, "source_file": source.name, "source_month": run["period_check"].get("source_month"), "basis": "课表实际课程日期"})
+            self._replace_material_period_evidence(
+                run, role,
+                {"role": role, "source_file": source.name, "source_month": run["period_check"].get("source_month"), "basis": "课表实际课程日期"},
+            )
             # Grade resolutions are bound to coordinates in the imported
             # schedule workbook. Replacing that source invalidates them.
             run.pop("schedule_grade_resolutions", None)
@@ -1947,7 +1959,10 @@ class PayrollService(CoreFlow):
         else:
             hint = self._file_period_hint(run, source, workbook)
             if hint:
-                run.setdefault("material_period_evidence", []).append({"role": role, "source_file": source.name, "source_month": hint, "basis": "材料文件名或工作表月份"})
+                self._replace_material_period_evidence(
+                    run, role,
+                    {"role": role, "source_file": source.name, "source_month": hint, "basis": "材料文件名或工作表月份"},
+                )
         self._refresh_material_period_check(run)
         # Legacy per-field decisions predate business review cards.  They are
         # cleared for backward compatibility; durable business decisions are
@@ -2022,6 +2037,22 @@ class PayrollService(CoreFlow):
                 return f"20{year}-{int(match.group(2)):02d}"
         return None
 
+    @staticmethod
+    def _replace_material_period_evidence(run: dict, role: str, evidence: dict) -> None:
+        """Keep period checks scoped to the file currently occupying a role.
+
+        Older material evidence remains useful audit history, but it must not
+        keep a Run blocked after the user replaces a mistaken upload.
+        """
+        current = list(run.get("material_period_evidence", []))
+        replaced = [item for item in current if item.get("role") == role]
+        if replaced:
+            history = run.setdefault("material_period_evidence_history", [])
+            when = datetime.now(timezone.utc).isoformat()
+            history.extend({**item, "replaced_at": when, "history_event": "MATERIAL_REPLACED"} for item in replaced)
+        run["material_period_evidence"] = [item for item in current if item.get("role") != role]
+        run["material_period_evidence"].append(evidence)
+
     def _refresh_material_period_check(self, run: dict) -> None:
         sources = [item for item in run.get("material_period_evidence", []) if item.get("source_month")]
         months = sorted({item["source_month"] for item in sources})
@@ -2053,15 +2084,88 @@ class PayrollService(CoreFlow):
             "sources": sources, "final_generation_blocked": False,
         }
 
+    @staticmethod
+    def _single_effective_version(versions: list[dict], period: str) -> dict | None:
+        matches = [
+            item for item in versions
+            if item.get("status", "ACTIVE") == "ACTIVE"
+            and item.get("effective_from", "") <= period <= item.get("effective_to", "")
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _rebind_period_authorities(self, run: dict, previous: str) -> None:
+        """Bind a deliberately changed Run to the new month's dated facts.
+
+        Changing a Run month is an explicit user action.  It must never carry
+        an August authority snapshot into September, while historical Runs
+        remain untouched because only this Run payload is rebuilt.
+        """
+        period = run["period"]
+        prior = {
+            "rating_version_id": run.get("rating_version_id"),
+            "policy_version_id": run.get("policy_version_id"),
+            "class_type_rule_version_id": run.get("class_type_rule_version_id"),
+            "core_rule_version_id": run.get("core_rule_version_id"),
+            "part_time_rate_version_id": run.get("part_time_rate_version_id"),
+        }
+        rating = self._single_effective_version(self.store.list_rating_versions(), period)
+        policy = self._single_effective_version(self.store.list_policy_versions(), period)
+        class_rules = self._single_effective_version(self.class_type_rule_versions(), period)
+        run["rating_version_id"] = rating["id"] if rating else None
+        run["policy_version_id"] = policy["id"] if policy else None
+        run["class_type_rule_version_id"] = class_rules["id"] if class_rules else None
+        # Calculation versions use the same dated selection rule.  A
+        # non-unique/absent version deliberately becomes NEEDS_INPUT instead
+        # of inheriting an authority from the old month.
+        self._bind_new_calculation(run)
+        run["reference_ratings"] = {}
+        run["star_authority_status"] = "NOT_PROVIDED"
+        run["personnel_contexts"] = [
+            item for item in run.get("personnel_contexts", [])
+            if str(item.get("effective_from", "")) <= period <= str(item.get("effective_to", "9999-12"))
+        ]
+        persisted_salary = self._effective_base_salary_inputs(period)
+        run["base_salary_inputs"] = persisted_salary
+        run["base_salary_input_snapshot"] = self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None
+        run["base_salary_deferred"] = False
+        run["base_salary_deferred_by"] = ""
+        run["base_salary_deferred_at"] = None
+        # A renewal snapshot is also month-scoped input.  It may be rebound
+        # through the normal material flow after the user confirms the new
+        # period; retaining it would silently carry an old month's result.
+        run["run_renewal_result_snapshot"] = None
+        # Long-lived default policy may be reused, but one-month exceptions
+        # must never silently cross into a new payroll period.
+        run["af_policy_confirmation"] = self._effective_af_policy(period)
+        run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
+        run.setdefault("authority_rebind_history", []).append({
+            "kind": "period_change",
+            "from_period": previous,
+            "to_period": period,
+            "from_versions": prior,
+            "to_versions": {
+                "rating_version_id": run.get("rating_version_id"),
+                "policy_version_id": run.get("policy_version_id"),
+                "class_type_rule_version_id": run.get("class_type_rule_version_id"),
+                "core_rule_version_id": run.get("core_rule_version_id"),
+                "part_time_rate_version_id": run.get("part_time_rate_version_id"),
+            },
+            "changed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        invalidate_business_decisions(run.setdefault("business_decisions", []))
+        run["business_context_stale"] = True
+
     def change_period(self, run_id: str, period: str) -> dict:
         if not valid_period(period):
             raise ValueError("请选择有效月份。")
         run = self._load(run_id)
         if period == run["period"]:
             return self.render(run)
+        previous = run["period"]
         run["period"] = period
         window = normalize_period_window(period)
         run.update(window)
+        self._rebind_period_authorities(run, previous)
         for role, item in run.get("files", {}).items():
             path = Path(item["path"])
             if not path.is_file():
@@ -2079,11 +2183,7 @@ class PayrollService(CoreFlow):
                     evidence_dates=result.coverage.get("all_lesson_dates", ()) if path.suffix.lower() == ".csv" else (),
                 )
                 run["period_check"] = period_evidence
-                run["material_period_evidence"] = [
-                    evidence for evidence in run.get("material_period_evidence", [])
-                    if not (evidence.get("role") == "schedule" and evidence.get("source_file") == path.name)
-                ]
-                run["material_period_evidence"].append({
+                self._replace_material_period_evidence(run, "schedule", {
                     "role": "schedule", "source_file": path.name,
                     "source_month": period_evidence.get("source_month"),
                     "basis": "课表实际课程日期",
