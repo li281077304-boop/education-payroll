@@ -33,6 +33,11 @@ venv/
 .env.*
 work/
 
+# Generated macOS launcher bundles embed this machine's absolute paths, so the
+# repository keeps the builder (macos/build_app.sh) instead of the artifact.
+macos/dist/
+macos/*.app/
+
 # Explicitly excluded sensitive Skill assets
 skill/payroll/references/学生年级查表.csv
 skill/payroll/references/学生年级查表.csv.bak_20260901

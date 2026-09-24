@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from payroll_core.excel.inspect import inspect_workbook
 
+from .health import HEALTH_PATH, health_payload
 from .service import PayrollService
 
 
@@ -29,6 +30,7 @@ class PayrollHttpServer(ThreadingHTTPServer):
         super().__init__(address, PayrollHandler)
         self.service = service
         self.static_root = static_root
+        self.started_at = datetime.now(timezone.utc)
         self.token = secrets.token_urlsafe(24)
 
 
@@ -106,6 +108,16 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return self._serve_static(parsed.path.removeprefix("/static/"))
         if parsed.path == "/api/bootstrap":
             return self._json({"token": self.server.token})
+        if parsed.path == HEALTH_PATH:
+            # Deliberately token-free: the launcher must be able to identify the
+            # service before it has a browser session.  The payload carries no
+            # payroll, teacher or student data.
+            return self._json(health_payload(
+                self.server.service.root,
+                self.server.server_port,
+                self.server.started_at,
+                self.server.service.store.count_runs(),
+            ))
         if not self._authorized():
             return self._error("本地会话已失效，请刷新页面。", HTTPStatus.FORBIDDEN)
         try:

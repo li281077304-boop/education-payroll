@@ -41,6 +41,16 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS teacher_base_salary_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS af_default_policies (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
+    def count_runs(self) -> int:
+        """Cheap row count used by the launcher's identity handshake.
+
+        Reading payloads to count runs would deserialize every stored run just
+        to answer a health check, so this stays a single indexed count.
+        """
+        with sqlite3.connect(self.path) as db:
+            row = db.execute("SELECT COUNT(*) FROM runs").fetchone()
+        return int(row[0]) if row else 0
+
     def save(self, run: dict) -> None:
         run["updated_at"] = datetime.now(timezone.utc).isoformat()
         payload = json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
