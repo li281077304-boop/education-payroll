@@ -123,7 +123,7 @@
       "id": "ENV-05", "area": "agent_test_hygiene", "status": "PASS",
       "root_cause": "为跑测试随意 git clean / stash 会破坏工作区。",
       "fix": "本轮未执行任何 git clean；对照“改动前行为”时使用仓库旁的独立 git worktree，不改动当前工作区，用完即删除。",
-      "test": "定向测试通过后再跑全量（只跑一次）：495 passed / 0 failed。"
+      "test": "定向测试每次先跑；全量共跑 3 次（首次发现年级推断的路径缺陷 → 修复后复跑 → 测试改名后复跑），最终 495 passed / 0 failed。"
     }
   ],
   "real_data_actions": [
