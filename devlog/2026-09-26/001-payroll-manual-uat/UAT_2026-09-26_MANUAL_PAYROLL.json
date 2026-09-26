@@ -112,11 +112,12 @@
       "test": "tests/test_grade_inference.py 58 项通过；新增 2 项确定性回归（日期型目录名不得覆盖文件名时间戳、临时目录名带日期片段时历史年级仍须正确推断）。既有两个用例现在在仓库内 / 仓库外两种临时根下都通过。"
     },
     {
-      "id": "ENV-04", "area": "github_ci", "status": "PARTIAL",
+      "id": "ENV-04", "area": "github_ci", "status": "PASS",
       "root_cause": "仓库没有 GitHub CI，push 后无法独立显示通过 / 失败。",
       "fix": "新增 .github/workflows/tests.yml：Python 3.12、安装 pyproject 中列出的依赖、调用同一个 tools/run_tests.sh。",
-      "test": "本地以同一命令跑通（495 项）；GitHub 首次运行结果待本次 push 后确认。",
-      "remaining": "CI 在 GitHub 上的首次结果需要 push 后查看，之后回填。"
+      "test": "GitHub Actions 首次运行成功（run 36228196989，2026-09-26）。",
+      "evidence": "https://github.com/li281077304-boop/education-payroll/actions/runs/36228196989",
+      "note": "推送时 HTTPS 令牌缺少 workflow scope，被拒绝创建 .github/workflows/tests.yml，改用 SSH 通道推送成功。"
     },
     {
       "id": "ENV-05", "area": "agent_test_hygiene", "status": "PASS",
