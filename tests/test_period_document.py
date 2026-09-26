@@ -381,3 +381,114 @@ def test_importing_requires_a_confirming_person(tmp_path):
     with pytest.raises(ValueError, match="确认人"):
         service.import_period_document(str(document), preview["source"]["sha256"], "  ")
     assert service.period_authorities() == []
+
+
+# --------------------------------------------------------------- 工资月份归属规则
+#
+# 规则（用户 2026-09-26 明确）：工资月份来自资料自身的编号，绝不按周期内自然月
+# 天数占比推断。序号优先 →「文档年份 + 人工月序号」；资料明确给出工资月份列时
+# 直接使用该列；两者不一致或都无法确定 → fail closed，交人确认。
+
+
+def test_the_payroll_month_comes_from_the_serial_not_the_day_majority(tmp_path):
+    """序号 7 的周期即使多数天数落在 8 月，也必须归 2026-07。"""
+    text = (
+        "# 测试知识库\n\n## 2. 2026 年人工月排期表\n\n"
+        "| 人工月 | 周数 | 日期范围 |\n|:---:|:---:|:---|\n"
+        "| 6 | 4 周 | 6.01 — 6.28 |\n"
+        "| 7 | 5 周 | 7.28 — 8.29 |\n"
+        "| 8 | 4 周 | 8.30 — 9.26 |\n"
+    )
+    document = read_period_document(_document(tmp_path, text))
+
+    assert [(row.label, row.period_start, row.period_end, row.payroll_period) for row in document.rows] == [
+        ("6", "2026-06-01", "2026-06-28", "2026-06"),
+        ("7", "2026-07-28", "2026-08-29", "2026-07"),
+        ("8", "2026-08-30", "2026-09-26", "2026-08"),
+    ]
+    assert all("人工月序号" in row.mapping_rule for row in document.rows)
+    assert document.can_import is True
+
+
+def test_an_explicit_payroll_month_column_is_used_directly(tmp_path):
+    path = _write_csv(
+        tmp_path / "人工月.csv",
+        ["人工月", "日期范围", "工资月份"],
+        [[7, "2026.07.28 - 2026.08.29", "2026-07"], [8, "2026.08.30 - 2026.09.26", "2026-08"]],
+    )
+    document = read_period_document(path)
+
+    assert [row.payroll_period for row in document.rows] == ["2026-07", "2026-08"]
+    assert "工资月份" in document.rows[0].mapping_rule
+    assert document.can_import is True
+
+
+def test_a_payroll_month_column_without_any_serial_is_still_usable(tmp_path):
+    """资料只给「工资月份 + 日期范围」时直接采用该列，不去猜序号。"""
+    path = _write_csv(tmp_path / "只有工资月份.csv", ["日期范围", "工资月份"],
+                      [["2026.08.03 - 2026.08.30", "2026-08"]])
+    document = read_period_document(path)
+
+    assert [row.payroll_period for row in document.rows] == ["2026-08"]
+    assert document.rows[0].label == ""
+    assert document.can_import is True
+
+
+def test_a_conflict_between_the_serial_and_the_payroll_column_fails_closed(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    path = _write_csv(tmp_path / "冲突.csv", ["人工月", "日期范围", "工资月份"],
+                      [[8, "2026.08.03 - 2026.08.30", "2026-09"]])
+    document = read_period_document(path)
+
+    assert document.rows[0].payroll_period == ""
+    assert any("不一致" in item for item in document.rows[0].problems)
+    assert document.can_import is False
+
+    preview = service.preview_period_document(str(path))
+    assert preview["can_import"] is False
+    with pytest.raises(ValueError, match="无法识别|修正"):
+        service.import_period_document(str(path), preview["source"]["sha256"], "核算负责人")
+    assert service.period_authorities() == []
+
+
+def test_a_document_without_a_year_cannot_use_serials_and_fails_closed(tmp_path):
+    """没有年份时，「文档年份 + 序号」无法成立 → 不导入，要求确认。"""
+    service = PayrollService(tmp_path / "data")
+    path = _write_csv(tmp_path / "无年份.csv", ["人工月", "周数", "日期范围"], [[8, "4 周", "8.03 - 8.30"]])
+
+    document = read_period_document(path)
+
+    assert document.year is None
+    assert document.rows[0].payroll_period == ""
+    assert document.can_import is False
+    preview = service.preview_period_document(str(path))
+    assert preview["can_import"] is False
+    assert any("年份" in item for item in preview["problems"])
+
+
+def test_an_unusable_serial_without_a_payroll_column_fails_closed(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    path = _write_csv(tmp_path / "序号无法识别.csv", ["人工月", "周数", "日期范围"],
+                      [[8, "4 周", "2026.08.03 - 2026.08.30"], ["待定", "4 周", "2026.09.01 - 2026.09.28"]])
+
+    document = read_period_document(path)
+
+    assert document.rows[0].payroll_period == "2026-08"
+    assert document.rows[1].payroll_period == ""
+    assert document.can_import is False
+    assert service.preview_period_document(str(path))["can_import"] is False
+
+
+def test_the_whole_document_must_be_readable_before_anything_is_written(tmp_path):
+    """一行不确定 → 整份资料不导入（宁可让人先修资料，也不猜一行）。"""
+    service = PayrollService(tmp_path / "data")
+    text = DOCUMENT.replace("| 9 | 4 周 | 8.31 — 9.27 |", "| 9 | 4 周 | 待定 |")
+    document = _document(tmp_path, text)
+
+    result = service.preview_period_document(str(document))
+
+    assert result["can_import"] is False
+    assert result["counts"]["NEW"] >= 1, "能识别的行仍然展示，但整体不可导入"
+    with pytest.raises(ValueError):
+        service.import_period_document(str(document), result["source"]["sha256"], "核算负责人")
+    assert service.period_authorities() == []

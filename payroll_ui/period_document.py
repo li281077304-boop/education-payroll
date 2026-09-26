@@ -14,10 +14,17 @@ to confirm before any authority record is created.
 Two facts are derived, and both are shown to the user before confirmation:
 
 * the actual ``period_start`` / ``period_end`` of each 人工月;
-* which payroll month (``YYYY-MM``) that cycle belongs to, derived as the month
-  holding the most days of the cycle.  A 4/5-week cycle never splits two months
-  evenly, so the answer is unambiguous, but the rule stays explicit and visible
-  instead of being an implicit assumption.
+* which payroll month that cycle belongs to.  The payroll month is **never
+  inferred from how the cycle's days are distributed across natural months**.
+  It comes from the document's own numbering:
+
+  1. an explicit 工资月份 column value, used as given;
+  2. otherwise 文档年份 + 人工月序号 (cycle 8 of a 2026 calendar is 2026-08).
+
+  When neither can be established, or the two disagree, the row fails closed and
+  the document is not importable until a human corrects it.  The rule that was
+  used is reported per row (``mapping_rule``) and displayed in the preview, so
+  the mapping is confirmed by a person rather than assumed.
 """
 from __future__ import annotations
 
@@ -25,7 +32,7 @@ import csv
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 from payroll_core.period import SOURCE_TYPE_CSV, SOURCE_TYPE_DOCUMENT, SOURCE_TYPE_EXCEL
@@ -40,6 +47,8 @@ PAYROLL_COLUMN_NAMES = ("工资月份", "核算月份", "薪资月份", "工资�
 _YEAR_PATTERN = re.compile(r"(20\d{2})\s*年")
 _DATE_TOKEN = re.compile(r"(?:(20\d{2})\s*[年./\-]\s*)?(\d{1,2})\s*[月./\-]\s*(\d{1,2})\s*日?")
 _RANGE_SEPARATOR = re.compile(r"—|–|~|～|至|到|\s-\s|\s--\s")
+_PERIOD_LABEL = re.compile(r"^(20\d{2})[-/.](\d{1,2})$")
+_FIRST_INTEGER = re.compile(r"\d+")
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _SEPARATOR_ROW = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.、])\s*")
@@ -125,20 +134,23 @@ def read_period_document(path: str | Path, *, year: int | None = None) -> Period
         text = source.read_text(encoding="utf-8")
         tables = _tables_from_markdown(text)
         title = _document_title(text)
-        year = year or _year_from_document(text)
+        year = year or _year_from_document(text) or _year_from_dates(text)
         notes = _cycle_notes(text)
     elif suffix in {".csv", ".tsv"}:
         source_type = SOURCE_TYPE_CSV
         text = source.read_text(encoding="utf-8-sig")
         tables = _tables_from_delimited(text, "\t" if suffix == ".tsv" else ",")
         title = source.stem
-        year = year or _year_from_document(text)
+        year = year or _year_from_document(text) or _year_from_dates(text)
         notes = ()
     elif suffix in {".xlsx", ".xlsm", ".xls"}:
         source_type = SOURCE_TYPE_EXCEL
         tables = _tables_from_workbook(source)
         title = source.stem
-        year = year or _year_from_document(" ".join(table.section for table in tables))
+        cell_text = " ".join(table.section for table in tables) + " " + " ".join(
+            row.text for table in tables for row in (list(table.rows) + [_RawRow(table.header, "", table.first_line, " | ".join(table.header))])
+        )
+        year = year or _year_from_document(cell_text) or _year_from_dates(cell_text)
         notes = ()
     else:
         raise ValueError("人工月资料只支持 Markdown、CSV 或 Excel 文件。")
@@ -154,7 +166,7 @@ def read_period_document(path: str | Path, *, year: int | None = None) -> Period
             rows.append(_row_from_cells(raw, columns, table_year, table.header))
 
     if not rows:
-        problems.append("没有在资料里找到人工月表格（需要包含“人工月”和“日期范围”两列）。")
+        problems.append("没有在资料里找到人工月表格（需要包含“人工月 / 序号”和“日期范围”两列）。")
     elif any(not row.period_start or not row.period_end for row in rows):
         problems.append("有日期范围无法识别或缺少年份，请按“8.03 — 8.30”并在标题写明年份。")
     rows = list(_mark_duplicate_months(rows))
@@ -308,14 +320,18 @@ class _Columns:
 
 
 def _resolve_columns(header: tuple[str, ...]) -> _Columns:
+    headerless = all(not str(cell).strip() for cell in header)
     payroll = _find(header, PAYROLL_COLUMN_NAMES, set())
     label = _find(header, LABEL_COLUMN_NAMES, {payroll})
     weeks = _find(header, WEEKS_COLUMN_NAMES, {payroll, label})
     period_range = _find(header, RANGE_COLUMN_NAMES, {payroll, label, weeks})
-    if label < 0:
-        label = 0
     if period_range < 0:
         period_range = 2 if len(header) >= 3 else 1
+    if label < 0 and headerless:
+        # A headerless export is positional; a *named* table with no 人工月 column
+        # simply has no cycle number, and guessing one from another column would
+        # be exactly the kind of inference this reader must not do.
+        label = 0
     return _Columns(label=label, weeks=weeks, period_range=period_range, payroll_period=payroll)
 
 
@@ -333,6 +349,18 @@ def _year_from_document(text: str) -> int | None:
                 return int(match.group(1))
     match = _YEAR_PATTERN.search(text)
     return int(match.group(1)) if match else None
+
+
+def _year_from_dates(text: str) -> int | None:
+    """The document year when the material writes dates without a 年 suffix.
+
+    ``2026.08.03`` states its own year, so reading it is evidence rather than
+    inference.  Only an unambiguous single year is accepted; a file whose dates
+    span two years must say the year in its heading, otherwise the reader fails
+    closed instead of picking one.
+    """
+    years = {int(match.group(1)) for match in _DATE_TOKEN.finditer(text) if match.group(1)}
+    return years.pop() if len(years) == 1 else None
 
 
 def _document_title(text: str) -> str:
@@ -366,19 +394,74 @@ def _row_from_cells(raw: _RawRow, columns: _Columns, year: int | None, header: t
 
     label = re.sub(r"[*`\s]", "", cell(columns.label))
     weeks = re.sub(r"[*`]", "", cell(columns.weeks)) if columns.weeks >= 0 else ""
-    payroll_hint = cell(columns.payroll_period) if columns.payroll_period >= 0 else ""
+    column_month = _normalise_period(cell(columns.payroll_period)) if columns.payroll_period >= 0 else ""
     start, end, date_problems = _parse_range(cell(columns.period_range), year)
     problems.extend(date_problems)
-    payroll_period, rule = _payroll_period_for(start, end)
-    if not label:
-        problems.append("没有识别到人工月序号。")
+    payroll_period, rule = _payroll_period_for_row(label, column_month, year, problems)
     return PeriodDocumentRow(
         label=label, weeks=weeks, period_start=start, period_end=end,
-        payroll_period=payroll_hint or payroll_period,
-        mapping_rule="按资料中直接给出的工资月份" if payroll_hint else rule,
+        payroll_period=payroll_period, mapping_rule=rule,
         source_section=raw.section, source_row=raw.line, source_text=raw.text,
         problems=tuple(problems),
     )
+
+
+def _normalise_period(value: str) -> str:
+    """Accept only an explicit YYYY-MM value from the document."""
+    match = _PERIOD_LABEL.match(str(value or "").strip())
+    if not match:
+        return ""
+    month = int(match.group(2))
+    return f"{int(match.group(1)):04d}-{month:02d}" if 1 <= month <= 12 else ""
+
+
+def _manual_month_serial(label: str) -> int | None:
+    """The 人工月序号 itself, when the label is a plain cycle number.
+
+    A label that is really a payroll month ("2026-08") or anything else without a
+    1–12 number is not a serial, so the caller keeps looking for other evidence
+    instead of inventing one.
+    """
+    text = str(label or "").strip()
+    if not text or _PERIOD_LABEL.match(text):
+        return None
+    # A date range that ended up in the label column is not a cycle number.
+    if _RANGE_SEPARATOR.search(text) or _DATE_TOKEN.search(text):
+        return None
+    match = _FIRST_INTEGER.search(text)
+    if not match:
+        return None
+    serial = int(match.group(0))
+    return serial if 1 <= serial <= 12 else None
+
+
+def _payroll_period_for_row(label: str, column_month: str, year: int | None, problems: list[str]) -> tuple[str, str]:
+    """Which payroll month a cycle belongs to, from the document's own numbering.
+
+    Deliberately never derived from the cycle's dates.  An explicit 工资月份
+    column is the document stating the fact; otherwise the cycle number plus the
+    document year states it.  Anything else — missing year, unusable cycle
+    number, or the two disagreeing — fails closed so a human decides.
+    """
+    serial = _manual_month_serial(label)
+    serial_month = f"{year:04d}-{serial:02d}" if serial and year else ""
+    if serial_month and column_month:
+        if serial_month == column_month:
+            return serial_month, f"文档年份 + 人工月序号（{year} + {serial}），与资料给出的工资月份一致"
+        problems.append(
+            f"资料同时给出人工月序号（{serial} → {serial_month}）和工资月份（{column_month}），"
+            "两者不一致，无法自动判断，请核对资料。"
+        )
+        return "", "序号与工资月份列冲突，未确定"
+    if column_month:
+        return column_month, "使用资料中直接给出的工资月份列"
+    if serial_month:
+        return serial_month, f"文档年份 + 人工月序号（{year} + {serial}）"
+    if serial and not year:
+        problems.append("资料没有可识别的年份，无法用人工月序号推出工资月份，请在资料标题写明年份。")
+    else:
+        problems.append("资料既没有可用的工资月份列，也没有可识别的人工月序号，无法确定工资月份，请补充资料。")
+    return "", "未确定（需要确认）"
 
 
 def _parse_range(value: str, year: int | None) -> tuple[str, str, list[str]]:
@@ -409,24 +492,6 @@ def _iso_date(token: re.Match[str], year: int | None) -> str:
         return date(effective_year, month, day).isoformat()
     except ValueError:
         return ""
-
-
-def _payroll_period_for(start: str, end: str) -> tuple[str, str]:
-    """Which payroll month a cycle belongs to: the month holding most days."""
-    if not start or not end:
-        return "", ""
-    first, last = date.fromisoformat(start), date.fromisoformat(end)
-    counts: dict[str, int] = {}
-    cursor = first
-    while cursor <= last:
-        key = f"{cursor.year:04d}-{cursor.month:02d}"
-        counts[key] = counts.get(key, 0) + 1
-        cursor += timedelta(days=1)
-    if not counts:
-        return "", ""
-    best = max(counts.values())
-    winners = sorted(month for month, count in counts.items() if count == best)
-    return winners[0], "按周期内天数最多的月份归属工资月份"
 
 
 def _mark_duplicate_months(rows: list[PeriodDocumentRow]) -> tuple[PeriodDocumentRow, ...]:

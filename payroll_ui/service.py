@@ -2578,6 +2578,9 @@ class PayrollService(CoreFlow):
                 "confirmed_by": str(confirmed_by or existing.get("confirmed_by", "")),
                 "reason": str(reason or existing.get("reason", "")),
                 "source": dict(provenance or existing.get("source") or {}),
+                # 同一条窗口事实重复导入时，连同「工资月份依据」一起刷新，
+                # 免得记录里留着过期的规则文本。
+                "evidence": dict(evidence or existing.get("evidence") or {}),
                 # 沿用同一条事实时，来源语义以更权威的一次为准（资料导入 > 手填）。
                 "boundary_source": (
                     AUTHORITY_MANUAL_DOCUMENT

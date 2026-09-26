@@ -262,9 +262,9 @@ def test_the_import_preview_lists_every_recognised_month_with_its_mapping_rule(t
         "title": "杰牛集团 / 仁杰教育 — 规章制度知识库", "year": 2026, "can_import": True, "problems": [],
         "rows": [
             {"label": "7", "weeks": "5 周", "period_start": "2026-06-29", "period_end": "2026-08-02",
-             "payroll_period": "2026-07", "action": "NEW", "mapping_rule": "按周期内天数最多的月份归属工资月份"},
+             "payroll_period": "2026-07", "action": "NEW", "mapping_rule": "文档年份 + 人工月序号（2026 + 7）"},
             {"label": "8", "weeks": "4 周", "period_start": "2026-08-03", "period_end": "2026-08-30",
-             "payroll_period": "2026-08", "action": "UPDATE", "mapping_rule": "按周期内天数最多的月份归属工资月份"},
+             "payroll_period": "2026-08", "action": "UPDATE", "mapping_rule": "文档年份 + 人工月序号（2026 + 8）"},
         ],
     }
     page = _run_ui(tmp_path, f"current = {{id: 'run-1', af_policy_confirmation: {{}}}}; periodDocumentPreview = {json.dumps(preview, ensure_ascii=False)}; __result = periodDocumentPreviewMarkup();")
@@ -272,7 +272,8 @@ def test_the_import_preview_lists_every_recognised_month_with_its_mapping_rule(t
     assert "识别结果预览" in page
     assert "识别到 2 条" in page
     assert "2026-08-03" in page and "2026-08-30" in page
-    assert "按周期内天数最多的月份归属工资月份" in page
+    assert "文档年份 + 人工月序号（2026 + 8）" in page
+    assert "不会按周期内自然月天数占比推断" in page, "界面必须说清不再用天数占比推断"
     assert "确认导入这 2 条人工月" in page
     assert "period-document-confirmed-by" in page
 

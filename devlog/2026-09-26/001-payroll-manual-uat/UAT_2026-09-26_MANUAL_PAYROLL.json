@@ -95,7 +95,7 @@
       "expected": "人工月应作为基础权威资料：从公司制度文件批量识别、一次确认、写入可复用的 authority；以后同月份自动沿用，不再每月询问；来源可追溯且与“用户手填”区分开。",
       "root_cause": "人工月此前依赖用户手填、历史 Run 推断或自然月兜底；没有任何可导入的权威资料入口，导致同一个月被反复确认，口径还可能被推断值污染。",
       "fix": "新增只读识别器（Markdown / CSV / Excel）与「预览 → 一次确认 → 批量写入」链路，复用现有 period authority 模型（payroll_period / period_start / period_end / boundary_source / revision / supersedes），未新建第二套配置系统。来源语义分为 MANUAL_PERIOD_DOCUMENT（制度文件导入）、USER_CONFIRMED（本机手填）、DERIVED_FROM_CONFIRMED_RUN（历史确认恢复）、LEGACY_CALENDAR_DEFAULT（自然月兜底）。资料导入的记录都带 source_type / source_file / source_hash / source_section / source_row / source_text / imported_at / confirmed_by。",
-      "test": "tests/test_period_document.py（18 项：Markdown 识别并跳过无关表格、预览不写库、一次确认批量写入、重复导入不新增 revision、内容变化新建 revision 并 supersede、来源可追溯且不含本机路径、新 Run 自动绑定、fallback Run 自动恢复、临时 authority 被正式资料替代、课表超出只提示冲突不改人工月、手填标注为人工确认、无资料仍可手填兜底、CSV/Excel/无表头 CSV/跨年、坏资料 fail closed、文件变化需重新预览、必须有确认人）；tests/test_period_authority_http.py（5 项，含两个新接口）；tests/test_period_authority_ui.py（12 项，含人工月卡片与导入预览）。",
+      "test": "tests/test_period_document.py（25 项：Markdown 识别并跳过无关表格、预览不写库、一次确认批量写入、重复导入不新增 revision、内容变化新建 revision 并 supersede、来源可追溯且不含本机路径、新 Run 自动绑定、fallback Run 自动恢复、临时 authority 被正式资料替代、课表超出只提示冲突不改人工月、手填标注为人工确认、无资料仍可手填兜底、CSV/Excel/无表头 CSV/跨年、坏资料 fail closed、文件变化需重新预览、必须有确认人；工资月份归属规则：序号优先且不按天数占比、工资月份列直接采用、列与序号冲突 fail closed、缺年份 fail closed、序号不可用 fail closed、一行不确定则整份不导入）；tests/test_period_authority_http.py（5 项，含两个新接口）；tests/test_period_authority_ui.py（12 项，含人工月卡片与导入预览）。",
       "remaining": "真实资料已完整走完识别→预览→导入→改绑→重算；但“在浏览器里点导入按钮走一遍”未真实点击。",
       "real_data_result": "识别 12 条 → 预览不写库 → 一次确认写入 12 条 → 2026-08 由临时 8/1～8/30 改为资料口径 8/3～8/30（revision 2 并 supersede 旧记录）。"
     }
@@ -140,7 +140,8 @@
     "document_note": "人工月 = 公司的薪资计算周期（按 4 周 / 5 周划分），非自然月。",
     "rows_recognised": 12,
     "discrepancy": "任务描述提到“2026 年 3 条实际记录”，实测文件中人工月表为 12 条（全年 52 周）。当前核算相关的是第 7/8/9 条。实现按全部 12 条导入。",
-    "payroll_month_rule": "按周期内天数最多的月份归属工资月份（预览中显示该依据，供人工确认）",
+    "payroll_month_rule": "工资月份来自资料自身的编号，不做天数占比推断：资料明确给出「工资月份」列则直接采用该列；否则用「文档年份 + 人工月序号」（2026 年第 8 个人工月 = 2026-08）；列与序号不一致、缺年份或序号不可用时 fail closed，要求先修正资料",
+    "payroll_month_rule_note": "2026-09-26 按用户要求修正：此前实现按「周期内天数最多的月份」推断归属，已改为上述序号规则；12 条记录归属结果不变，仅依据文本与校验方式变化。",
     "key_row": {"manual_month": "8", "weeks": "4 周", "range": "8.03 — 8.30", "payroll_period": "2026-08", "source_row": 62}
   },
   "real_data_actions": [
@@ -182,6 +183,6 @@
     "real_ui_regression_required": true,
     "real_ui_regression_done": false
   },
-  "regression": {"command": "sh tools/run_tests.sh", "result": "520 passed, 0 failed", "baseline_before_this_round": "495 passed, 0 failed"},
+  "regression": {"command": "sh tools/run_tests.sh", "result": "527 passed, 0 failed", "baseline_before_this_round": "495 passed, 0 failed"},
   "implementation": {"started": true, "finished": true, "scope": "2026-09-26 手工 UAT 收口（P0-1 / P0-2 / P0-3 回归 / P1 界面 / 测试环境）"}
 }
