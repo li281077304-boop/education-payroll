@@ -3,6 +3,7 @@
 ## 运行与保护
 
 - branch / starting HEAD: `feature/payroll-manual-uat-20260926` / `462f95d3be4a91ac25e5423fe5a040e30b3049f0`
+- final code HEAD: `47c157bde6710ffcd51b43ea588392d88d6c18f9` (remote branch matches)
 - 真实 Run: `7f2f44465a86`（2026-08，30 位工资教师）
 - SQLite 在本轮写入前备份到 `~/Library/Application Support/EducationPayroll/backups/2026-09-26/payroll-ui-before-comment-refresh.sqlite3`；备份 `PRAGMA integrity_check = ok`。
 - 本轮真实金额、教师/学生明细只留在本机数据库和工资工作簿；此文件只记汇总与状态。
@@ -35,7 +36,7 @@
 | 支持部批注 | 旧支持部快照曾只保存单元格值，未保存 `cell.comment`。 | 支持部 Excel cell.value/comment → Run snapshot → 对应工资单元格 comment。 | 新导入存统一 annotation；旧确认快照使用同 SHA 的“仅刷新批注”路径，严格校验身份/工资值不变，保留原确认人与工资金额。 | annotation 归一、重复去重、refresh 只更改批注、值保持不变测试通过。 | 源表 99 条、42 位教师有批注；当前 Run 匹配 59 条。H/I/J/AP/AT 各抽查 1 条，源文→snapshot→最终 Excel 5/5 一致；WPS 打开最终文件并显示 H7 批注。 | PASS |
 | 班课说明 | 仅有 AC 数值，用户无法从最终表判断班课折算依据。 | 当前 Core AC course contributions → AC annotation。 | 注释仅汇总现有 Core 证据中的年级、实到、系数、贡献；保留源工作表/行号，不引入新公式、不塞原始学生名单。 | 合并/去重及来源追踪测试通过。 | 当前真实 Run 26 位有 AC 计算证据的教师，最终 workbook 26 个 AC comments；WPS 打开 AC5 后可查看计算说明。 | PASS |
 | 模板与最终文件 | 之前只有内部字段对账，未核最终 XLSX。 | canonical payroll result → 原绑定模板结构 → 最终 UI 导出。 | 只清数据区并写当前结果与注释；模板 sheet/样式不由注释逻辑改变。兼职 AF 待定时留白，不写全职公式。 | XLSX 重开、结构、合并、冻结窗格、宽度、行高、样式、字段同源测试通过。 | WPS 实际打开 UI 导出的文件；3 sheets 保持，合并格/冻结/宽度/样式一致，样式差异 0；续费金额对账 120 个字段无差异。 | PASS |
-| 全量 Gate / GitHub CI | 最终本地全量运行中发现 UI 文案把内部词“旧 Run”暴露给用户。 | `sh tools/run_tests.sh` → GitHub CI。 | 已修复为“历史工资资料”；对应回归测试单独复跑通过。全量本地命令本轮只执行一次。 | 初始全量：562 passed、1 failed（仅 UI 文案）；修复后定向测试通过。最终代码全量以 push 后 GitHub CI 为准。 | 当前尚未取得本轮最终代码对应的 GitHub CI 结果。 | OPEN |
+| 全量 Gate / GitHub CI | 最终本地全量运行中发现 UI 文案把内部词“旧 Run”暴露给用户。 | `sh tools/run_tests.sh` → GitHub CI。 | 已修复为“历史工资资料”；对应回归测试单独复跑通过。全量本地命令本轮只执行一次。 | 初始全量：562 passed、1 failed（仅 UI 文案）；最终代码对应的 GitHub Actions 全量 Gate 成功。 | GitHub Actions run `36243457695`，head SHA `47c157bde6710ffcd51b43ea588392d88d6c18f9`，结论 `success`。 | PASS |
 
 ## 最新真实 Run 当前未决项
 
