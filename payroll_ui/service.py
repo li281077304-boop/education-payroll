@@ -62,7 +62,6 @@ from payroll_core.employment import (
     normalise_teacher as normalise_employment_name,
     resolve_employment_type,
 )
-from payroll_core.adapters.personnel import DEFAULT_PART_TIME_RATES
 from payroll_core.adapters.business_results import read_business_result
 from payroll_core.excel.standard_payroll_render import is_payroll_template, render_generated_payroll
 from payroll_core.excel.output_paths import default_output_dir, describe_location, safe_output_path
@@ -1208,7 +1207,7 @@ class PayrollService(CoreFlow):
                 authority[key] = item
         return authority
 
-    def _employment_types_for(self, run: dict) -> dict[str, dict]:
+    def _employment_types_for(self, run: dict, *, teachers: list[str] | None = None) -> dict[str, dict]:
         """Resolve every teacher on this Run, with its provenance.
 
         Presence on the support department's own payroll table is document
@@ -1218,7 +1217,20 @@ class PayrollService(CoreFlow):
         absent from that table, is part-time.  Anything else stays UNKNOWN.
         """
         authority = self._employment_authority(run["period"])
-        names = [item["display_name"] for item in self._roster_facts(run)["teachers"]]
+        rate_version = self._calculation_version(run, "part_time")
+        registered_part_time = {}
+        for item in (rate_version or {}).get("profiles", []):
+            name = str(item.get("teacher") or "").strip()
+            raw_rate = item.get("rate_per_session", item.get("fixed_rate", item.get("base_rate")))
+            try:
+                rate = float(raw_rate)
+            except (TypeError, ValueError):
+                continue
+            if name and math.isfinite(rate) and rate >= 0:
+                registered_part_time[name] = rate
+        names = list(dict.fromkeys(
+            str(item).strip() for item in teachers if str(item).strip()
+        )) if teachers is not None else [item["display_name"] for item in self._roster_facts(run)["teachers"]]
         document_types: dict[str, tuple[str, str]] = {}
         snapshot = run.get("support_department_snapshot") or {}
         if isinstance(snapshot.get("entries"), dict):
@@ -1248,7 +1260,7 @@ class PayrollService(CoreFlow):
                 document=document[0] if document else None,
                 document_source=document[1] if document else "",
                 profile=authority.get(key),
-                registered_part_time=DEFAULT_PART_TIME_RATES,
+                registered_part_time=registered_part_time,
                 known_names=names,
             )
             entry["teacher"] = teacher
@@ -1260,6 +1272,7 @@ class PayrollService(CoreFlow):
         """What the screen needs to explain full-time vs part-time honestly."""
         resolved = self._employment_types_for(run)
         pending = [item["teacher"] for item in resolved.values() if employment_needs_confirmation(item)]
+        rate_version = self._calculation_version(run, "part_time")
         return {
             "period": run["period"],
             "teachers": [resolved[name] for name in sorted(resolved)],
@@ -1271,9 +1284,73 @@ class PayrollService(CoreFlow):
                 "needs_confirmation": len(pending),
             },
             "needs_confirmation": pending,
-            "registered_part_time": dict(DEFAULT_PART_TIME_RATES),
+            "registered_part_time": {"version_id": (rate_version or {}).get("id"), "source": (rate_version or {}).get("source", ""), "teachers": len((rate_version or {}).get("profiles", []))},
             "saved_profile_count": len(self.store.list_employment_profiles()),
         }
+
+    def save_part_time_pay_decision(self, run_id: str, teacher_id: str, method: str, confirmed_by: str, *, amount: Any = None, manual_kind: str = "TOTAL", reason: str = "") -> dict:
+        """Record the selected monthly payment path for one confirmed part-time teacher."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        actor = str(confirmed_by or "").strip()
+        selected = str(method or "").strip().upper()
+        kind = str(manual_kind or "TOTAL").strip().upper()
+        note = str(reason or "").strip()
+        if not actor:
+            raise ValueError("请填写兼职工资确认人。")
+        if selected not in {"COMPANY_STANDARD", "MANUAL", "DEFERRED"}:
+            raise ValueError("请选择公司标准、手动填写或暂时留白。")
+        resolved = self._employment_types_for(run)
+        person = next((item for item in resolved.values() if item.get("teacher_id") == teacher_id or item.get("teacher") == teacher_id), None)
+        if not person or person.get("employment_type") != PART_TIME:
+            raise ValueError("当前 Run 中该教师尚未确认为兼职，请先处理用工性质。")
+
+        amount_value = None
+        status = "CONFIRMED"
+        source = ""
+        rate_version_id = ""
+        if selected == "COMPANY_STANDARD":
+            rate_version = self._calculation_version(run, "part_time")
+            profiles = (rate_version or {}).get("profiles", [])
+            has_rate = any(item.get("teacher") == person["teacher"] or item.get("teacher_id") == teacher_id for item in profiles)
+            rate_version_id = str((rate_version or {}).get("id") or "")
+            source = str((rate_version or {}).get("source") or "尚未登记兼职工资标准")
+            if not has_rate:
+                status = "WAITING_FOR_AUTHORITY"
+                note = note or "知识库没有兼职费标准，且当前核算未绑定适用的标准版本。"
+        elif selected == "MANUAL":
+            if kind not in {"TOTAL", "UNIT_RATE"}:
+                raise ValueError("请选择手动填写本月工资总额或每节单价。")
+            try:
+                amount_value = float(amount)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("请填写有效的兼职工资金额或单价。") from exc
+            if not math.isfinite(amount_value) or amount_value < 0:
+                raise ValueError("兼职工资金额或单价必须是非负有限数值。")
+            if not note:
+                raise ValueError("请填写本次手动确认的简短依据。")
+            source = "本月手动确认兼职工资" if kind == "TOTAL" else "本月手动确认兼职每节单价"
+        else:
+            status = "DEFERRED"
+            source = "用户选择暂时留白"
+            note = note or "兼职工资待补充；保留空白，不按 0 计算。"
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        decision = {
+            "version": "RUN_PART_TIME_PAY_DECISION/v1", "run_id": run_id, "period": run["period"],
+            "teacher": person["teacher"], "teacher_id": person.get("teacher_id") or teacher_id,
+            "method": selected, "manual_kind": kind if selected == "MANUAL" else "",
+            "amount": amount_value, "status": status, "source": source,
+            "rate_version_id": rate_version_id, "reason": note,
+            "confirmed_by": actor, "confirmed_at": timestamp,
+        }
+        run.setdefault("part_time_pay_decisions", {})[person["teacher"]] = decision
+        run.setdefault("part_time_pay_decision_history", []).append(decision)
+        run["business_context_stale"] = True
+        run.pop("generated_payroll", None)
+        invalidate_business_decisions(run.setdefault("business_decisions", []))
+        self.store.save(run)
+        return self.check(run_id) if self._materials_ready(run) else self.render(run)
 
     # ------------------------------------------------- 支持部工资表（正式来源）
     def support_snapshot(self, run_id: str) -> dict | None:
@@ -1293,6 +1370,10 @@ class PayrollService(CoreFlow):
             "field_map": snapshot.get("field_map", []),
             "gaps": snapshot.get("gaps", []),
             "counts": snapshot.get("counts", {}),
+            "comment_count": snapshot.get("comment_count"),
+            "comment_fields": snapshot.get("comment_fields", []),
+            "source_comment_count": snapshot.get("source_comment_count"),
+            "source_comment_fields": snapshot.get("source_comment_fields", []),
             "entries": len(snapshot.get("entries") or {}),
             "source_type": SUPPORT_SOURCE_TYPE,
         }
@@ -1331,6 +1412,7 @@ class PayrollService(CoreFlow):
                 "items": row["items"],
                 "base_salary": {code: value for code, value in row["base_salary"].items()},
                 "star_rating": row["star_rating"],
+                "annotations": list(row.get("annotations") or []),
                 "provenance": row["provenance"],
             }
         snapshot = {
@@ -1347,9 +1429,14 @@ class PayrollService(CoreFlow):
             "field_map": preview["field_map"],
             "gaps": preview["gaps"],
             "counts": preview["counts"],
+            "comment_count": preview["counts"].get("comments", 0),
+            "comment_fields": preview["counts"].get("comment_fields", []),
+            "source_comment_count": preview["counts"].get("source_comment_count", 0),
+            "source_comment_fields": preview["counts"].get("source_comment_fields", []),
             "month_without_history": preview["month_without_history"],
             "history_only": preview["history_only"],
             "entries": entries,
+            "source_path": str(source),
             "confirmed_by": actor,
         }
         unsigned = {key: value for key, value in snapshot.items() if key != "sha256"}
@@ -1372,6 +1459,60 @@ class PayrollService(CoreFlow):
             "entries": len(entries),
             "field_map": snapshot["field_map"],
             "counts": preview["counts"],
+        }
+
+    def refresh_support_annotations_from_source(self, run_id: str, path: str, expected_sha256: str) -> dict:
+        """Refresh only source-cell notes on an already-confirmed support snapshot.
+
+        This migration path intentionally preserves salary values, identity
+        fields, original confirmer and source confirmation time. It is safe
+        for older Runs whose support snapshot predates comment retention.
+        """
+        run = self._load(run_id)
+        self._require_fresh(run)
+        snapshot = copy.deepcopy(run.get("support_department_snapshot") or {})
+        source = Path(path).expanduser().resolve()
+        if not snapshot or not source.is_file():
+            raise ValueError("当前 Run 没有已确认的支持部来源，或原文件不可读取。")
+        before = source_fingerprint(source)
+        if not expected_sha256 or before["sha256"] != expected_sha256 or snapshot.get("source_sha256") != expected_sha256:
+            raise ValueError("支持部来源与已确认版本不一致；不能只刷新批注。")
+        preview = preview_support_department(source, run["period"], self._roster_facts(run)["teachers"])
+        if source_changed(before, source_fingerprint(source)) or not preview.get("can_import"):
+            raise ValueError("支持部文件在读取期间发生变化，或无法重新匹配当前教师；没有写入任何批注。")
+
+        entries = snapshot.get("entries") if isinstance(snapshot.get("entries"), dict) else {}
+        matched_rows = 0
+        for row in preview.get("rows", []):
+            previous = entries.get(row["teacher_id"])
+            if not isinstance(previous, dict):
+                previous = next((item for item in entries.values() if isinstance(item, dict) and item.get("display_name") == row["teacher"]), None)
+            if not isinstance(previous, dict):
+                raise ValueError("当前来源教师集合与原支持部快照不同；不会只更新部分批注。")
+            for section in ("identity", "items", "base_salary"):
+                if previous.get(section, {}) != row.get(section, {}):
+                    raise ValueError("支持部工资值或身份资料已变化；本入口只允许刷新批注，不会覆盖原值。")
+            previous["annotations"] = list(row.get("annotations") or [])
+            matched_rows += 1
+
+        if matched_rows != len(entries):
+            raise ValueError("来源教师集合与原支持部快照不同；不会更新批注。")
+        snapshot["comment_count"] = preview["counts"].get("comments", 0)
+        snapshot["comment_fields"] = preview["counts"].get("comment_fields", [])
+        snapshot["source_comment_count"] = preview["counts"].get("source_comment_count", 0)
+        snapshot["source_comment_fields"] = preview["counts"].get("source_comment_fields", [])
+        snapshot["source_path"] = str(source)
+        snapshot["annotations_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+        unsigned = {key: value for key, value in snapshot.items() if key != "sha256"}
+        snapshot["sha256"] = hashlib.sha256(json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        run["support_department_snapshot"] = snapshot
+        self._clear_superseded_base_salary_defer(run, source_label="同一已确认支持部工资快照")
+        run.pop("generated_payroll", None)
+        self.store.save(run)
+        return {
+            "run": self.render(run), "comment_count": snapshot["comment_count"],
+            "comment_fields": list(snapshot["comment_fields"]), "matched_rows": matched_rows,
+            "source_sha256": expected_sha256,
         }
 
     def preview_base_salary_import(self, run_id: str, path: str) -> dict:
@@ -1516,6 +1657,7 @@ class PayrollService(CoreFlow):
         snapshot["sha256"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         run["base_salary_inputs"] = normalized
         run["base_salary_input_snapshot"] = snapshot
+        self._clear_superseded_base_salary_defer(run, source_label=source)
         run["business_context_stale"] = True
         # Validate the complete snapshot before saving it, including the
         # derived M value for every submitted teacher.
@@ -1523,6 +1665,35 @@ class PayrollService(CoreFlow):
             base_salary_field(teacher, normalized)
         self.store.save_base_salary_profiles_and_run(list(profile_writes.values()), run)
         return self.render(run)
+
+    def _clear_superseded_base_salary_defer(self, run: dict, *, source_label: str) -> bool:
+        """Clear a stale defer marker only when every current full-time M is determined."""
+        if not run.get("base_salary_deferred") or not run.get("base_salary_input_snapshot"):
+            return False
+        employment = self._employment_types_for(run)
+        for teacher, item in employment.items():
+            kind = item.get("employment_type")
+            if employment_needs_confirmation(item) or kind == UNKNOWN:
+                return False
+            if kind == PART_TIME:
+                continue
+            salary = (run.get("base_salary_inputs") or {}).get(teacher)
+            m_field = (salary or {}).get("m") if isinstance(salary, dict) else None
+            if not isinstance(m_field, dict) or m_field.get("state") != "DETERMINED":
+                return False
+        cleared_at = datetime.now(timezone.utc).isoformat()
+        run.setdefault("base_salary_deferred_history", []).append({
+            "status": "SUPERSEDED_BY_CONFIRMED_BASE_SALARY_SOURCE",
+            "prior_confirmed_by": run.get("base_salary_deferred_by", ""),
+            "prior_confirmed_at": run.get("base_salary_deferred_at"),
+            "cleared_at": cleared_at,
+            "source": source_label,
+            "source_snapshot_sha256": (run.get("base_salary_input_snapshot") or {}).get("sha256", ""),
+        })
+        run["base_salary_deferred"] = False
+        run["base_salary_deferred_by"] = ""
+        run["base_salary_deferred_at"] = None
+        return True
 
     def confirm_af_policy(self, run_id: str, confirmed_by: str, *, default_obligation_hours: float = 30, exceptions: dict | None = None, reason: str = "") -> dict:
         """Confirm this Run's default obligation-hours policy once.
@@ -2492,6 +2663,38 @@ class PayrollService(CoreFlow):
 
     def _generated_from_checked(self, checked: dict):
         """Build the one canonical final-field result used by preview/export."""
+        core_result = dict(checked["core_calculation"])
+        if not core_result.get("source_records"):
+            schedule_file = (checked.get("files") or {}).get("schedule") or {}
+            source_name = Path(str(schedule_file.get("name") or "")).name
+            source_records = []
+            schedule_path = Path(str(schedule_file.get("path") or "")) if schedule_file.get("path") else None
+            if schedule_path and schedule_path.is_file():
+                reads = self._read_for_run("schedule", schedule_path, checked)
+                if not reads.errors:
+                    records = self._apply_schedule_grade_resolutions(reads.records, checked)
+                    for record in records:
+                        provenance = {}
+                        for field, evidence in (getattr(record, "provenance", {}) or {}).items():
+                            if field == "student":
+                                continue
+                            provenance[field] = {
+                                "source_file": Path(str(getattr(evidence, "source_file", "") or "")).name,
+                                "sheet": str(getattr(evidence, "sheet", "") or ""),
+                                "coordinate": str(getattr(evidence, "coordinate", "") or ""),
+                                "source_field": str(getattr(evidence, "source_field", "") or ""),
+                            }
+                        source_records.append({
+                            "record_key": course_record_key(record), "teacher": record.teacher,
+                            "source": Path(str(record.source or source_name)).name, "provenance": provenance,
+                        })
+            if not source_records:
+                source_records = [
+                    {"record_key": item.get("record_key", ""), "teacher": item.get("teacher", ""), "source": source_name, "provenance": {}}
+                    for item in core_result.get("course_contributions", [])
+                    if isinstance(item, Mapping) and item.get("record_key")
+                ]
+            core_result["source_records"] = source_records
         bindings = checked.get("business_input_bindings", [])
         inputs = [
             item for binding in bindings
@@ -2508,12 +2711,13 @@ class PayrollService(CoreFlow):
             # field semantics.
             base_salary = None
         return generated_from_calculation(
-            checked["core_calculation"],
+            core_result,
             business_inputs=inputs,
             base_salary_inputs=base_salary,
             renewal_snapshot=checked.get("run_renewal_result_snapshot"),
             employment_types={name: item["employment_type"] for name, item in self._employment_types_for(checked).items()},
             support_snapshot=checked.get("support_department_snapshot"),
+            part_time_pay_decisions=checked.get("part_time_pay_decisions"),
         )
 
     def writeback_to_generated(self, run_id: str, candidate_ids: list[str], output_path: str, reviewer: str, strategy: str = "APPEND") -> dict:

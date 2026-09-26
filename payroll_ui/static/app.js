@@ -131,7 +131,7 @@ async function api(url, options = {}) {
       const labels = [
         ["/check", "正在重新核对…"], ["/preview", "正在核算…"], ["/generate", "正在生成工资表…"],
         ["/base-salary-defer", "正在保存并核算…"], ["/base-salary", "正在保存…"], ["/period-window", "正在保存周期…"], ["/period-authority", "正在同步人工月…"], ["/period-document/import", "正在导入人工月…"], ["/af-policy", "正在保存…"],
-        ["/support", "正在导入支持部工资资料…"], ["/employment", "正在保存用工性质…"],
+        ["/support", "正在导入支持部工资资料…"], ["/employment", "正在保存用工性质…"], ["/part-time-pay-decision", "正在保存兼职工资方式…"],
         ["/company-template", "正在保存模板…"], ["/decisions", "正在保存…"],
       ];
       const label = labels.find(([suffix]) => path.endsWith(suffix))?.[1] || "正在处理…";
@@ -574,6 +574,8 @@ function renderTab() {
   if (tab === "base-salary") {
     view.innerHTML = baseSalaryPage();
     bindBaseSalaryDropZone();
+    const partTime = (current.employment?.teachers || []).filter((item) => item.employment_type === "PART_TIME");
+    if (partTime.length) view.insertAdjacentHTML("beforeend", partTimePayCard(partTime));
   }
   if (tab === "overview") view.innerHTML = overviewPage();
   if (tab === "issues") view.innerHTML = issuesPage();
@@ -623,6 +625,23 @@ function baseSalaryImportMarkup() {
 
 // 用工性质：全职 / 兼职 是人的长期事实，不是每月重填的选项。
 // 兼职教师按课时计酬，不适用全职基本工资，所以不会出现在“缺 G～L”的待办里。
+function partTimePayCard(partTime) {
+  if (!partTime.length) return "";
+  const decisions = current.part_time_pay_decisions || {};
+  const standardProfiles = current.run_policy_snapshot?.part_time_rates || [];
+  const standardSource = current.authority_context?.part_time_rates?.source || "";
+  const standardNote = standardProfiles.length
+    ? `本次核算绑定了 ${standardProfiles.length} 条兼职标准；系统按教师和课程条件匹配。`
+    : "当前知识库没有兼职费率条款，本次核算也没有适用的标准版本。公司标准选项会保持待确认，不会套用上月或写死单价。";
+  const rows = partTime.map((person) => {
+    const decision = decisions[person.teacher] || {};
+    const kind = decision.manual_kind || "TOTAL";
+    const status = decision.status === "DEFERRED" ? "暂时留白，待补充" : decision.status === "WAITING_FOR_AUTHORITY" ? "待公司标准来源" : decision.status === "CONFIRMED" ? "已保存" : "尚未选择";
+    return `<tr class="part-time-pay-row" data-teacher="${escapeHtml(person.teacher)}"><td><strong>${escapeHtml(person.teacher)}</strong><div class="small muted">${escapeHtml(status)}</div></td><td><select class="part-time-method"><option value="" ${!decision.method ? "selected" : ""}>请选择</option><option value="COMPANY_STANDARD" ${decision.method === "COMPANY_STANDARD" ? "selected" : ""}>按公司标准自动计算</option><option value="MANUAL" ${decision.method === "MANUAL" ? "selected" : ""}>手动填写</option><option value="DEFERRED" ${decision.method === "DEFERRED" ? "selected" : ""}>暂时留白</option></select><select class="part-time-manual-kind"><option value="TOTAL" ${kind === "TOTAL" ? "selected" : ""}>填写本月工资总额</option><option value="UNIT_RATE" ${kind === "UNIT_RATE" ? "selected" : ""}>填写每节单价</option></select></td><td><input class="part-time-pay-amount" type="number" min="0" step="0.01" value="${escapeHtml(decision.amount ?? "")}" placeholder="${kind === "UNIT_RATE" ? "元/节" : "元"}"></td><td><input class="part-time-pay-reason" value="${escapeHtml(decision.reason || "")}" placeholder="填写依据；暂时留白可默认说明"></td><td><span class="small muted">${escapeHtml(decision.source || standardSource || "—")}</span><button type="button" onclick="savePartTimePayDecision('${escapeHtml(person.teacher)}')">保存本月方式</button></td></tr>`;
+  }).join("");
+  return `<section id="part-time-pay-card" class="card part-time-pay-card"><div class="section-head"><div><h3>本月兼职工资</h3><p class="muted">每位教师选一种方式；兼职身份会跨月沿用，工资金额按本月决定。</p></div></div><div class="banner ${standardProfiles.length ? "info" : "warning"}"><strong>公司标准</strong><span>${escapeHtml(standardNote)}</span></div><label class="person-field">确认人<input id="part-time-pay-confirmed-by" value="${escapeHtml(current.part_time_pay_decisions?.[partTime[0].teacher]?.confirmed_by || current.support_source?.confirmed_by || current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>处理方式</th><th>金额 / 单价</th><th>本次依据</th><th>来源 / 操作</th></tr></thead><tbody>${rows}</tbody></table></div><p class="small muted">手动填写可选择本月总额或每节单价；暂时留白会保持待补充，不按 0 计算。</p></section>`;
+}
+
 function employmentCard() {
   const employment = current.employment || {};
   const counts = employment.counts || {};
@@ -657,6 +676,44 @@ async function saveEmploymentProfile(teacher) {
   } catch (error) { showMessage(error.message); }
 }
 
+async function savePartTimePayDecision(teacher) {
+  const row = [...document.querySelectorAll(".part-time-pay-row")].find((item) => item.dataset.teacher === teacher);
+  if (!row) return showMessage("找不到这位兼职教师的本月工资行。", "error");
+  const method = row.querySelector(".part-time-method")?.value || "";
+  const manualKind = row.querySelector(".part-time-manual-kind")?.value || "TOTAL";
+  const rawAmount = row.querySelector(".part-time-pay-amount")?.value;
+  const confirmedBy = $("#part-time-pay-confirmed-by")?.value?.trim() || "";
+  if (!method) return showMessage("请选择公司标准、手动填写或暂时留白。", "error");
+  if (!confirmedBy) {
+    $("#part-time-pay-confirmed-by")?.focus();
+    return showMessage("请填写本次兼职工资确认人。", "error");
+  }
+  if (method === "MANUAL" && (rawAmount === "" || !Number.isFinite(Number(rawAmount)))) {
+    row.querySelector(".part-time-pay-amount")?.focus();
+    return showMessage(manualKind === "UNIT_RATE" ? "请填写本月兼职每节单价。" : "请填写本月兼职工资总额。", "error");
+  }
+  try {
+    current = await api(`/api/runs/${current.id}/part-time-pay-decision`, {
+      method: "POST",
+      body: JSON.stringify({
+        teacher_id: teacher,
+        method,
+        confirmed_by: confirmedBy,
+        amount: method === "MANUAL" ? Number(rawAmount) : null,
+        manual_kind: manualKind,
+        reason: row.querySelector(".part-time-pay-reason")?.value?.trim() || "",
+      }),
+    });
+    renderRun();
+    const saved = current.part_time_pay_decisions?.[teacher] || {};
+    showMessage(saved.status === "WAITING_FOR_AUTHORITY"
+      ? "已记录公司标准选项；当前没有该教师本月适用的权威费率，工资保持待确认。"
+      : saved.status === "DEFERRED"
+        ? "已记录暂时留白；本月兼职工资保持空白，不按 0 计算。"
+        : "本月兼职工资方式已保存，并已重新核算。", saved.status === "CONFIRMED" || saved.status === "DEFERRED" ? "success" : "info");
+  } catch (error) { await refreshAfterError(error); }
+}
+
 function supportSourceCard() {
   const source = current.support_source || {};
   if (!source.bound) {
@@ -665,7 +722,10 @@ function supportSourceCard() {
   const rows = (source.field_map || []).filter((item) => item.business_name).map((item) => `<tr><td>${escapeHtml(item.business_name)}</td><td>${escapeHtml(item.final_field)}</td><td>${escapeHtml(item.source_column || "—")}</td><td>${escapeHtml(item.source === "NOT_PRESENT_IN_MATERIAL" ? "本期资料没有" : item.source)}</td><td>${item.inherited ? "原值沿用" : "不沿用"}</td><td>${item.feeds_av ? "是" : "否"}</td></tr>`).join("");
   const identity = Object.entries(source.identity_fields || {}).filter(([, value]) => value).map(([name, value]) => `${escapeHtml(String(value).split("\n")[0])}`).join("、");
   const gaps = (source.gaps || []).map((item) => item.business_name).filter(Boolean);
-  return `<section id="support-source-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>支持部工资资料</h2><p class="muted">来源：${escapeHtml(source.source_name || "")} · 工作表 ${escapeHtml(source.source_sheet || "")} · ${escapeHtml(source.entries || 0)} 位教师 · 确认人 ${escapeHtml(source.confirmed_by || "—")}</p></div><span class="status ok">已绑定</span></div><p class="small muted">同时提供的身份字段：${identity || "—"}</p>${gaps.length ? `<div class="banner info"><strong>本期资料没有这些项目</strong><span>${escapeHtml(gaps.join("、"))}；系统不会替它们填 0。</span></div>` : ""}<div class="table-wrap"><table class="table"><thead><tr><th>业务名称</th><th>最终字段</th><th>支持部源表列</th><th>来源</th><th>是否直接沿用</th><th>是否参与 AV</th></tr></thead><tbody>${rows}</tbody></table></div><div class="action-bar"><button class="secondary" onclick="openBaseSalaryPage('${escapeHtml(current.id)}')">更新支持部工资资料</button><button class="secondary" onclick="deriveRatingFromSupport()">用这份资料的「教师级别」生成星级版本</button></div></section>`;
+  const commentStatus = source.comment_count == null
+    ? "这份历史工资资料还没有保存源表批注；工资值不会改动，批注需要从原确认文件补齐。"
+    : `源表 ${escapeHtml(source.source_comment_count ?? 0)} 条批注，涉及 ${escapeHtml((source.source_comment_fields || []).join("、") || "无字段")}；本次工资已匹配 ${escapeHtml(source.comment_count)} 条，目标字段 ${escapeHtml((source.comment_fields || []).join("、") || "无")}。`;
+  return `<section id="support-source-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>支持部工资资料</h2><p class="muted">来源：${escapeHtml(source.source_name || "")} · 工作表 ${escapeHtml(source.source_sheet || "")} · ${escapeHtml(source.entries || 0)} 位教师 · 确认人 ${escapeHtml(source.confirmed_by || "—")}</p></div><span class="status ok">已绑定</span></div><p class="small muted">同时提供的身份字段：${identity || "—"}</p><p class="small muted">批注：${commentStatus}</p>${gaps.length ? `<div class="banner info"><strong>本期资料没有这些项目</strong><span>${escapeHtml(gaps.join("、"))}；系统不会替它们填 0。</span></div>` : ""}<div class="table-wrap"><table class="table"><thead><tr><th>业务名称</th><th>最终字段</th><th>支持部源表列</th><th>来源</th><th>是否直接沿用</th><th>是否参与 AV</th></tr></thead><tbody>${rows}</tbody></table></div><div class="action-bar"><button class="secondary" onclick="openBaseSalaryPage('${escapeHtml(current.id)}')">更新支持部工资资料</button><button class="secondary" onclick="deriveRatingFromSupport()">用这份资料的「教师级别」生成星级版本</button></div></section>`;
 }
 
 // 星级正常来自工资资料里的「教师级别」，不需要用户自己维护生效期和版本信息。
@@ -1288,10 +1348,10 @@ const FIELD_DISPLAY_LABELS = {
   AE: "该档每小时金额",
   AF: "总课时费",
   AG: "领航伴学课时费",
-  AH: "1对1课时（续费+推荐）",
-  AI: "班课&1对2领航伴课次",
-  AJ: "小班领航伴学课次",
-  AK: "推荐续费奖",
+  AH: "一对一续费",
+  AI: "班课续费",
+  AJ: "领航续费",
+  AK: "续费绩效",
   AL: "进步率奖金",
   AM: "管理团队奖",
   AN: "退费/拒收学员",
@@ -1316,7 +1376,7 @@ function renewalPreviewMarkup() {
   const rows = (preview.matched || []).map((item) => `<tr><td>${escapeHtml(item.teacher)}</td><td>${escapeHtml(item.AH)}</td><td>${escapeHtml(item.AI)}</td><td>${escapeHtml(item.AJ)}</td><td>${escapeHtml(item.sheet)} 第 ${escapeHtml(item.source_row)} 行</td></tr>`).join("");
   const missing = preview.unmatched_run_teachers?.length ? `<p class="small warn">当前核算仍有 ${escapeHtml(preview.unmatched_run_teachers.length)} 位教师未匹配续费来源：${escapeHtml(preview.unmatched_run_teachers.join("、"))}。这些人的续费字段继续待确认。</p>` : "";
   const conflicts = (preview.conflicts || []).map((item) => `<p class="small bad">${escapeHtml(item.code)} · ${escapeHtml(item.sheet || "")} 第 ${escapeHtml(item.source_row || "?")} 行</p>`).join("");
-  return `<section class="renewal-preview"><h3>本月续费课时核对</h3><p class="small muted">${escapeHtml(preview.source_name)} · ${escapeHtml(preview.source_rows)} 条来源 · ${escapeHtml(preview.matched.length)} 位当前核算教师匹配 · ${escapeHtml(preview.outside_run_rows)} 条属于其它教师</p>${missing}${conflicts}${rows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>AH 1V1</th><th>AI 班课</th><th>AJ 领航</th><th>来源</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}${preview.can_confirm ? `<label class="inline-check"><input id="renewal-source-approved" type="checkbox" onchange="$('#renewal-confirm-button').disabled = !this.checked">我确认这张表的 ${escapeHtml(preview.period)} 记录是本次工资核算的最终有效续费来源</label><label>确认人<input id="renewal-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button id="renewal-confirm-button" disabled onclick="confirmRenewalMaterial()">确认并用于本次工资</button></div>` : '<p class="small bad">还有重复或合计缺失，不能绑定工资。</p>'}</section>`;
+  return `<section class="renewal-preview"><h3>本月续费资料</h3><p class="small muted">来源：${escapeHtml(preview.source_name)} · 工资月份：${escapeHtml(preview.period)} · ${escapeHtml(preview.source_rows)} 条来源 · ${escapeHtml(preview.matched.length)} 位当前核算教师匹配 · ${escapeHtml(preview.outside_run_rows)} 条属于其它教师</p>${missing}${conflicts}${rows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>AH｜一对一续费</th><th>AI｜班课续费</th><th>AJ｜领航续费</th><th>来源行</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}${preview.can_confirm ? `<label class="inline-check"><input id="renewal-source-approved" type="checkbox" onchange="$('#renewal-confirm-button').disabled = !this.checked">我确认这张表的 ${escapeHtml(preview.period)} 记录是本次工资核算的最终有效续费来源</label><label>确认人<input id="renewal-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button id="renewal-confirm-button" disabled onclick="confirmRenewalMaterial()">确认并用于本次工资</button></div>` : '<p class="small bad">还有重复或合计缺失，不能绑定工资。</p>'}</section>`;
 }
 
 async function previewRenewalMaterial() {
@@ -1389,8 +1449,10 @@ function payrollPreviewPage() {
     : "核对模式只对照已有工资表，不会在这里生成新的工资表。";
   const renewal = current.run_renewal_result_snapshot;
   const importedRenewal = current.material_inputs?.renewal;
+  const confirmation = current.renewal_source_confirmation || {};
+  const unmatchedRenewal = confirmation.unmatched_run_teachers || [];
   const renewalNote = renewal
-    ? `<div class="banner info"><strong>续费已用于本次工资</strong><span>已确认并绑定 ${escapeHtml(Object.keys(renewal.entries || {}).length)} 位教师；AH、AI、AJ、AK 可在教师详情查看。</span></div>`
+    ? `<div class="banner info"><strong>本月续费已确认并进入工资</strong><span>来源：${escapeHtml(confirmation.source_name || current.material_inputs?.renewal?.name || "续费结果表")} · 月份：${escapeHtml(renewal.period_label || current.period)} · 已绑定 ${escapeHtml(Object.keys(renewal.entries || {}).length)} 位教师 · 确认人：${escapeHtml(confirmation.actor || "—")}。AH 一对一续费、AI 班课续费、AJ 领航续费已保存；AK 续费绩效由同一快照计算。${unmatchedRenewal.length ? `另有 ${unmatchedRenewal.length} 位教师未匹配来源，仍待核实。` : ""}</span></div>`
     : importedRenewal
       ? `<div class="banner info"><strong>续费资料已导入，工资字段待确认</strong><span>系统会读取当前月份的 1V1、班课和领航合计；确认后才进入 AH、AI、AJ、AK。</span><button class="secondary" onclick="previewRenewalMaterial()">核对本月续费课时</button></div>`
       : "";

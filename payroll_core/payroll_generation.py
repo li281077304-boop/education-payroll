@@ -229,17 +229,15 @@ def build_legacy_generated_payroll(
     )
 
 
-def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None, renewal_snapshot: Mapping[str, object] | None = None, employment_types: Mapping[str, str] | None = None, support_snapshot: Mapping[str, object] | None = None) -> GeneratedPayroll:
+def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None, renewal_snapshot: Mapping[str, object] | None = None, employment_types: Mapping[str, str] | None = None, support_snapshot: Mapping[str, object] | None = None, part_time_pay_decisions: Mapping[str, Mapping[str, object]] | None = None) -> GeneratedPayroll:
     """Pure presentation adapter. No payroll inputs or second set of formulae."""
     rows = []
     reasons = set()
     inputs = tuple(business_inputs)
     employment = {str(key): str(value) for key, value in (employment_types or {}).items()}
     for row in result["rows"]:
-        fields = row["fields"]
+        fields = {key: dict(value) if isinstance(value, Mapping) else value for key, value in row["fields"].items()}
         payable_states = {"DETERMINED", "NOT_APPLICABLE", "ESTIMATED"}
-        blockers = tuple(sorted({str(v.get("reason") or v["state"]) for v in fields.values() if v["state"] not in payable_states}))
-        reasons.update(blockers)
         def value(key: str):
             raw = fields.get(key, {}).get("value")
             if raw is None:
@@ -252,10 +250,34 @@ def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mappin
                 return raw
         core_values = {key: fields.get(key, {}) for key in ("AF", "PART_TIME")}
         declared = employment.get(str(row["teacher"]), str(row.get("employment_type", "FULL_TIME")))
+        decision = (part_time_pay_decisions or {}).get(str(row["teacher"]), {})
+        if declared == "PART_TIME" and decision.get("method") == "MANUAL" and decision.get("manual_kind") == "TOTAL" and decision.get("status") == "CONFIRMED":
+            core_values["PART_TIME"] = {
+                "value": decision.get("amount"), "state": "DETERMINED",
+                "reason": "兼职工资按本次确认的月工资总额录入。",
+                "evidence": [{"kind": "RUN_PART_TIME_MANUAL_TOTAL", "source": decision.get("source", ""), "source_result_id": decision.get("id", ""), "inputs": {"period": decision.get("period", ""), "confirmed_by": decision.get("confirmed_by", ""), "confirmed_at": decision.get("confirmed_at", ""), "reason": decision.get("reason", ""), "amount": str(decision.get("amount", ""))}}],
+            }
+            fields["PART_TIME"] = dict(core_values["PART_TIME"])
+        elif declared == "PART_TIME" and decision.get("method") == "DEFERRED":
+            core_values["PART_TIME"] = {
+                "value": None, "state": "DEFERRED",
+                "reason": "兼职工资待补充；本次保留空白，不按 0 计算。",
+                "evidence": [{"kind": "RUN_PART_TIME_DEFERRED", "source": decision.get("source", ""), "inputs": {"period": decision.get("period", ""), "confirmed_by": decision.get("confirmed_by", ""), "confirmed_at": decision.get("confirmed_at", ""), "reason": decision.get("reason", "")}}],
+            }
+            fields["PART_TIME"] = dict(core_values["PART_TIME"])
+        elif declared == "PART_TIME" and decision.get("method") == "COMPANY_STANDARD" and decision.get("status") == "WAITING_FOR_AUTHORITY":
+            core_values["PART_TIME"] = {
+                "value": None, "state": "NEEDS_INPUT",
+                "reason": "尚无适用本月和该教师的公司兼职标准；可手动填写或暂时留白。",
+                "evidence": [{"kind": "PART_TIME_AUTHORITY_MISSING", "source": decision.get("source", ""), "inputs": {"period": decision.get("period", "")}}],
+            }
+            fields["PART_TIME"] = dict(core_values["PART_TIME"])
         if base_salary_inputs is not None:
             core_values["M"] = base_salary_field(row["teacher"], base_salary_inputs, declared)
         final_fields = resolve_final_fields(teacher=row["teacher"], core_fields=core_values, business_inputs=inputs, employment_type=declared, default_zero_missing=default_zero_missing, renewal_snapshot=renewal_snapshot, support_snapshot=support_snapshot)
+        blockers = tuple(sorted({str(v.get("reason") or v["state"]) for v in fields.values() if v["state"] not in payable_states}))
         final_blockers = {str(item.get("reason") or item.get("state")) for item in final_fields.values() if item.get("state") not in payable_states}
+        reasons.update(blockers)
         reasons.update(final_blockers)
         blockers = tuple(sorted(set(blockers) | final_blockers))
         rows.append(CorePayrollRow(teacher=row["teacher"], one_to_one=value("AA"), class_value=value("AC"), teaching_hours=value("AD"), ae=value("AE"), af=value("AF"), part_time_amount=value("PART_TIME"), star=_star_from_fields(fields), fields=fields, final_fields=final_fields, status=STATUS_NEEDS_CONFIRMATION if blockers else STATUS_FINAL, blockers=blockers))

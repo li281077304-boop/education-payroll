@@ -374,6 +374,16 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         effective_from=str(payload.get("effective_from", "")),
                         effective_to=str(payload.get("effective_to", "9999-12")),
                     ), HTTPStatus.CREATED)
+                if action == "part-time-pay-decision":
+                    return self._json(self.server.service.save_part_time_pay_decision(
+                        run_id,
+                        str(payload.get("teacher_id", "")),
+                        str(payload.get("method", "")),
+                        str(payload.get("confirmed_by", "")),
+                        amount=payload.get("amount"),
+                        manual_kind=str(payload.get("manual_kind", "TOTAL")),
+                        reason=str(payload.get("reason", "")),
+                    ))
                 if action == "rating-from-support":
                     # 星级就从同一份支持部资料派生，不要求再上传一次。
                     return self._json(self.server.service.derive_rating_from_support(

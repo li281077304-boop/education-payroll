@@ -20,7 +20,7 @@ class ImportedBusinessResult:
 ALIASES = {
     "teacher": ("教师", "老师", "任课老师", "责任教师", "责任老师", "charge_teacher", "teacher"),
     "teacher_id": ("teacher_id", "教师ID", "教师编号", "工号", "员工编号", "teacher id"),
-    "student": ("学生", "学生姓名", "学员", "student"),
+    "student": ("学生", "学生姓名", "学员", "student", "姓名"),
     "amount": ("退费金额", "金额", "退款金额", "amount", "headcount_amount", "performance_amount"),
     "note": ("说明", "备注", "退费原因", "备注说明", "note"),
 }

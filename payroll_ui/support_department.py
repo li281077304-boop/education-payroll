@@ -63,6 +63,19 @@ SUPPORT_INHERITED = ("AO", "AP", "AQ", "AR", "AT", "AU")
 # workbook may physically contain the column, but it is not the authority for
 # it, so it is reported and left to the subject-group source.
 SUPPORT_SEPARATE_AUTHORITY = ("AS",)
+_SUPPORT_COMMENT_TARGETS = {
+    "teacher_name": ("TEACHER", "教师姓名"),
+    "group": ("B", "科组"), "email": ("D", "邮箱"),
+    "hire_date": ("E", "入职日期"), "teacher_level": ("F", "教师级别"),
+    "G": ("G", "基本工资"), "H": ("H", "岗位津贴"),
+    "I": ("I", "工龄工资/教师等级"), "J": ("J", "其他待遇"),
+    "K": ("K", "应出勤"), "L": ("L", "实际出勤"),
+    "AH": ("AH", "一对一续费备注"), "AI": ("AI", "班课续费备注"),
+    "AJ": ("AJ", "领航续费备注"),
+    "AO": ("AO", "房租"), "AP": ("AP", "社保"),
+    "AQ": ("AQ", "工装费"), "AR": ("AR", "内部推荐奖金"),
+    "AT": ("AT", "补发工资"), "AU": ("AU", "考勤罚款"),
+}
 
 _CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _STAR_TOKEN = re.compile(r"([一二三四五六七八九\d]{1,2})\s*星")
@@ -208,6 +221,21 @@ def preview_support_department(path: str | Path, period: str, roster: list[dict[
 
     extra = _extra_columns(raw_sheet, selected["header_rows"])
     available = {name: _header_for_column(raw_sheet, selected["header_rows"], column) for name, column in extra.items()}
+    comment_column_fields = {column: name for name, column in selected["mapping"].items()}
+    comment_column_fields.update({column: name for name, column in extra.items()})
+    all_source_comments = []
+    for cells in raw_sheet.iter_rows():
+        for cell in cells:
+            comment = getattr(cell, "comment", None)
+            if comment is None or not str(comment.text or "").strip():
+                continue
+            source_field = comment_column_fields.get(cell.column, "")
+            target = _SUPPORT_COMMENT_TARGETS.get(source_field)
+            if target is None:
+                target = _SUPPORT_COMMENT_TARGETS.get(cell.column_letter)
+            header = _header_for_column(raw_sheet, selected["header_rows"], cell.column) or cell.column_letter
+            header = " / ".join(str(header).split())
+            all_source_comments.append((target[0] if target else cell.column_letter, header))
     preview["identity_fields"] = {name: available.get(name, "") for name in ("group", "email", "hire_date", "teacher_level")}
     preview["field_map"] = support_field_map(available)
     preview["gaps"] = [
@@ -271,6 +299,31 @@ def preview_support_department(path: str | Path, period: str, roster: list[dict[
             number = _numeric(raw)
             items[name] = number
         identity = {name: raw_sheet.cell(row_number, column).value for name, column in extra.items() if name in {"group", "email", "hire_date", "teacher_level"}}
+        comment_columns = {
+            "teacher_name": selected["mapping"]["teacher_name"],
+            **{code: selected["mapping"][code] for code in REQUIRED_FIELDS},
+            **{name: column for name, column in extra.items() if name in SUPPORT_INHERITED or name in {"group", "email", "hire_date", "teacher_level"}},
+        }
+        annotations = []
+        for source_field, column in comment_columns.items():
+            target = _SUPPORT_COMMENT_TARGETS.get(source_field)
+            comment = getattr(raw_sheet.cell(row_number, column), "comment", None)
+            if not target or not comment or not str(comment.text or "").strip():
+                continue
+            source_header = (
+                _header_for_column(raw_sheet, selected["header_rows"], column)
+                or selected.get("headers", {}).get(source_field, "")
+                or source_field
+            )
+            annotations.append({
+                "teacher_id": str(candidates[0].get("teacher_id") or teacher),
+                "teacher": candidates[0].get("display_name") or teacher,
+                "field_code": target[0], "display_label": target[1],
+                "text": str(comment.text).strip(), "source_type": SUPPORT_SOURCE_TYPE,
+                "source_file": source.name, "source_sheet": selected["sheet"],
+                "source_row": str(row_number), "source_field": source_header,
+                "generated_from": "SUPPORT_SOURCE_CELL_COMMENT",
+            })
         preview["rows"].append({
             "teacher": candidates[0].get("display_name") or teacher,
             "teacher_id": str(candidates[0].get("teacher_id") or teacher),
@@ -278,6 +331,7 @@ def preview_support_department(path: str | Path, period: str, roster: list[dict[
             "base_salary": base_fields,
             "items": items,
             "identity": identity,
+            "annotations": annotations,
             "star_rating": parse_star_rating(identity.get("teacher_level")),
             "provenance": {
                 "source_sha256": preview["source"].get("sha256", ""),
@@ -299,6 +353,10 @@ def preview_support_department(path: str | Path, period: str, roster: list[dict[
         "month_without_history": len(preview["month_without_history"]),
         "history_only": len(preview["history_only"]),
         "identity_required": len(preview["identity_required"]),
+        "comments": sum(len(item.get("annotations", [])) for item in preview["rows"]),
+        "comment_fields": sorted({annotation["field_code"] for item in preview["rows"] for annotation in item.get("annotations", [])}),
+        "source_comment_count": len(all_source_comments),
+        "source_comment_fields": sorted({f"{field}｜{header}" if field else header for field, header in all_source_comments}),
     }
     preview["can_import"] = bool(preview["rows"])
     for book in (raw_book, cached_book):

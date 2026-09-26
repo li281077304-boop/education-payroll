@@ -10,7 +10,10 @@ from ..models.evidence import AdapterIssue, AdapterResult
 from .weekly_report import _column, _load_rows, _number, _text, _sheet_row_number
 
 
-DEFAULT_PART_TIME_RATES: dict[str, float] = {"刘宇": 140.0, "张祥": 160.0, "胡涛": 170.0}
+# Kept as a compatibility export for older callers. Production has no
+# hard-coded part-time names or rates; rates must come from a dated authority
+# version or an explicit Run-level manual decision.
+DEFAULT_PART_TIME_RATES: dict[str, float] = {}
 
 
 @dataclass(frozen=True)
@@ -41,7 +44,8 @@ class IdentityConflict:
 
 
 def default_part_time_records(period: str, *, source: str = "兼职固定单价规则") -> tuple[PersonnelRecord, ...]:
-    return tuple(PersonnelRecord(name, "PART_TIME", rate, period, period, source, evidence={"rule": "fixed_rate_per_lesson"}) for name, rate in DEFAULT_PART_TIME_RATES.items())
+    """Compatibility helper; no synthetic default rate records are created."""
+    return ()
 
 
 def identity_conflicts(names: Iterable[str]) -> tuple[IdentityConflict, ...]:

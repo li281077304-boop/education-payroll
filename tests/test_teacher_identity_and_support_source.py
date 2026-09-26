@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 
 from payroll_core.adapters.personnel import DEFAULT_PART_TIME_RATES
 from payroll_core.employment import FULL_TIME, PART_TIME, UNKNOWN
@@ -187,29 +188,14 @@ def test_part_time_teacher_is_not_asked_for_a_full_time_base_salary(tmp_path):
     assert not any("G" in blocker and "缺少" in blocker for blocker in rows["兼职乙"].blockers)
 
 
-def test_a_registered_part_time_rule_is_flagged_but_never_silently_full_time(tmp_path):
-    """A registered rule resolves, but is still flagged for human review.
-
-    The names come from the repository's own rule table rather than being
-    hard-coded here, so the test describes behaviour, not a person.
-    """
-    registered = sorted(DEFAULT_PART_TIME_RATES)
-    exact = registered[0]
-    # Same length, same first character, one character different: exactly the
-    # shape the identity guard must refuse to merge on its own.
-    lookalike = exact[:-1] + ("甲" if exact[-1] != "甲" else "乙")
-
+def test_part_time_employment_is_not_inferred_from_legacy_default_rate_names(tmp_path):
+    """Historical example prices are not a current employment authority."""
+    assert DEFAULT_PART_TIME_RATES == {}
     service = PayrollService(tmp_path / "data")
-    run = _run(service, [exact, lookalike], tmp_path=tmp_path)
+    run = _run(service, ["测试教师甲"], tmp_path=tmp_path)
     overview = service.employment_overview(service.store.get(run["id"]))
-    by_name = {item["teacher"]: item for item in overview["teachers"]}
-
-    assert DEFAULT_PART_TIME_RATES[exact] > 0
-    assert by_name[exact]["employment_type"] == PART_TIME
-    assert by_name[exact]["needs_confirmation"] is True
-    # One character apart: identity is a question, not a guess.
-    assert by_name[lookalike]["employment_type"] == UNKNOWN
-    assert "同一人" in by_name[lookalike]["detail"]
+    assert overview["teachers"][0]["employment_type"] == UNKNOWN
+    assert overview["teachers"][0]["needs_confirmation"] is True
 
 
 def test_a_support_entry_is_document_evidence_of_full_time(tmp_path):
@@ -315,6 +301,11 @@ def _refund_workbook(path: Path) -> Path:
 def test_one_support_file_supplies_identity_and_support_pay_items(tmp_path):
     service = PayrollService(tmp_path / "data")
     run = _run(service, ["教师甲"], tmp_path=tmp_path)
+    stale = service.store.get(run["id"])
+    stale["base_salary_deferred"] = True
+    stale["base_salary_deferred_by"] = "核算负责人"
+    stale["base_salary_deferred_at"] = "2026-09-01T00:00:00+00:00"
+    service.store.save(stale)
     source = _support_workbook(tmp_path / "支持部.xlsx", [
         _teacher("教师甲", 社保=-452.66, 补发工资=1006.92, 房租=500),
     ])
@@ -322,6 +313,9 @@ def test_one_support_file_supplies_identity_and_support_pay_items(tmp_path):
 
     stored = service.store.get(run["id"])
     snapshot = stored["support_department_snapshot"]
+    assert stored["base_salary_deferred"] is False
+    assert stored["base_salary_deferred_by"] == ""
+    assert stored["base_salary_deferred_at"] is None
     entry = snapshot["entries"]["教师甲"]
     # B 科组 / D 邮箱 / E 入职日期 / F 教师级别 are inherited verbatim.
     assert entry["identity"]["group"] == "数学组"
@@ -367,6 +361,41 @@ def test_the_same_support_file_is_not_uploaded_twice(tmp_path):
     stored = service.store.get(run["id"])
     assert stored["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 2400
     assert stored["support_department_snapshot"]["entries"]["教师甲"]["items"]["AP"] == -300
+
+
+def test_support_annotation_refresh_preserves_confirmed_payroll_values(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = _run(service, ["教师甲"], tmp_path=tmp_path)
+    source = _support_workbook(tmp_path / "支持部.xlsx", [_teacher("教师甲", 岗位津贴=135)])
+    book = load_workbook(source)
+    book["教学部"]["H5"].comment = Comment("本项为当前岗位津贴来源备注。", "支持部")
+    book.save(source)
+    digest = _sha256(source)
+    service.import_support_department(run["id"], str(source), digest, "核算负责人")
+
+    stored = service.store.get(run["id"])
+    snapshot = stored["support_department_snapshot"]
+    before = {
+        teacher: {key: snapshot["entries"][teacher].get(key) for key in ("identity", "items", "base_salary")}
+        for teacher in snapshot["entries"]
+    }
+    confirmer, created_at = snapshot["confirmed_by"], snapshot["created_at"]
+    for entry in snapshot["entries"].values():
+        entry.pop("annotations", None)
+    snapshot.pop("comment_count", None)
+    snapshot.pop("comment_fields", None)
+    service.store.save(stored)
+
+    refreshed = service.refresh_support_annotations_from_source(run["id"], str(source), digest)
+    after = service.store.get(run["id"])["support_department_snapshot"]
+    entry = after["entries"]["教师甲"]
+    assert refreshed["comment_count"] == 1
+    assert refreshed["comment_fields"] == ["H"]
+    assert entry["annotations"][0]["field_code"] == "H"
+    assert entry["annotations"][0]["text"] == "本项为当前岗位津贴来源备注。"
+    assert {teacher: {key: after["entries"][teacher].get(key) for key in ("identity", "items", "base_salary")} for teacher in after["entries"]} == before
+    assert after["confirmed_by"] == confirmer
+    assert after["created_at"] == created_at
 
 
 def test_support_import_rejects_a_changed_file(tmp_path):

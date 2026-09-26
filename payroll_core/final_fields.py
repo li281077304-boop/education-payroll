@@ -574,7 +574,14 @@ def resolve_final_fields(
     # marker must not hide the separately determined PART_TIME amount: the
     # final-payroll AF field is still the payable amount and feeds AV.
     if employment_type == "PART_TIME" and part_time.get("state") == DETERMINED and part_time.get("value") is not None:
-        fields["AF"] = {**part_time, "reason": "兼职 AF = 已上课节数 × 已确认每节单价。"}
+        fields["AF"] = {**part_time, "reason": part_time.get("reason") or "兼职工资按本次已确认方式计算。"}
+    elif employment_type == "PART_TIME" and part_time.get("state") in {"DEFERRED", NEEDS_INPUT, HUMAN_REQUIRED, "NEEDS_CONFIRMATION"}:
+        fields["AF"] = {
+            **part_time,
+            "state": part_time.get("state"),
+            "value": None,
+            "reason": part_time.get("reason") or "兼职工资待确认或待补充。",
+        }
     elif af.get("state") in {DETERMINED, NOT_APPLICABLE, "ESTIMATED"}:
         fields["AF"] = dict(af)
     else:

@@ -204,7 +204,7 @@ def test_personnel_keeps_effective_rates_and_identity_conflict(tmp_path):
     assert not result.errors
     assert {item.teacher: item.fixed_rate for item in result.records} == {"刘宇": 140, "刘雨": 140, "张祥": 160}
     assert identity_conflicts(item.teacher for item in result.records)[0].names == ("刘宇", "刘雨")
-    assert DEFAULT_PART_TIME_RATES["胡涛"] == 170
+    assert DEFAULT_PART_TIME_RATES == {}
 
 
 def test_business_result_period_selects_grouped_month_sheet_and_subtotals(tmp_path):
@@ -256,22 +256,9 @@ def test_optional_personnel_read_failure_is_reported_not_raised(tmp_path):
     assert result.errors and result.errors[0].code == "UNREADABLE_PERSONNEL"
 
 
-def test_default_part_time_records_keep_effective_source_and_pay_by_lesson():
+def test_no_synthetic_part_time_defaults_are_created():
     records = default_part_time_records("2026-08", source="2026-08 人员资料确认")
-    by_teacher = {item.teacher: item for item in records}
-    assert {teacher: item.fixed_rate for teacher, item in by_teacher.items()} == {"刘宇": 140, "张祥": 160, "胡涛": 170}
-    assert all(item.effective_from == item.effective_to == "2026-08" for item in records)
-    assert all(item.source_file == "2026-08 人员资料确认" for item in records)
-
-    schedule = [ScheduleRecord("2026-08", "胡涛", "高二", "物理", "小班", 2, "已上课")]
-    result = calculate_payroll(
-        "2026-08", schedule, load_core_rules(),
-        teacher_contexts=[{"teacher": "胡涛", "employment_type": "PART_TIME", "effective_from": "2026-08", "effective_to": "2026-08", "source": "2026-08 人员资料确认"}],
-        part_time_rates=[{"teacher": item.teacher, "grade": "*", "rate_per_lesson": item.fixed_rate, "effective_from": item.effective_from, "effective_to": item.effective_to, "source": item.source_file, "approved_by": "审核员", "approved_at": "2026-08-01"} for item in records],
-    )
-    row = next(item for item in result.rows if item.teacher == "胡涛")
-    assert row.part_time_fee.value == 170
-    assert row.part_time_fee.evidence[0].source == "2026-08 人员资料确认"
+    assert records == ()
 
 
 def test_source_registry_deduplicates_same_hash_and_marks_unknown(tmp_path):

@@ -1,0 +1,54 @@
+{
+  "version": "PAYROLL_THIRD_ROUND_UAT/v1",
+  "date": "2026-09-26",
+  "branch": "feature/payroll-manual-uat-20260926",
+  "starting_head": "462f95d3be4a91ac25e5423fe5a040e30b3049f0",
+  "items": [
+    {"id": "PT-01", "status": "PARTIAL", "evidence": ["Real browser displayed and selected all three methods for each of the three current part-time rows without saving a real pay decision.", "Automated service tests cover persistence and reload."]},
+    {"id": "PT-02", "status": "PARTIAL", "evidence": ["Automated tests verify Run/period/method/actor/time persistence across service reopen.", "Current real Run has zero saved monthly part-time decisions; no amount was invented."]},
+    {"id": "PT-03", "status": "BLOCKED", "evidence": ["Specified knowledge-base document contains no part-time rates.", "Skill requires per-teacher monthly confirmation and forbids carrying prior-month example prices.", "Missing authority is surfaced as WAITING_FOR_AUTHORITY."]},
+    {"id": "RN-01", "status": "PARTIAL", "evidence": ["Real browser reopened 2026-08 Run and showed confirmed renewal snapshot still used.", "28 teacher entries persisted; two unmatched teachers remain visible.", "Actual final UI XLSX compared against canonical AH/AI/AJ/AN values; 0 mismatches across 120 checked cells including other fields."]},
+    {"id": "RF-01", "status": "PASS", "evidence": ["12 approved refund source rows traced to 11 AN cells.", "All 11 determined AN values have comments from the same approved inputs.", "Actual XLSX opened in WPS; AN comment displayed."]},
+    {"id": "SD-01", "status": "PASS", "evidence": ["Source workbook has 99 comments across 42 teachers and columns C/E/H/I/J/AH/AI/AJ/AP/AT.", "59 comments match current Run teachers across H/I/J/AP/AT.", "Five field samples match source text in snapshot and final XLSX; WPS displayed a support-field comment."]},
+    {"id": "CL-01", "status": "PASS", "evidence": ["26 current teachers with AC evidence have 26 comments derived from existing Core course evidence.", "WPS displayed the AC comment; no new formula or student roster was introduced."]},
+    {"id": "X-01", "status": "PASS", "evidence": ["Actual UI-exported xlsx reopens in openpyxl and WPS.", "Three sheet names/order, merged ranges, freeze panes, widths, row heights, hidden row/column state and visible style IDs preserved; style mismatch count 0."]},
+    {"id": "X-02", "status": "PASS", "evidence": ["The UI-exported workbook and current generated_payroll canonical result matched for 120 AH/AI/AJ/AN field checks; mismatch count 0."]},
+    {"id": "G-01", "status": "OPEN", "evidence": ["Focused regression: 78 passed before the final copy-only fix; the copy regression test, node syntax check and diff check passed after that fix.", "Single local full suite invocation: 562 passed, 1 failed because the UI copy contained '旧 Run'; wording was fixed. A final full-suite CI result is still pending."]}
+  ],
+  "authorities": {
+    "part_time_knowledge_base": {"file": "/Users/macos/Documents/知识库/工作知识库/杰牛集团规章制度知识库.md", "sha256": "4e9c66317ada5d5e9e2e012688cd3dcaf91dbcd3a58cf3486b89afc0d107b6b6", "part_time_rate_found": false},
+    "payroll_skill": {"file": "skill/payroll/SKILL.md", "sha256": "1dbf9e2323d6e6d84a1e01884b917b54fb8d8b9837820b908f4ea9f79d66cfa7", "section": "五之二、合并薪资表 续费/退费/兼职填写", "lines": "376-379"}
+  },
+  "real_run": {
+    "run_id": "7f2f44465a86",
+    "period": "2026-08",
+    "renewal_confirmed_teachers": 28,
+    "renewal_unmatched_teachers": 2,
+    "part_time_profiles": 3,
+    "part_time_pay_decisions_saved": 0,
+    "refund_approved_rows": 12,
+    "refund_determined_teachers": 11,
+    "support_source_comment_count": 99,
+    "support_current_run_comment_count": 59
+  },
+  "real_export": {
+    "path": "/Users/macos/Desktop/工资导出/工资表-2026-08 (2).xlsx",
+    "sha256": "5dded4d6debe0c906f21712e0b7ae3940405880800af895d5e48f04daf3e9320",
+    "bytes": 320554,
+    "status": "NEEDS_CONFIRMATION",
+    "opened_in_wps": true,
+    "total_comments": 211
+  },
+  "database_backup": {
+    "path": "/Users/macos/Library/Application Support/EducationPayroll/backups/2026-09-26/payroll-ui-before-comment-refresh.sqlite3",
+    "integrity_check": "ok",
+    "sha256": "46c8cf789c481464c3f446ecb6dd9e0d6a6df9002ef7860975013d07792f1446"
+  },
+  "github_ci": {"status": "PENDING"},
+  "constraints": [
+    "Do not change established core payroll formulas or template layout.",
+    "No source or template values may be silently converted to zero.",
+    "Do not treat historical example part-time rates as an authority.",
+    "Do not stage or overwrite pre-existing untracked user work."
+  ]
+}

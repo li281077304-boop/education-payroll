@@ -517,7 +517,7 @@ def _part_time_contributions(records: Iterable[object], teacher: str, period: st
                     for field in ("base_rate", "fixed_rate", "rate_per_lesson", "rate_per_session")
                 )]
         if len(matches) > 1:
-            policy_priority = {"PERSONAL_POLICY": 0, "PART_TIME_RATE": 1}
+            policy_priority = {"RUN_MANUAL_PART_TIME": -1, "PERSONAL_POLICY": 0, "PART_TIME_RATE": 1}
             best = min(policy_priority.get(str(_get(item, "policy_type", "PART_TIME_RATE")), 1) for item in matches)
             matches = [item for item in matches if policy_priority.get(str(_get(item, "policy_type", "PART_TIME_RATE")), 1) == best]
         if not overrides and len(matches) != 1:

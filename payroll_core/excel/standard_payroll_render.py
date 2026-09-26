@@ -8,16 +8,20 @@ payroll.
 from __future__ import annotations
 
 import json
+import re
 from math import isclose
 from pathlib import Path
 from typing import Any, Mapping
 
 from copy import copy
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Font
+from openpyxl.utils.cell import column_index_from_string
 
 from ..final_fields import FINAL_FIELD_CODES, FIELD_LABELS
 from ..models.manual_adjustments import adjustment_by_teacher_field
+from ..models.annotations import comment_text, normalize_annotations
 from ..payroll_generation import GeneratedPayroll
 from .golden_baseline import golden_formula_for_row
 from .output_paths import safe_output_path
@@ -60,6 +64,15 @@ def _star_display(row: Any) -> str | None:
     if "FALLBACK_REFERENCE" in kinds:
         return f"已确定/上传资料/{row.star}星"
     return f"已确定/{row.star}星"
+
+
+def _is_part_time_row(row: Any) -> bool:
+    fields = getattr(row, "final_fields", {}) or {}
+    m_field = fields.get("M") if isinstance(fields, Mapping) else None
+    return any(
+        isinstance(item, Mapping) and item.get("kind") == "EMPLOYMENT_TYPE" and item.get("employment_type") == "PART_TIME"
+        for item in (m_field.get("evidence", ()) if isinstance(m_field, Mapping) else ())
+    )
 
 
 GRADE_COLUMNS = {
@@ -208,33 +221,180 @@ def _manual_value(row: Any, code: str, adjustments: Mapping[tuple[str, str], Any
     return _field_value(row, code)
 
 
-def _refund_comment_for_row(row: Any, inputs: Any) -> str | None:
-    """Build a comment only from an approved current refund input."""
+def _source_annotation(row: Any, field_code: str, label: str, text: str, *, source_type: str, source_file: str = "", source_sheet: str = "", source_row: str = "", source_field: str = "", generated_from: str = "") -> dict[str, str]:
+    return {
+        "teacher_id": str(getattr(row, "teacher", "")), "teacher": str(getattr(row, "teacher", "")),
+        "field_code": field_code, "display_label": label, "text": text,
+        "source_type": source_type, "source_file": Path(source_file).name if source_file else "",
+        "source_sheet": source_sheet, "source_row": source_row, "source_field": source_field,
+        "generated_from": generated_from,
+    }
+
+
+def _refund_annotations_for_row(row: Any, inputs: Any, period: str) -> list[dict[str, str]]:
+    """Build AN notes from the same approved, current-period result rows as AN."""
+    final_fields = getattr(row, "final_fields", {}) or {}
+    an_field = final_fields.get("AN") if isinstance(final_fields, Mapping) else None
+    if not isinstance(an_field, Mapping) or an_field.get("state") != "DETERMINED" or an_field.get("value") is None:
+        return []
     teacher = "".join(str(row.teacher).split())
-    comments: list[str] = []
+    annotations: list[dict[str, str]] = []
     for item in inputs or ():
         if not isinstance(item, Mapping):
             continue
-        if str(item.get("input_type") or "").upper() != "REFUND_RESULT":
+        if str(item.get("input_type") or "").upper() != "REFUND_RESULT" or str(item.get("status") or "").upper() != "APPROVED":
             continue
-        if str(item.get("status") or "").upper() != "APPROVED":
+        if str(item.get("period") or period) != period:
             continue
         bound = "".join(str(item.get("teacher_id") or item.get("teacher_name") or "").split())
         if bound != teacher:
             continue
         payload = item.get("payload") if isinstance(item.get("payload"), Mapping) else item
-        student = str(payload.get("student") or payload.get("学生") or "").strip()
+        student = str(payload.get("student") or payload.get("学生") or payload.get("学生姓名") or payload.get("学员") or payload.get("姓名") or "").strip()
+        business_type = str(payload.get("business_type") or payload.get("item_type") or payload.get("业务类型") or payload.get("事项") or "").strip()
+        if not business_type:
+            business_type = " / ".join(str(payload.get(key) or "").strip() for key in ("退费科目", "科目类型", "新签/续费") if str(payload.get(key) or "").strip()) or "退费"
+        reason = str(payload.get("note") or payload.get("备注") or payload.get("退费原因") or "").strip()
         head = payload.get("headcount_amount", payload.get("人头", payload.get("退费人头")))
         performance = payload.get("performance_amount", payload.get("业绩", payload.get("退费业绩")))
         parts = []
         if head not in (None, "", 0, 0.0):
-            parts.append(f"人头{head:g}" if isinstance(head, (int, float)) else f"人头{head}")
+            parts.append(f"人头金额：{head:g} 元" if isinstance(head, (int, float)) else f"人头金额：{head} 元")
         if performance not in (None, "", 0, 0.0):
-            parts.append(f"业绩{performance:g}" if isinstance(performance, (int, float)) else f"业绩{performance}")
-        detail = " ".join(parts) or str(payload.get("AN") or payload.get("refund_total") or "")
-        source = str(item.get("source_ref") or "当前退费源")
-        comments.append(f"{row.teacher}: {student} 退费 {detail}\n({source})")
-    return "\n".join(comments) if comments else None
+            parts.append(f"业绩金额：{performance:g} 元" if isinstance(performance, (int, float)) else f"业绩金额：{performance} 元")
+        raw_total = payload.get("AN", payload.get("refund_total", payload.get("退费合计")))
+        if not parts and raw_total not in (None, ""):
+            parts.append(f"退费合计：{raw_total} 元")
+        if not parts:
+            continue
+        source_row = str(item.get("source_row") or "")
+        source_sheet, _, row_text = source_row.partition("!")
+        input_evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+        source_sheet = source_sheet or str(input_evidence.get("sheet") or "")
+        if source_sheet:
+            source_row = row_text or str(input_evidence.get("row") or "")
+        lines = [f"教师：{row.teacher}"]
+        if student:
+            lines.append(f"学生：{student}")
+        lines.append(f"业务类型：{business_type}")
+        if reason:
+            lines.append(f"备注：{reason}")
+        lines.extend(parts)
+        try:
+            components = [value for value in (head, performance) if value not in (None, "")]
+            total = sum(float(value) for value in components) if components else float(raw_total)
+            lines.append(f"本条计入 AN：{total:g} 元")
+        except (TypeError, ValueError):
+            pass
+        annotations.append(_source_annotation(
+            row, "AN", "AN｜退费", "\n".join(lines), source_type="APPROVED_REFUND_RESULT",
+            source_file=str(item.get("source_ref") or ""), source_sheet=source_sheet or str(payload.get("source_sheet") or ""),
+            source_row=source_row, source_field="人头金额/业绩金额/退费合计", generated_from="AN_APPROVED_REFUND_INPUT",
+        ))
+    return annotations
+
+
+def _core_annotations_for_row(row: Any, payroll: GeneratedPayroll) -> list[dict[str, str]]:
+    annotations: list[dict[str, str]] = []
+    fields = getattr(row, "final_fields", {}) or {}
+    core_fields = getattr(row, "fields", {}) or {}
+    # Renewal inputs and AK's derived amount remain traceable in the actual
+    # workbook, not just in the JSON reconciliation view.
+    for code in ("AH", "AI", "AJ", "AK"):
+        field = fields.get(code) if isinstance(fields, Mapping) else None
+        if not isinstance(field, Mapping) or field.get("value") is None:
+            continue
+        evidence = [item for item in (field.get("evidence") or []) if isinstance(item, Mapping)]
+        if code == "AK":
+            inputs = evidence[0].get("inputs", {}) if evidence else {}
+            text = f"AK = AH×1 + AI×1.5 + AJ×0.75；本次 AH={inputs.get('AH', '—')}，AI={inputs.get('AI', '—')}，AJ={inputs.get('AJ', '—')}。"
+            annotations.append(_source_annotation(row, code, "AK｜续费绩效", text, source_type="PAYROLL_DERIVATION", source_field="AH/AI/AJ", generated_from="AK_CALCULATION"))
+            continue
+        source = evidence[0] if evidence else {}
+        source_name = str(source.get("source") or "")
+        source_row = str(source.get("source_row") or "")
+        source_sheet, _, source_row = source_row.partition("!")
+        values = source.get("inputs") if isinstance(source.get("inputs"), Mapping) else {}
+        detail = next(iter(values.values()), field.get("value"))
+        label = {"AH": "AH｜一对一续费", "AI": "AI｜班课续费", "AJ": "AJ｜领航续费"}[code]
+        text = f"本期确认值：{detail}。来源：{Path(source_name).name or '已确认续费快照'}。"
+        annotations.append(_source_annotation(row, code, label, text, source_type="CONFIRMED_RENEWAL", source_file=source_name, source_sheet=source_sheet, source_row=source_row, source_field=str(source.get("field") or code), generated_from="RUN_RENEWAL_RESULT_SNAPSHOT"))
+
+    # Explain class-course AC from the existing Core contribution evidence;
+    # no new calculation is performed here.
+    ac = core_fields.get("AC") if isinstance(core_fields, Mapping) else None
+    if isinstance(ac, Mapping) and ac.get("state") == "DETERMINED" and ac.get("value") is not None:
+        evidence = [item for item in (ac.get("evidence") or []) if isinstance(item, Mapping) and item.get("kind") == "COURSE_CALCULATION"]
+        if evidence:
+            record_sources = {
+                str(item.get("record_key") or ""): item
+                for item in payroll.source_records if isinstance(item, Mapping)
+            }
+            grouped: dict[tuple[str, str], dict[str, Any]] = {}
+            source_names: set[str] = set()
+            source_sheets: set[str] = set()
+            source_rows: set[str] = set()
+            for item in evidence:
+                inputs = item.get("inputs") if isinstance(item.get("inputs"), Mapping) else {}
+                key = (str(item.get("formula") or "已确认班课规则"), json.dumps(inputs, ensure_ascii=False, sort_keys=True))
+                bucket = grouped.setdefault(key, {"count": 0, "value": 0.0})
+                bucket["count"] += 1
+                try:
+                    bucket["value"] += float(str(item.get("detail", "")).rsplit("=", 1)[-1].strip())
+                except (TypeError, ValueError):
+                    pass
+                source = record_sources.get(str(item.get("record_key") or ""), {})
+                if isinstance(source, Mapping):
+                    if source.get("source"):
+                        source_names.add(Path(str(source["source"])).name)
+                    provenance = source.get("provenance") if isinstance(source.get("provenance"), Mapping) else {}
+                    for source_item in provenance.values():
+                        if not isinstance(source_item, Mapping):
+                            continue
+                        if source_item.get("sheet"):
+                            source_sheets.add(str(source_item["sheet"]))
+                        coordinate = str(source_item.get("coordinate") or "")
+                        row_match = re.search(r"(\d+)$", coordinate)
+                        if row_match:
+                            source_rows.add(row_match.group(1))
+            lines = [f"AC 合计：{float(ac['value']):g} 小时，共 {len(evidence)} 条确定的班课贡献。"]
+            for (formula, inputs_json), summary in list(grouped.items())[:6]:
+                inputs = json.loads(inputs_json)
+                basis = "，".join(f"{name}={value}" for name, value in inputs.items() if name not in {"record_key"})
+                lines.append(f"{summary['count']} 条：{basis or formula}；小计 {summary['value']:g} 小时。")
+            annotations.append(_source_annotation(row, "AC", "AC｜班课折算小时", "\n".join(lines), source_type="CORE_CLASS_CALCULATION", source_file="、".join(sorted(source_names)), source_sheet="、".join(sorted(source_sheets)), source_row=",".join(sorted(source_rows, key=lambda value: int(value))), source_field="年级/班型/实到/状态", generated_from="CORE_AC_EVIDENCE"))
+
+    # AF carries the current part-time decision or current Core result; a
+    # deferred choice stays blank but remains explicitly explained.
+    af = fields.get("AF") if isinstance(fields, Mapping) else None
+    if _is_part_time_row(row) and isinstance(af, Mapping) and (af.get("value") is not None or af.get("state") == "DEFERRED"):
+        amount = af.get("value")
+        text = f"本月兼职工资：{amount} 元。" if amount is not None else "本月兼职工资暂时留白，待补充；未按 0 计算。"
+        if af.get("reason"):
+            text += f"\n依据：{af['reason']}"
+        source_file = ""
+        source_field = "兼职工资决定"
+        for item in af.get("evidence", ()):
+            if isinstance(item, Mapping):
+                source_file = str(item.get("source") or source_file)
+                if item.get("inputs"):
+                    source_field = ", ".join(str(key) for key in item["inputs"] if key not in {"confirmed_by", "confirmed_at", "reason"}) or source_field
+        annotations.append(_source_annotation(row, "AF", "AF｜兼职工资", text, source_type="PART_TIME_PAY_DECISION", source_file=source_file, source_field=source_field, generated_from="CURRENT_RUN_PART_TIME_DECISION"))
+    return annotations
+
+
+def _annotation_column(sheet, field_code: str, columns: Mapping[str, int]) -> int | None:
+    code = str(field_code or "").strip().upper()
+    if code == "TEACHER":
+        return columns.get("teacher")
+    if code.lower() in columns:
+        return columns[code.lower()]
+    if code in FINAL_FIELD_CODES:
+        return 33 + FINAL_FIELD_CODES.index(code)
+    try:
+        return column_index_from_string(code)
+    except ValueError:
+        return None
 
 
 def _support_entry(snapshot: Mapping[str, Any] | None, teacher: str) -> Mapping[str, Any] | None:
@@ -323,6 +483,7 @@ def _render_with_template(
             support_level = identity.get("teacher_level")
         base_inputs = {}
         m_field = row.final_fields.get("M", {}) if isinstance(getattr(row, "final_fields", None), Mapping) else {}
+        is_part_time = _is_part_time_row(row)
         for evidence in m_field.get("evidence", ()) if isinstance(m_field, Mapping) else ():
             if isinstance(evidence, Mapping) and isinstance(evidence.get("inputs"), Mapping):
                 base_inputs = dict(evidence["inputs"])
@@ -357,7 +518,12 @@ def _render_with_template(
         # AF may be an ESTIMATED Core value when the package supplies a
         # historical rating.  Keep that visible in the payroll column; the
         # evidence/status columns still make clear that it is not final.
-        sheet.cell(row_number, columns["af"]).value = _formula_for_row(row, "AF", row_number)
+        af_field = row.final_fields.get("AF", {}) if isinstance(getattr(row, "final_fields", None), Mapping) else {}
+        sheet.cell(row_number, columns["af"]).value = (
+            _value(af_field.get("value")) if is_part_time and af_field.get("state") == "DETERMINED"
+            else None if is_part_time
+            else _formula_for_row(row, "AF", row_number)
+        )
         # Keep blocked M rows visibly unresolved instead of letting Excel's
         # blank-cell arithmetic silently display a misleading zero.  Once the
         # Run snapshot has supplied every G:L input, retain the canonical
@@ -380,10 +546,19 @@ def _render_with_template(
             if code in {"AK", "AV"}:
                 continue
             sheet.cell(row_number, 33 + index).value = _value(_manual_value(row, code, adjustments))
-        comment = _refund_comment_for_row(row, manual_adjustments)
-        if comment:
-            from openpyxl.comments import Comment
-            sheet.cell(row_number, 33 + FINAL_FIELD_CODES.index("AN")).comment = Comment(comment, "Payroll")
+        annotations = list((support or {}).get("annotations") or [])
+        annotations.extend(_refund_annotations_for_row(row, manual_adjustments, payroll.period))
+        annotations.extend(_core_annotations_for_row(row, payroll))
+        by_column: dict[int, list[dict[str, Any]]] = {}
+        for annotation in normalize_annotations(annotations):
+            column = _annotation_column(sheet, annotation.field_code, columns)
+            if column is None or column > sheet.max_column:
+                continue
+            by_column.setdefault(column, []).append(annotation.as_dict())
+        for column, cell_annotations in by_column.items():
+            text = comment_text(cell_annotations)
+            if text:
+                sheet.cell(row_number, column).comment = Comment(text, "工资核算助手")
         sheet.cell(row_number, sheet.max_column).value = "；".join(_row_blockers(row)) or ("已计算" if row.final else "待确认")
 
     _write_evidence_sheet(book, payroll, rows)
@@ -428,6 +603,11 @@ def validate_template_payroll_workbook(path: str | Path, payroll: GeneratedPayro
             code = {"aa": "AA", "ad": "AD", "af": "AF", "av": "AV"}.get(name)
             actual = sheet.cell(offset, mapped[name]).value
             if code:
+                if code == "AF" and _is_part_time_row(expected):
+                    wanted_af = _field_value(expected, "AF")
+                    if not _same_output_value(actual, wanted_af):
+                        errors.append(f"{expected.teacher} 的兼职 AF 静态金额或留白不一致")
+                    continue
                 state = (expected.final_fields.get(code, {}) if isinstance(getattr(expected, "final_fields", None), Mapping) else {}).get("state")
                 expected_formula = golden_formula_for_row(expected, code, offset) if code != "AV" or state == "DETERMINED" else None
                 if actual != expected_formula:

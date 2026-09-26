@@ -93,6 +93,7 @@ class CoreFlow:
         teachers = {r.teacher for r in schedule} | {r.teacher for r in payroll}
         if run.get("mode") == "GENERATE":
             teachers.update(p["teacher"] for p in (policy or {}).get("profiles", []))
+        employment_facts = self._employment_types_for(run, teachers=sorted(teachers))
         profiles, contexts = [], []
         af_confirmation = run.get("af_policy_confirmation") or {}
         af_exceptions = af_confirmation.get("exceptions") or {}
@@ -120,6 +121,8 @@ class CoreFlow:
             if len(matching) > 1:
                 raise ValueError("个人工资政策同一教师存在重复记录，请先确认权威版本。")
             profile = matching[0] if matching else {}
+            employment_fact = employment_facts.get(teacher) or {}
+            resolved_employment = employment_fact.get("employment_type")
             rate_matches = [p for p in part_time_profiles if p.get("teacher") == teacher]
             if not profile and rate_matches:
                 profile = {
@@ -131,6 +134,31 @@ class CoreFlow:
                     "effective_from": part_time.get("effective_from", run["period"]),
                     "effective_to": part_time.get("effective_to", run["period"]),
                     "policy_type": "PART_TIME_RATE",
+                }
+            # Employment identity is a separate durable fact from the dated
+            # AF/pay policy profile. A prior policy row defaulted to
+            # FULL_TIME must not turn a teacher with an explicit long-term
+            # PART_TIME profile back into the full-time AA/AC/AF chain.
+            if resolved_employment == "PART_TIME":
+                profile = {
+                    **profile,
+                    "teacher": teacher,
+                    "role": profile.get("role", "教师"),
+                    "employment_type": "PART_TIME",
+                    "allow_no_teaching": False,
+                    "source": employment_fact.get("source_label") or employment_fact.get("source") or "已确认的兼职用工性质",
+                    "effective_from": run["period"],
+                    "effective_to": run["period"],
+                }
+            elif resolved_employment == "FULL_TIME" and profile.get("employment_type") == "PART_TIME":
+                # A current authoritative support/personnel source can also
+                # correct an obsolete part-time flag. Preserve the remaining
+                # dated policy fields and replace only the employment type.
+                profile = {
+                    **profile,
+                    "teacher": teacher,
+                    "employment_type": "FULL_TIME",
+                    "source": employment_fact.get("source_label") or employment_fact.get("source") or "当前工资资料明确的全职身份",
                 }
             elif not profile and personnel_contexts.get(teacher, {}).get("employment_type") == "PART_TIME":
                 # A personnel source can establish the employment type even
@@ -196,6 +224,27 @@ class CoreFlow:
         for profile in (policy or {}).get("profiles", []):
             if profile.get("employment_type") == "PART_TIME" and (profile.get("fixed_rate") is not None or profile.get("base_rate") is not None or profile.get("override_rate") is not None):
                 rates.append({**profile, "grade": profile.get("grade_scope", "*"), "rate_per_lesson": profile.get("fixed_rate", profile.get("base_rate")), "effective_from": policy["effective_from"], "effective_to": policy["effective_to"], "source": policy["source"], "version": policy["id"], "approved_by": profile.get("special_approval", ""), "approved_at": policy.get("created_at", "")})
+        # A Run-level hand-entered per-lesson rate is an explicit input to the
+        # same Core calculation. The arithmetic and course eligibility rules
+        # remain unchanged; only the chosen rate source is different.
+        for decision in (run.get("part_time_pay_decisions") or {}).values():
+            if decision.get("method") != "MANUAL" or decision.get("manual_kind") != "UNIT_RATE" or decision.get("status") != "CONFIRMED":
+                continue
+            teacher = str(decision.get("teacher") or "")
+            unit_price = decision.get("amount")
+            if not teacher or unit_price is None:
+                continue
+            rates.append({
+                "teacher": teacher, "teacher_id": decision.get("teacher_id", teacher),
+                "grade": "*", "grade_scope": "*", "pricing_mode": "FIXED_GRADE_RATE",
+                "fixed_rate": unit_price, "rate_per_lesson": unit_price,
+                "effective_from": run["period"], "effective_to": run["period"],
+                "source": decision.get("source", "本次 Run 手动兼职单价"),
+                "version": decision.get("version", "RUN_PART_TIME_PAY_DECISION/v1"),
+                "policy_type": "RUN_MANUAL_PART_TIME", "approved_by": decision.get("confirmed_by", ""),
+                "approved_at": decision.get("confirmed_at", ""),
+                "provenance": {"run_id": run["id"], "reason": decision.get("reason", "")},
+            })
         if not rule_version:
             reason = "当前月份没有唯一绑定的核心规则版本，请到基础资料选择生效版本。"
             return {"period": run["period"], "rows": [{"teacher": t, "fields": {f: {"value": None, "state": "NEEDS_INPUT", "reason": reason, "evidence": []} for f in ("AA", "AC", "AD", "AE", "AF", "PART_TIME")}} for t in sorted(teachers)], "course_contributions": [], "rule_versions": {}}
@@ -210,7 +259,31 @@ class CoreFlow:
         def value(item: dict) -> dict:
             return {**item, "value": None if item["value"] is None else float(item["value"])}
         names = {"aa": "AA", "ac": "AC", "ad": "AD", "ae": "AE", "af": "AF", "part_time_fee": "PART_TIME"}
-        rows = [{"teacher": row["teacher"], "employment_type": row.get("employment_type", "FULL_TIME"), "fields": {code: value(row[key]) for key, code in names.items()}} for row in raw["rows"]]
+        part_time_decisions = run.get("part_time_pay_decisions") or {}
+        rows = []
+        for row in raw["rows"]:
+            fields = {code: value(row[key]) for key, code in names.items()}
+            decision = part_time_decisions.get(row["teacher"], {})
+            if row.get("employment_type") == "PART_TIME":
+                if decision.get("method") == "MANUAL" and decision.get("manual_kind") == "TOTAL" and decision.get("status") == "CONFIRMED":
+                    fields["PART_TIME"] = {
+                        "value": float(decision["amount"]), "state": "DETERMINED",
+                        "reason": "兼职工资按本次确认的月工资总额录入。",
+                        "evidence": [{"kind": "RUN_PART_TIME_MANUAL_TOTAL", "source": decision.get("source", ""), "source_result_id": decision.get("version", ""), "inputs": {"period": run["period"], "confirmed_by": decision.get("confirmed_by", ""), "reason": decision.get("reason", ""), "amount": str(decision.get("amount", ""))}}],
+                    }
+                elif decision.get("method") == "DEFERRED":
+                    fields["PART_TIME"] = {
+                        "value": None, "state": "DEFERRED",
+                        "reason": "兼职工资待补充；本次保留空白，不按 0 计算。",
+                        "evidence": [{"kind": "RUN_PART_TIME_DEFERRED", "source": decision.get("source", ""), "inputs": {"period": run["period"], "confirmed_by": decision.get("confirmed_by", ""), "reason": decision.get("reason", "")}}],
+                    }
+                elif decision.get("method") == "COMPANY_STANDARD" and decision.get("status") == "WAITING_FOR_AUTHORITY":
+                    fields["PART_TIME"] = {
+                        "value": None, "state": "NEEDS_INPUT",
+                        "reason": "尚无适用本月和该教师的公司兼职标准；可手动填写或暂时留白。",
+                        "evidence": [{"kind": "PART_TIME_AUTHORITY_MISSING", "source": decision.get("source", ""), "inputs": {"period": run["period"]}}],
+                    }
+            rows.append({"teacher": row["teacher"], "employment_type": row.get("employment_type", "FULL_TIME"), "fields": fields})
         return {"period": run["period"], "rows": rows, "course_contributions": [value(c) for c in raw["course_contributions"]], "formula_inputs": raw.get("formula_inputs", {}), "rule_versions": {"core": rule_version["id"], "rating": (rating or {}).get("id", ""), "policy": (policy or {}).get("id", ""), "part_time": (part_time or {}).get("id", "")}}
 
     def _configured_contribution(self, run: dict):
@@ -247,7 +320,12 @@ class CoreFlow:
                     continue
                 actual = getattr(target, attributes.get(code, field), None) if target else None
                 expected = value["value"]
-                if value["state"] == "NOT_APPLICABLE":
+                if code == "PART_TIME" and value["state"] == "DEFERRED":
+                    # The user explicitly chose to leave this monthly amount
+                    # blank. Keep it visible in the final-field result, but
+                    # do not reopen it as an unexplained issue on every pass.
+                    status = "NOT_APPLICABLE"
+                elif value["state"] == "NOT_APPLICABLE":
                     status = "NOT_APPLICABLE"
                 elif target is not None and actual is not None and expected is not None and math.isclose(expected, actual, rel_tol=0, abs_tol=1e-6):
                     # A zero-difference comparison is conclusive even when
@@ -431,6 +509,11 @@ class CoreFlow:
         run.setdefault("authority_rebind_history", []).append({"kind": kind, "from_version_id": run.get(key), "to_version_id": version_id, "changed_at": when})
         run[key] = version_id
         run["calculation_engine"] = "CONFIGURED_V1"
+        # The immutable Run policy snapshot is also a calculation input. Keep
+        # it synchronized with the explicit binding so a newly selected
+        # part-time authority cannot be hidden behind a still-valid stale
+        # snapshot hash.
+        run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
         invalidate(run.setdefault("business_decisions", []))
         if kind == "core":
             for resolution in run.get("resolutions", []):
