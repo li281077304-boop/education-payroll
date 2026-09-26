@@ -74,7 +74,8 @@ def test_run_uses_the_months_authority_instead_of_the_natural_month(tmp_path):
     assert run["period_start"] == "2026-08-01"
     assert run["period_boundary_source"] == AUTHORITY_MANUAL_RECORD
     assert run["period_authority"]["is_fallback"] is False
-    assert run["period_authority"]["source_label"] == "人工月资料"
+    # 来源语义必须能区分：资料导入 / 人工确认 / 来源未标明 / 自然月兜底
+    assert run["period_authority"]["source_label"] == "人工月资料（来源未标明）"
 
 
 def test_authority_survives_reopen_and_keeps_its_identity(tmp_path):

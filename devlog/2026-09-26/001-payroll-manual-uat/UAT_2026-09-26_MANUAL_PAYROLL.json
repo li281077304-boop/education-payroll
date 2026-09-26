@@ -62,9 +62,9 @@
       "expected": "Compare the actual imported coverage against the run period; do not report a false August coverage anomaly.",
       "root_cause": "系统把工资月份默认当成自然月（2026-08 = 8/1～8/31），于是课表覆盖到 8/30 时 incomplete_tail=true → 最终导出被 PERIOD_COVERAGE_INCOMPLETE 阻断，再要求用户人工确认 8/30 是截止日。真实证据：同一台机器上 9/17 曾人工确认 2026-08 的实际周期，但没有任何可复用的记录，10 天后新建的 Run 又退回自然月。",
       "fix": "工资月份 → 该月“人工月 / 工资周期”authority（payroll_period / period_start / period_end / 来源 / 版本）→ 用它筛选与判断完整性；课表日期只用于校验人工月，文件名仅作低优先级证据。有人工月时不使用自然月月末；课表超出人工周期才提示越界（PERIOD_OUTSIDE_AUTHORITY）；没有人工月时回退自然月并在界面明确标注“自然月兜底”；人工确认一次即形成该月份可复用的权威记录，不再每月重复确认；原有的“确认实际排课周期”降为例外修正入口。",
-      "test": "tests/test_period_authority.py（16 项：自动绑定、reopen 不丢失、切换月份重新绑定、无 authority 时明确 fallback、8/1～8/30 + 课表 8/1～8/30 完整、8/31 越界提示、CSV 按人工月过滤、文件名月份不能覆盖、人工确认形成可复用记录、重复确认不产生新版本、不同窗口 supersede 且保留历史、历史确认可恢复、自然月不被提升、本 Run 人工设定的窗口不被静默覆盖）；tests/test_period_authority_http.py（3 项，按浏览器方式走 /api/period-authorities 与 /api/runs/<id>/period-authority）。",
+      "test": "tests/test_period_authority.py（16 项：自动绑定、reopen 不丢失、切换月份重新绑定、无 authority 时明确 fallback、8/1～8/30 + 课表 8/1～8/30 完整、8/31 越界提示、CSV 按人工月过滤、文件名月份不能覆盖、人工确认形成可复用记录、重复确认不产生新版本、不同窗口 supersede 且保留历史、历史确认可恢复、自然月不被提升、本 Run 人工设定的窗口不被静默覆盖）；tests/test_period_authority_http.py（5 项，按浏览器方式走 /api/period-authorities 与 /api/runs/<id>/period-authority）；tests/test_period_document.py（18 项，权威资料识别与批量导入）。",
       "remaining": "真实数据已按新语义复算通过（见 real_data_actions），但“在浏览器里点开人工月卡片并保存”这一步未真实点击。",
-      "real_data_result": "当前 2026-08 Run：绑定前 8/1～8/31（自然月，incomplete_tail=true）→ 绑定后 8/1～8/30（人工月资料，incomplete_tail=false、outside_period=false、排课记录数不变 2385）；自动核算后 PERIOD_COVERAGE_INCOMPLETE 与 PERIOD_OUTSIDE_AUTHORITY 均不再出现。"
+      "real_data_result": "正式人工月资料（杰牛集团规章制度知识库）导入后：2026-08 Run 由 2026-08-01～08-30（临时口径）改为 2026-08-03～08-30（资料口径），incomplete_tail=false、outside_period=false、outside_authority=false，排课记录数 2385 不变，PERIOD_COVERAGE_INCOMPLETE 与 PERIOD_OUTSIDE_AUTHORITY 均不存在。"
     },
     {
       "id": "UAT-07", "area": "renewal_review", "severity": "P0", "status": "PARTIAL",
@@ -89,6 +89,15 @@
       "fix": "基础资料页外层只保留：公司工资模板、人工月 / 工资周期、历史基本工资、教师星级来源；星级加成、个人政策、7 类核心规则、班型折算、历史兼容规则收进「高级设置（管理员）」折叠区。未重构计算引擎。",
       "test": "tests/test_period_authority_ui.py::test_the_daily_flow_keeps_engineering_configuration_in_advanced_settings。",
       "remaining": "未真实浏览。"
+    },
+    {
+      "id": "UAT-10", "area": "manual_month_authority_import", "severity": "P0", "status": "PARTIAL",
+      "expected": "人工月应作为基础权威资料：从公司制度文件批量识别、一次确认、写入可复用的 authority；以后同月份自动沿用，不再每月询问；来源可追溯且与“用户手填”区分开。",
+      "root_cause": "人工月此前依赖用户手填、历史 Run 推断或自然月兜底；没有任何可导入的权威资料入口，导致同一个月被反复确认，口径还可能被推断值污染。",
+      "fix": "新增只读识别器（Markdown / CSV / Excel）与「预览 → 一次确认 → 批量写入」链路，复用现有 period authority 模型（payroll_period / period_start / period_end / boundary_source / revision / supersedes），未新建第二套配置系统。来源语义分为 MANUAL_PERIOD_DOCUMENT（制度文件导入）、USER_CONFIRMED（本机手填）、DERIVED_FROM_CONFIRMED_RUN（历史确认恢复）、LEGACY_CALENDAR_DEFAULT（自然月兜底）。资料导入的记录都带 source_type / source_file / source_hash / source_section / source_row / source_text / imported_at / confirmed_by。",
+      "test": "tests/test_period_document.py（18 项：Markdown 识别并跳过无关表格、预览不写库、一次确认批量写入、重复导入不新增 revision、内容变化新建 revision 并 supersede、来源可追溯且不含本机路径、新 Run 自动绑定、fallback Run 自动恢复、临时 authority 被正式资料替代、课表超出只提示冲突不改人工月、手填标注为人工确认、无资料仍可手填兜底、CSV/Excel/无表头 CSV/跨年、坏资料 fail closed、文件变化需重新预览、必须有确认人）；tests/test_period_authority_http.py（5 项，含两个新接口）；tests/test_period_authority_ui.py（12 项，含人工月卡片与导入预览）。",
+      "remaining": "真实资料已完整走完识别→预览→导入→改绑→重算；但“在浏览器里点导入按钮走一遍”未真实点击。",
+      "real_data_result": "识别 12 条 → 预览不写库 → 一次确认写入 12 条 → 2026-08 由临时 8/1～8/30 改为资料口径 8/3～8/30（revision 2 并 supersede 旧记录）。"
     }
   ],
   "environment": [
@@ -126,21 +135,43 @@
       "test": "定向测试每次先跑；全量共跑 3 次（首次发现年级推断的路径缺陷 → 修复后复跑 → 测试改名后复跑），最终 495 passed / 0 failed。"
     }
   ],
+  "manual_month_authority_source": {
+    "primary": "杰牛集团规章制度知识库.md · 2. 2026 年人工月排期表",
+    "document_note": "人工月 = 公司的薪资计算周期（按 4 周 / 5 周划分），非自然月。",
+    "rows_recognised": 12,
+    "discrepancy": "任务描述提到“2026 年 3 条实际记录”，实测文件中人工月表为 12 条（全年 52 周）。当前核算相关的是第 7/8/9 条。实现按全部 12 条导入。",
+    "payroll_month_rule": "按周期内天数最多的月份归属工资月份（预览中显示该依据，供人工确认）",
+    "key_row": {"manual_month": "8", "weeks": "4 周", "range": "8.03 — 8.30", "payroll_period": "2026-08", "source_row": 62}
+  },
   "real_data_actions": [
     {
       "action": "备份真实数据库",
-      "detail": "写入前把 payroll-ui.sqlite3 完整复制到应用数据目录的 backups/ 下（带时间戳）。",
+      "detail": "写入前把 payroll-ui.sqlite3 完整复制到应用数据目录的 backups/ 下（本次为 payroll-ui-before-document-import-<时间戳>.sqlite3）。",
       "status": "DONE"
     },
     {
-      "action": "恢复 2026-08 的人工月记录",
-      "detail": "先 dry-run 扫描：从历史 Run 的已确认窗口得到一个候选（人工确认来源）。随后记录 2026-08 = 2026-08-01～2026-08-30（来源：人工月资料；确认人：本机核算负责人（2026-09-26 手工 UAT）），证据里同时保留 9/17 那次实际排课范围确认与候选 Run 引用。",
-      "status": "DONE",
-      "note": "口径待你确认：8/1 起（本轮记录）还是 8/3 起（9/17 实际排课范围）。两者对当前 8 月排课都成立，因为首课为 8/3；界面上一处即可改成 8/3。"
+      "action": "只读识别权威资料",
+      "detail": "读取 杰牛集团规章制度知识库.md，识别出 12 条人工月（年份 2026，含跨年的人工月 12）。预览阶段不写入任何记录（预览后 authority 数量不变）。",
+      "status": "DONE"
     },
     {
-      "action": "把当前 8 月 Run 绑到人工月并复算",
-      "detail": "绑定 + 自动核算；周期历史新增一条可追溯记录。",
+      "action": "一次确认批量写入人工月 authority",
+      "detail": "以“人工月资料（制度文件导入）”来源写入 12 条：11 条新增、1 条改为资料口径（2026-08）。每条都带 source_type/source_file/source_hash/source_section/source_row/source_text/imported_at/confirmed_by。",
+      "status": "DONE"
+    },
+    {
+      "action": "2026-08 口径修正（替代临时值）",
+      "detail": "临时记录 2026-08-01～08-30（来源未标明）被替代：新 revision 2 = 2026-08-03～08-30，supersedes 指向旧记录，旧记录保留为 SUPERSEDED，审计历史未被覆盖。",
+      "status": "DONE"
+    },
+    {
+      "action": "当前 8 月 Run 改绑并重算",
+      "detail": "改绑正式人工月 → 重新读取排课 → 重算 coverage。period 2026-08-01～08-30 → 2026-08-03～08-30；来源 MANUAL_PERIOD_RECORD → MANUAL_PERIOD_DOCUMENT；incomplete_tail=true→false；排课记录数 2385 不变。",
+      "status": "DONE"
+    },
+    {
+      "action": "证明工资公式与金额来源未被改动",
+      "detail": "用导入前备份库与当前库做同口径比对：核心计算事实 180 条指纹完全相同（3c4e0354…）；base_salary_inputs / base_salary_input_snapshot / run_renewal_result_snapshot / confirmed_hours / af_policy_confirmation / business_input_bindings / rating_version_id / policy_version_id / core_rule_version_id / class_type_rule_version_id / calculation_engine / run_policy_snapshot 全部一致。只有周期相关字段发生变化。",
       "status": "DONE"
     }
   ],
@@ -151,6 +182,6 @@
     "real_ui_regression_required": true,
     "real_ui_regression_done": false
   },
-  "regression": {"command": "sh tools/run_tests.sh", "result": "495 passed, 0 failed", "baseline_before_this_round": "451 passed, 0 failed"},
+  "regression": {"command": "sh tools/run_tests.sh", "result": "520 passed, 0 failed", "baseline_before_this_round": "495 passed, 0 failed"},
   "implementation": {"started": true, "finished": true, "scope": "2026-09-26 手工 UAT 收口（P0-1 / P0-2 / P0-3 回归 / P1 界面 / 测试环境）"}
 }

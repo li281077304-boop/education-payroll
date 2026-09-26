@@ -20,10 +20,14 @@ from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.excel.package import discover_payroll_package
 from payroll_core.period import (
     AUTHORITY_DERIVED_CONFIRMED_RUN,
+    AUTHORITY_MANUAL_DOCUMENT,
     AUTHORITY_MANUAL_RECORD,
     AUTHORITY_NATURAL_MONTH_FALLBACK,
     AUTHORITY_USER_CONFIRMED,
     EXPLICIT_AUTHORITY_SOURCES,
+    SOURCE_TYPE_CSV,
+    SOURCE_TYPE_DOCUMENT,
+    SOURCE_TYPE_EXCEL,
     authority_source_label,
     build_period_authority,
     coverage_for,
@@ -33,6 +37,7 @@ from payroll_core.period import (
     month_of_day,
     natural_month_authority,
     normalize_period_window,
+    period_authority_key,
     period_authority_summary,
     previous_period,
 )
@@ -89,6 +94,7 @@ from .storage import RunStore
 from .business import build_groups, build_user_actions, invalidate as invalidate_business_decisions
 from .business_inputs import BusinessInputService, is_active_business_input
 from .base_salary_import import REQUIRED_FIELDS as IMPORT_BASE_SALARY_FIELDS, preview_base_salary, source_changed, source_fingerprint
+from .period_document import read_period_document
 from .core_flow import CoreFlow, valid_period
 
 REQUIRED = ("schedule",)
@@ -2547,6 +2553,7 @@ class PayrollService(CoreFlow):
         confirmed_by: str = "",
         reason: str = "",
         evidence: dict | None = None,
+        provenance: dict | None = None,
     ) -> dict:
         """Store the 人工月 authority of a payroll month so later Runs reuse it.
 
@@ -2559,18 +2566,26 @@ class PayrollService(CoreFlow):
             raise ValueError("人工月记录必须标明来源（人工月资料或人工确认）。")
         candidate = build_period_authority(
             payroll_period, period_start, period_end, boundary_source,
-            confirmed_by=confirmed_by, reason=reason, evidence=evidence,
+            confirmed_by=confirmed_by, reason=reason, evidence=evidence, provenance=provenance,
         )
         existing = self.period_authority_for(payroll_period)
         now = datetime.now(timezone.utc).isoformat()
         if existing and (existing.get("period_start"), existing.get("period_end")) == (
             candidate["period_start"], candidate["period_end"]
-        ):
+        ) and not existing.get("is_fallback"):
             refreshed = {
                 **existing,
                 "confirmed_by": str(confirmed_by or existing.get("confirmed_by", "")),
                 "reason": str(reason or existing.get("reason", "")),
+                "source": dict(provenance or existing.get("source") or {}),
+                # 沿用同一条事实时，来源语义以更权威的一次为准（资料导入 > 手填）。
+                "boundary_source": (
+                    AUTHORITY_MANUAL_DOCUMENT
+                    if boundary_source == AUTHORITY_MANUAL_DOCUMENT
+                    else existing.get("boundary_source", boundary_source)
+                ),
             }
+            refreshed["source_label"] = authority_source_label(refreshed["boundary_source"])
             if refreshed != existing:
                 refreshed["updated_at"] = now
                 self.store.save_period_authority(refreshed)
@@ -2579,7 +2594,7 @@ class PayrollService(CoreFlow):
             payroll_period, period_start, period_end, boundary_source,
             revision=int(existing.get("revision") or 1) + 1 if existing else 1,
             authority_id=uuid.uuid4().hex[:16],
-            confirmed_by=confirmed_by, reason=reason, evidence=evidence,
+            confirmed_by=confirmed_by, reason=reason, evidence=evidence, provenance=provenance,
             supersedes=existing.get("id") if existing else None,
         )
         item["created_at"] = now
@@ -2626,39 +2641,157 @@ class PayrollService(CoreFlow):
                 )
         return {"apply": apply, "applied": sorted(proposals) if apply else [], "proposals": [proposals[key] for key in sorted(proposals)]}
 
+    # ---------------------------------------------------- 人工月权威资料（批量导入）
+    def preview_period_document(self, path: str) -> dict:
+        """Read an authoritative 人工月 document without writing anything.
+
+        The preview is the whole point of the flow: the user sees what was
+        recognised (cycle dates *and* the payroll month each cycle maps to)
+        before a single authority record is created.
+        """
+        source = Path(path).expanduser().resolve()
+        document = read_period_document(source)
+        preview = document.as_preview()
+        # The path stays in this preview response only; it is never stored as
+        # provenance, so a repository copy can never carry a machine path.
+        preview["source"]["path"] = str(source)
+        for row in preview["rows"]:
+            current = self.period_authority_for(row["payroll_period"]) if row["payroll_period"] else None
+            if current is None:
+                row["action"] = "NEW"
+            elif (current.get("period_start"), current.get("period_end")) == (row["period_start"], row["period_end"]):
+                row["action"] = "UNCHANGED"
+            else:
+                row["action"] = "UPDATE"
+            row["current"] = period_authority_summary(current)
+        preview["counts"] = {
+            name: sum(1 for row in preview["rows"] if row["action"] == name)
+            for name in ("NEW", "UPDATE", "UNCHANGED")
+        }
+        preview["authority_source_label"] = authority_source_label(AUTHORITY_MANUAL_DOCUMENT)
+        preview["existing_authorities"] = self.period_authorities()
+        return preview
+
+    def import_period_document(self, path: str, expected_sha256: str, confirmed_by: str) -> dict:
+        """Write every recognised 人工月 as a period authority, once confirmed.
+
+        Reuses the existing authority model: an unchanged cycle keeps its current
+        revision, a changed cycle gets a new revision that supersedes the old one
+        (the audit history is never overwritten).
+        """
+        actor = str(confirmed_by or "").strip()
+        if not actor:
+            raise ValueError("请填写人工月资料导入确认人。")
+        source = Path(path).expanduser().resolve()
+        before = source_fingerprint(source)
+        if not expected_sha256 or before["sha256"] != expected_sha256:
+            raise ValueError("人工月资料已变化，请重新预览后再确认导入。")
+        document = read_period_document(source)
+        if not document.can_import:
+            raise ValueError("人工月资料仍有无法识别的内容，请按预览问题修正后重试。")
+        if source_changed(before, source_fingerprint(source)):
+            raise ValueError("人工月资料在读取期间发生变化，请重新预览。")
+        imported_at = datetime.now(timezone.utc).isoformat()
+        results: dict[str, list[dict]] = {"created": [], "updated": [], "unchanged": []}
+        for row in document.rows:
+            if not valid_period(row.payroll_period):
+                raise ValueError("人工月资料里出现了无法对应的工资月份，请核对资料。")
+            previous = self.period_authority_for(row.payroll_period)
+            record = self.record_period_authority(
+                row.payroll_period, row.period_start, row.period_end, AUTHORITY_MANUAL_DOCUMENT,
+                confirmed_by=actor,
+                reason=f"来自《{document.title}》的“{row.source_section or '人工月排期表'}”（人工月 {row.label}）",
+                evidence={
+                    "mapping_rule": row.mapping_rule,
+                    "weeks": row.weeks,
+                    "document_year": document.year,
+                },
+                provenance={
+                    "source_type": document.source_type,
+                    "source_file": document.source_file,
+                    "source_hash": document.source_sha256,
+                    "source_section": row.source_section,
+                    "source_row": row.source_row,
+                    "source_text": row.source_text,
+                    "source_label": row.label,
+                    "imported_at": imported_at,
+                    "confirmed_by": actor,
+                },
+            )
+            # 同一个窗口 → 复用原记录（不产生新 revision）；窗口变化 → 新 revision。
+            if previous is None:
+                bucket = "created"
+            elif previous.get("id") == record.get("id"):
+                bucket = "unchanged"
+            else:
+                bucket = "updated"
+            results[bucket].append(period_authority_summary(record))
+        return {
+            "imported": len(document.rows),
+            "title": document.title,
+            "source": {
+                "source_type": document.source_type,
+                "source_file": document.source_file,
+                "sha256": document.source_sha256,
+            },
+            "counts": {name: len(items) for name, items in results.items()},
+            "created": results["created"],
+            "updated": results["updated"],
+            "unchanged": results["unchanged"],
+            "authorities": self.period_authorities(),
+        }
+
     @staticmethod
     def _run_window_is_deliberate(run: dict) -> bool:
         """True when this Run already carries a window a human decided on."""
         source = str(run.get("period_boundary_source") or "").strip()
         return bool(source) and source != AUTHORITY_NATURAL_MONTH_FALLBACK
 
+    @staticmethod
+    def _run_window_key(run: dict) -> tuple[str, str, str]:
+        return (
+            str(run.get("period_start") or ""),
+            str(run.get("period_end") or ""),
+            str(run.get("period_boundary_source") or ""),
+        )
+
+    def _refresh_run_authority_summary(self, run: dict) -> None:
+        """Keep the Run's displayed provenance in step with the stored record.
+
+        A Run that deliberately keeps its own window still has to show *which*
+        authority that window came from, including the document it was imported
+        from.  This never moves the window.
+        """
+        authority = self.period_authority_for(run["period"])
+        if authority is not None:
+            run["period_authority"] = period_authority_summary(authority)
+
     def bind_period_authority(self, run: dict, *, force: bool = False) -> bool:
         """Make the payroll month's 人工月 authority the boundary of this Run.
 
         Returns True only when the Run's window actually changed.  A window the
-        user deliberately set on this Run is never silently overwritten.
+        user deliberately set on this Run is never silently overwritten; only its
+        provenance label is refreshed.
         """
         if not force and self._run_window_is_deliberate(run):
+            self._refresh_run_authority_summary(run)
             return False
         authority = self.period_authority_for(run["period"])
         if authority is None:
-            summary = period_authority_summary(natural_month_authority(run["period"]))
-            if run.get("period_authority") == summary:
-                return False
-            run.update(normalize_period_window(run["period"]))
-            run["period_authority"] = summary
-            return True
-        window = normalize_period_window(
-            run["period"], authority["period_start"], authority["period_end"], authority["boundary_source"]
+            target = natural_month_authority(run["period"])
+            window = normalize_period_window(run["period"])
+        else:
+            target = authority
+            window = normalize_period_window(
+                run["period"], authority["period_start"], authority["period_end"], authority["boundary_source"]
+            )
+        changed = self._run_window_key(run) != (
+            window["period_start"], window["period_end"], window["period_boundary_source"]
         )
-        summary = period_authority_summary(authority)
-        if run.get("period_authority") == summary and (run.get("period_start"), run.get("period_end")) == (
-            window["period_start"], window["period_end"]
-        ):
-            return False
-        run.update(window)
-        run["period_authority"] = summary
-        return True
+        if changed:
+            run.update(window)
+        run["period_authority"] = period_authority_summary(target)
+        return changed
 
     def _reread_schedule_window(self, run: dict) -> None:
         """Re-read the bound schedule under the Run's current window.

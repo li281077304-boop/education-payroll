@@ -189,7 +189,9 @@ def month_of_day(value: str) -> str | None:
 
 PERIOD_AUTHORITY_VERSION = "PERIOD_AUTHORITY/v1"
 
-# 人工月资料（含 CSV 形式的排课/周期资料）
+# 人工月权威资料（知识库 / 制度文件 / CSV / Excel）导入
+AUTHORITY_MANUAL_DOCUMENT = "MANUAL_PERIOD_DOCUMENT"
+# 人工月资料（来源未标明的历史值，保留以解释旧记录）
 AUTHORITY_MANUAL_RECORD = "MANUAL_PERIOD_RECORD"
 # 用户在界面确认的实际排课周期
 AUTHORITY_USER_CONFIRMED = "USER_CONFIRMED"
@@ -199,6 +201,7 @@ AUTHORITY_DERIVED_CONFIRMED_RUN = "DERIVED_FROM_CONFIRMED_RUN"
 AUTHORITY_NATURAL_MONTH_FALLBACK = "LEGACY_CALENDAR_DEFAULT"
 
 EXPLICIT_AUTHORITY_SOURCES = frozenset({
+    AUTHORITY_MANUAL_DOCUMENT,
     AUTHORITY_MANUAL_RECORD,
     AUTHORITY_USER_CONFIRMED,
     AUTHORITY_DERIVED_CONFIRMED_RUN,
@@ -207,11 +210,18 @@ EXPLICIT_AUTHORITY_SOURCES = frozenset({
 # Sources that describe a boundary a human actually established.  Anything else
 # (including the natural-month fallback) must be labelled as such in the UI.
 _BOUNDARY_LABELS = {
-    AUTHORITY_MANUAL_RECORD: "人工月资料",
-    AUTHORITY_USER_CONFIRMED: "人工确认的实际排课周期",
+    AUTHORITY_MANUAL_DOCUMENT: "人工月资料（制度文件导入）",
+    AUTHORITY_MANUAL_RECORD: "人工月资料（来源未标明）",
+    AUTHORITY_USER_CONFIRMED: "人工确认（本机手填）",
     AUTHORITY_DERIVED_CONFIRMED_RUN: "沿用同月已确认的人工周期",
     AUTHORITY_NATURAL_MONTH_FALLBACK: "自然月兜底（尚无人工月资料）",
 }
+
+# Where an authority record came from.  Kept distinct from the boundary source:
+# the source says "how was this window established", this says "which evidence".
+SOURCE_TYPE_DOCUMENT = "DOCUMENT"
+SOURCE_TYPE_CSV = "CSV"
+SOURCE_TYPE_EXCEL = "EXCEL"
 
 
 def is_explicit_authority_source(source: str | None) -> bool:
@@ -234,6 +244,7 @@ def build_period_authority(
     confirmed_by: str = "",
     reason: str = "",
     evidence: dict | None = None,
+    provenance: dict | None = None,
     status: str = "ACTIVE",
     supersedes: str | None = None,
 ) -> dict:
@@ -241,7 +252,8 @@ def build_period_authority(
 
     The window itself is validated by :func:`normalize_period_window`, so a
     stored authority can never disagree with a Run window that was built from
-    the same rules.
+    the same rules.  ``provenance`` carries the traceable evidence (which file,
+    which section, which hash) for authorities imported from a document.
     """
     window = normalize_period_window(payroll_period, period_start, period_end, source)
     boundary_source = window["period_boundary_source"]
@@ -260,6 +272,7 @@ def build_period_authority(
         "confirmed_by": str(confirmed_by or ""),
         "reason": str(reason or ""),
         "evidence": dict(evidence or {}),
+        "source": dict(provenance or {}),
     }
 
 
@@ -277,6 +290,7 @@ def period_authority_summary(authority: dict | None) -> dict:
     """The small, user-facing projection of an authority (no internal noise)."""
     if not authority:
         return {}
+    provenance = dict(authority.get("source") or {})
     return {
         "payroll_period": authority.get("payroll_period", ""),
         "period_start": authority.get("period_start", ""),
@@ -287,7 +301,29 @@ def period_authority_summary(authority: dict | None) -> dict:
         "authority_id": authority.get("id", ""),
         "revision": int(authority.get("revision") or 1),
         "confirmed_by": authority.get("confirmed_by", ""),
+        "reason": authority.get("reason", ""),
+        "source": {
+            key: provenance.get(key, "")
+            for key in ("source_type", "source_file", "source_section", "source_row", "imported_at")
+        } | {"source_hash": str(provenance.get("source_hash", ""))[:16]},
     }
+
+
+def period_authority_key(authority: dict | None) -> tuple:
+    """The stable identity used to decide whether a Run must be re-bound.
+
+    Deliberately excludes mutable evidence (import time, hash, reason) so
+    re-importing the same document never rewrites an unrelated Run.
+    """
+    if not authority:
+        return ()
+    return (
+        str(authority.get("payroll_period", "")),
+        str(authority.get("period_start", "")),
+        str(authority.get("period_end", "")),
+        str(authority.get("boundary_source", "")),
+        str(authority.get("id", "")),
+    )
 
 
 def _parse_period(period: str) -> tuple[int, int]:

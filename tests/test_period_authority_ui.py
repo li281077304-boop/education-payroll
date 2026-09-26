@@ -196,3 +196,97 @@ def test_the_daily_flow_keeps_engineering_configuration_in_advanced_settings():
     assert "advanced-settings" in source, "工程配置应折叠在高级设置里"
     start = source.index("advanced-settings")
     assert "工程配置" in source[start:start + 300], "折叠区要说明这是低频工程配置"
+
+
+# --------------------------------------------------------- 人工月权威资料（界面）
+
+_DOCUMENT_AUTHORITY = {
+    "payroll_period": "2026-08", "period_start": "2026-08-03", "period_end": "2026-08-30",
+    "boundary_source": "MANUAL_PERIOD_DOCUMENT", "source_label": "人工月资料（制度文件导入）",
+    "is_fallback": False, "confirmed_by": "核算负责人", "revision": 1, "authority_id": "a-doc",
+    "status": "ACTIVE",
+    "source": {"source_type": "DOCUMENT", "source_file": "杰牛集团规章制度知识库.md",
+               "source_section": "2. 2026 年人工月排期表", "source_row": 62,
+               "imported_at": "2026-09-26T08:00:00+00:00", "source_hash": "abcdef1234567890"},
+}
+
+
+def _dashboard(run_period="2026-08", authorities=None, run_authority=None):
+    authorities = [_DOCUMENT_AUTHORITY] if authorities is None else authorities
+    run_authority = _DOCUMENT_AUTHORITY if run_authority is None else run_authority
+    return (
+        f"current = {{period: '{run_period}', period_authority: {json.dumps(run_authority, ensure_ascii=False)}}};"
+        f" __result = periodAuthorityDashboardCard('run-1', {json.dumps(authorities, ensure_ascii=False)});"
+    )
+
+
+def test_the_manual_month_card_shows_the_imported_document_and_its_detail_table(tmp_path):
+    card = _run_ui(tmp_path, _dashboard())
+
+    assert "已导入 2026 年人工月：1 条" in card
+    assert "《杰牛集团规章制度知识库》" in card
+    assert "导入人工月资料" in card
+    assert "查看明细" in card
+    for header in ("工资月份", "人工周期", "来源", "状态"):
+        assert f">{header}<" in card, header
+    assert "当前核算使用" in card
+    assert "2. 2026 年人工月排期表" in card, "明细里要能看到资料章节"
+
+
+def test_the_manual_month_card_says_when_the_current_month_has_no_document(tmp_path):
+    card = _run_ui(tmp_path, _dashboard(run_period="2026-10", authorities=[_DOCUMENT_AUTHORITY], run_authority={}))
+
+    assert "当前月份 2026-10 没有人工月资料" in card
+    assert "导入人工月资料" in card
+    assert "手工设置 2026-10 的人工月" in card
+
+
+def test_a_hand_written_authority_is_never_shown_as_the_imported_document(tmp_path):
+    hand = {
+        "payroll_period": "2026-08", "period_start": "2026-08-01", "period_end": "2026-08-30",
+        "boundary_source": "USER_CONFIRMED", "source_label": "人工确认（本机手填）",
+        "is_fallback": False, "confirmed_by": "核算负责人", "revision": 1, "authority_id": "a-hand",
+        "status": "ACTIVE", "source": {},
+    }
+    card = _run_ui(tmp_path, _dashboard(authorities=[hand], run_authority=hand))
+
+    assert "人工确认（本机手填）" in card
+    assert "制度文件导入" not in card
+    assert "本机手工设置" in card, "没有资料文件时要说清来源是本机手工设置"
+
+
+def test_the_import_preview_lists_every_recognised_month_with_its_mapping_rule(tmp_path):
+    preview = {
+        "source": {"source_file": "杰牛集团规章制度知识库.md", "sha256": "abc", "source_type": "DOCUMENT",
+                   "path": "/tmp/知识库.md"},
+        "title": "杰牛集团 / 仁杰教育 — 规章制度知识库", "year": 2026, "can_import": True, "problems": [],
+        "rows": [
+            {"label": "7", "weeks": "5 周", "period_start": "2026-06-29", "period_end": "2026-08-02",
+             "payroll_period": "2026-07", "action": "NEW", "mapping_rule": "按周期内天数最多的月份归属工资月份"},
+            {"label": "8", "weeks": "4 周", "period_start": "2026-08-03", "period_end": "2026-08-30",
+             "payroll_period": "2026-08", "action": "UPDATE", "mapping_rule": "按周期内天数最多的月份归属工资月份"},
+        ],
+    }
+    page = _run_ui(tmp_path, f"current = {{id: 'run-1', af_policy_confirmation: {{}}}}; periodDocumentPreview = {json.dumps(preview, ensure_ascii=False)}; __result = periodDocumentPreviewMarkup();")
+
+    assert "识别结果预览" in page
+    assert "识别到 2 条" in page
+    assert "2026-08-03" in page and "2026-08-30" in page
+    assert "按周期内天数最多的月份归属工资月份" in page
+    assert "确认导入这 2 条人工月" in page
+    assert "period-document-confirmed-by" in page
+
+
+def test_the_import_preview_blocks_a_document_that_cannot_be_read(tmp_path):
+    preview = {
+        "source": {"source_file": "知识库.md", "sha256": "abc", "source_type": "DOCUMENT", "path": "/tmp/知识库.md"},
+        "title": "知识库", "year": 2026, "can_import": False,
+        "problems": ["第 58 行（人工月 8）：无法识别日期范围，请使用如 8.03 — 8.30 的写法。"],
+        "rows": [{"label": "8", "weeks": "4 周", "period_start": "", "period_end": "",
+                  "payroll_period": "", "action": "NEW", "mapping_rule": ""}],
+    }
+    page = _run_ui(tmp_path, f"current = {{id: 'run-1', af_policy_confirmation: {{}}}}; periodDocumentPreview = {json.dumps(preview, ensure_ascii=False)}; __result = periodDocumentPreviewMarkup();")
+
+    assert "需要先修正资料" in page
+    assert "无法识别日期范围" in page
+    assert "资料需要修正后才能导入" in page, "不能导入时按钮要说清原因"

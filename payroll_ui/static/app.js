@@ -127,7 +127,7 @@ async function api(url, options = {}) {
       const path = new URL(url, window.location.href).pathname;
       const labels = [
         ["/check", "正在重新核对…"], ["/preview", "正在核算…"], ["/generate", "正在生成工资表…"],
-        ["/base-salary-defer", "正在保存并核算…"], ["/base-salary", "正在保存…"], ["/period-window", "正在保存周期…"], ["/af-policy", "正在保存…"],
+        ["/base-salary-defer", "正在保存并核算…"], ["/base-salary", "正在保存…"], ["/period-window", "正在保存周期…"], ["/period-authority", "正在同步人工月…"], ["/period-document/import", "正在导入人工月…"], ["/af-policy", "正在保存…"],
         ["/company-template", "正在保存模板…"], ["/decisions", "正在保存…"],
       ];
       const label = labels.find(([suffix]) => path.endsWith(suffix))?.[1] || "正在处理…";
@@ -211,7 +211,8 @@ async function authorityDashboard(runId = null, focus = "") {
     const authorityList = periodPayload.authorities || [];
     const runPeriod = runId ? (current?.period || "") : "";
     const runAuthority = (runId && current?.period_authority) || {};
-    const periodCard = `<section id="period-authority-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>人工月 / 工资周期</h2><p class="muted">工资月份对应的实际教学周期。确认一次后，该月份以后的核算都自动沿用，不需要每月重复确认。</p></div><span class="status ${runAuthority.is_fallback ? "warn" : "ok"}">${runAuthority.is_fallback ? "自然月兜底" : runAuthority.payroll_period ? "已设置" : "未设置"}</span></div>${runId ? `<p class="muted small">${escapeHtml(runPeriod)}：${escapeHtml(runAuthority.period_start || "?")} ～ ${escapeHtml(runAuthority.period_end || "?")}（${escapeHtml(runAuthority.source_label || "未设置")}）</p>${periodAuthorityForm(runAuthority, "dashboard")}` : '<p class="muted small">打开一个工资核算记录后，可在这里维护该月份的人工周期。</p>'}${authorityList.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>工资月份</th><th>人工周期</th><th>来源</th><th>确认人</th></tr></thead><tbody>${authorityList.map((item) => `<tr><td>${escapeHtml(item.payroll_period)}</td><td>${escapeHtml(item.period_start)} ～ ${escapeHtml(item.period_end)}</td><td>${escapeHtml(item.source_label || "")}</td><td>${escapeHtml(item.confirmed_by || "—")}</td></tr>`).join("")}</tbody></table></div>` : '<p class="muted">尚未保存人工月记录。</p>'}</section>`;
+    periodAuthorityList = authorityList;
+    const periodCard = periodAuthorityDashboardCard(runId, authorityList);
     const baseSalaryCount = Object.keys(current?.base_salary_inputs || {}).length;
     const baseSalaryState = current?.base_salary_input_snapshot ? `已带入 ${baseSalaryCount} 位教师` : current?.base_salary_deferred ? "已记录暂不录入（M 保持待补充）" : "尚未导入";
     const baseSalaryCard = `<section id="base-salary-card" class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>历史基本工资</h2><p class="muted">用一张历史工资表批量带入 G～L，未匹配教师再单独补录；已保存的教师资料下个月自动复用。</p></div><span class="status ${current?.base_salary_input_snapshot ? "ok" : "warn"}">${escapeHtml(baseSalaryState)}</span></div>${runId ? `<div class="action-bar"><button class="secondary" onclick="openBaseSalaryPage('${escapeHtml(runId)}')">去导入或补录</button></div>` : '<p class="muted small">打开一个工资核算记录后，可在这里导入或补录基本工资。</p>'}</section>`;
@@ -933,7 +934,119 @@ function periodAuthorityCard() {
   if (authority.is_fallback) {
     return `<section class="card warning-card"><h2>人工月 / 工资周期：暂按自然月兜底</h2><p class="muted">${escapeHtml(authority.payroll_period)} 还没有人工月资料，因此筛选与完整性判断暂按自然月 ${range}。若本单位该月的实际工资周期不是自然月，请在这里确认一次。</p>${outside}<details><summary>设置 ${escapeHtml(authority.payroll_period)} 的人工月 / 工资周期</summary>${periodAuthorityForm(authority, "materials")}</details></section>`;
   }
-  return `<section class="card"><h2>人工月 / 工资周期</h2><p class="muted">${escapeHtml(authority.payroll_period)} 的人工周期为 ${range}（${escapeHtml(authority.source_label || "")}${authority.confirmed_by ? `，确认人：${escapeHtml(authority.confirmed_by)}` : ""}）。排课筛选和完整性都按这个周期判断，不再使用自然月月末。</p>${outside}<details><summary>修正该工资月份的人工周期</summary>${periodAuthorityForm(authority, "materials")}</details></section>`;
+  const documentLine = (authority.source || {}).source_file
+    ? `<p class="small muted">人工月来源：${escapeHtml(authoritySourceText(authority))}${(authority.source || {}).imported_at ? ` · 导入 ${escapeHtml(fmtDate(authority.source.imported_at))}` : ""}</p>`
+    : "";
+  return `<section class="card"><h2>人工月 / 工资周期</h2><p class="muted">${escapeHtml(authority.payroll_period)} 的人工周期为 ${range}（${escapeHtml(authority.source_label || "")}${authority.confirmed_by ? `，确认人：${escapeHtml(authority.confirmed_by)}` : ""}）。排课筛选和完整性都按这个周期判断，不再使用自然月月末。</p>${documentLine}${outside}<details><summary>修正该工资月份的人工周期</summary>${periodAuthorityForm(authority, "materials")}</details></section>`;
+}
+
+// ------------------------------------------------------------- 人工月权威资料
+//
+// 人工月资料是「基础权威资料」：导入一次，对应月份以后自动沿用。
+// 资料导入（MANUAL_PERIOD_DOCUMENT）与用户在界面上手填（USER_CONFIRMED）
+// 必须在界面上区分开。
+
+let periodAuthorityList = [];
+let periodDocumentPreview = null;
+let periodDocumentReturnRun = "";
+
+function authoritySourceText(item) {
+  const source = item?.source || {};
+  if (source.source_file) {
+    const name = String(source.source_file).replace(/\.[^.]+$/, "");
+    return `《${name}》${source.source_section ? ` · ${source.source_section}` : ""}`;
+  }
+  if (item?.source_label) return item.source_label;
+  return "未标明来源";
+}
+
+function periodAuthorityDashboardCard(runId, authorityList) {
+  const active = (authorityList || []).filter((item) => item.status !== "SUPERSEDED");
+  const years = [...new Set(active.map((item) => String(item.payroll_period).slice(0, 4)))].sort();
+  const documents = [...new Set(active.map((item) => (item.source || {}).source_file).filter(Boolean))];
+  const importedAt = active.map((item) => (item.source || {}).imported_at).filter(Boolean).sort().slice(-1)[0] || "";
+  const runPeriod = runId ? (current?.period || "") : "";
+  const runAuthority = (runId && current?.period_authority) || {};
+  const hasRunMonth = Boolean(runId && active.some((item) => item.payroll_period === runPeriod));
+  const headline = active.length
+    ? `已导入${years.length === 1 ? ` ${years[0]} 年` : ""}人工月：${active.length} 条`
+    : "尚未导入人工月资料";
+  const summary = active.length
+    ? `<div class="facts"><div><span>已导入</span><strong>${escapeHtml(headline)}</strong></div><div><span>来源</span><strong>${escapeHtml(documents.map((name) => `《${String(name).replace(/\.[^.]+$/, "")}》`).join("、") || "本机手工设置")}</strong></div><div><span>最近导入</span><strong>${escapeHtml(importedAt ? fmtDate(importedAt) : "—")}</strong></div></div>`
+    : '<p class="warn small">还没有导入过人工月资料；当前只能按自然月兜底。</p>';
+  const monthLine = !runId
+    ? '<p class="muted small">打开一个工资核算记录后，可在这里维护该月份的人工月。</p>'
+    : hasRunMonth
+      ? `<p class="muted small">本次核算 ${escapeHtml(runPeriod)}：${escapeHtml(runAuthority.period_start || "?")} ～ ${escapeHtml(runAuthority.period_end || "?")}（${escapeHtml(runAuthority.source_label || "未设置")}${(runAuthority.source || {}).source_file ? ` · ${escapeHtml(authoritySourceText(runAuthority))}` : ""}）</p>`
+      : `<p class="warn small">当前月份 ${escapeHtml(runPeriod)} 没有人工月资料。</p>`;
+  const detailRows = (authorityList || []).map((item) => {
+    const state = item.status === "SUPERSEDED"
+      ? `历史版本（第 ${item.revision} 版）`
+      : (runId && item.payroll_period === runPeriod ? "当前核算使用" : "已保存");
+    const imported = (item.source || {}).imported_at;
+    return `<tr><td><strong>${escapeHtml(item.payroll_period)}</strong></td><td>${escapeHtml(item.period_start)} ～ ${escapeHtml(item.period_end)}</td><td>${escapeHtml(authoritySourceText(item))}${imported ? `<div class="small muted">导入 ${escapeHtml(fmtDate(imported))} · 确认人 ${escapeHtml(item.confirmed_by || "—")}</div>` : ""}</td><td>${escapeHtml(state)}</td></tr>`;
+  }).join("");
+  const detail = authorityList && authorityList.length
+    ? `<details><summary>查看明细（${authorityList.length} 条）</summary><div class="table-wrap"><table class="table"><thead><tr><th>工资月份</th><th>人工周期</th><th>来源</th><th>状态</th></tr></thead><tbody>${detailRows}</tbody></table></div></details>`
+    : "";
+  const manual = runId
+    ? `<details><summary>手工设置 ${escapeHtml(runPeriod)} 的人工月</summary>${periodAuthorityForm(runAuthority, "dashboard")}</details>`
+    : "";
+  return `<section id="period-authority-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>人工月 / 工资周期</h2><p class="muted">公司的薪资计算周期，非自然月。导入资料后对应月份自动沿用，不需要每月重复确认。</p></div><span class="status ${active.length && hasRunMonth ? "ok" : "warn"}">${active.length ? (hasRunMonth ? "已设置" : "缺本月资料") : "未导入"}</span></div>${summary}${monthLine}<div class="action-bar"><button onclick="importPeriodDocument()">导入人工月资料</button>${runId ? `<button class="secondary" onclick="setTab('materials')">返回本核算</button>` : ""}</div>${detail}${manual}</section>`;
+}
+
+async function importPeriodDocument() {
+  periodDocumentReturnRun = current?.id || "";
+  try {
+    const picked = await api("/api/pick-period-document", { method: "POST", body: "{}" });
+    if (!picked.path) return;
+    periodDocumentPreview = await api(`/api/period-document/preview?path=${encodeURIComponent(picked.path)}`);
+    shell(periodDocumentPreviewMarkup(), false);
+  } catch (error) { showMessage(error.message); }
+}
+
+function periodDocumentPreviewMarkup() {
+  const preview = periodDocumentPreview || {};
+  const rows = preview.rows || [];
+  const source = preview.source || {};
+  const problems = preview.problems || [];
+  const actionLabels = { NEW: "新增", UPDATE: "更新为资料口径", UNCHANGED: "无变化" };
+  const rowHtml = rows.map((row) => `<tr><td><strong>${escapeHtml(row.label || "—")}</strong></td><td>${escapeHtml(row.weeks || "—")}</td><td>${escapeHtml(row.period_start || "?")} ～ ${escapeHtml(row.period_end || "?")}</td><td>${escapeHtml(row.payroll_period || "—")}</td><td>${escapeHtml(actionLabels[row.action] || row.action || "")}</td><td class="small muted">${escapeHtml(row.mapping_rule || "")}</td></tr>`).join("");
+  return `<div class="section-head"><div><p class="eyebrow">人工月资料</p><h1>识别结果预览</h1><p class="muted">${escapeHtml(source.source_file || "")} · 识别到 ${rows.length} 条 · 年份 ${escapeHtml(String(preview.year || "未标明"))}</p></div><button class="secondary" onclick="cancelPeriodDocumentImport()">取消</button></div>${problems.length ? `<section class="card warning-card"><h2>需要先修正资料</h2>${problems.map((item) => `<p class="small warn">${escapeHtml(item)}</p>`).join("")}</section>` : ""}<section class="card"><div class="table-wrap"><table class="table"><thead><tr><th>人工月</th><th>周数</th><th>人工周期</th><th>工资月份</th><th>处理</th><th>工资月份依据</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="6" class="muted">没有识别到人工月。</td></tr>'}</tbody></table></div><p class="muted small">工资月份按「周期内天数最多的月份」归属；如果与你的口径不同，请先修正资料再导入。确认后写入的是可复用的权威记录，以后同月份核算不再重复询问，课表日期只用于校验。</p><label>导入确认人<input id="period-document-confirmed-by" value="${escapeHtml(current?.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button class="secondary" onclick="cancelPeriodDocumentImport()">取消</button><button onclick="confirmPeriodDocumentImport()" ${preview.can_import ? "" : "disabled"}>${preview.can_import ? `确认导入这 ${rows.length} 条人工月` : "资料需要修正后才能导入"}</button></div></section>`;
+}
+
+function cancelPeriodDocumentImport() {
+  periodDocumentPreview = null;
+  if (periodDocumentReturnRun) authorityDashboard(periodDocumentReturnRun);
+  else authorityDashboard();
+}
+
+async function confirmPeriodDocumentImport() {
+  const person = $("#period-document-confirmed-by")?.value?.trim() || "";
+  if (!person) {
+    $("#period-document-confirmed-by")?.focus();
+    return showMessage("请填写导入确认人。");
+  }
+  const preview = periodDocumentPreview || {};
+  const runId = periodDocumentReturnRun;
+  try {
+    const result = await api("/api/period-document/import", {
+      method: "POST",
+      body: JSON.stringify({ path: (preview.source || {}).path || "", source_sha256: (preview.source || {}).sha256 || "", confirmed_by: person }),
+    });
+    const counts = result.counts || {};
+    periodDocumentPreview = null;
+    if (runId) {
+      // 权威资料优先于本 Run 上此前手填的周期：直接改绑并重新读取排课。
+      current = await api(`/api/runs/${runId}/period-authority`, { method: "POST", body: JSON.stringify({ force: true }) });
+      tab = "materials";
+      renderRun();
+      showMessage(`已导入人工月 ${result.imported} 条（新增 ${counts.created || 0}、更新 ${counts.updated || 0}、无变化 ${counts.unchanged || 0}）；本次核算已改用 ${current.period_start} ～ ${current.period_end} 并重新读取排课。`, "success");
+    } else {
+      showMessage(`已导入人工月 ${result.imported} 条（新增 ${counts.created || 0}、更新 ${counts.updated || 0}、无变化 ${counts.unchanged || 0}）。`, "success");
+      await authorityDashboard();
+    }
+  } catch (error) { await refreshAfterError(error); }
 }
 
 async function openBaseSalaryPage(runId) {

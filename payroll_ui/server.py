@@ -164,6 +164,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.payroll_policy_registry(query.get("run_id", [""])[0], query.get("period", [""])[0]))
             if parsed.path == "/api/period-authorities":
                 return self._json({"authorities": self.server.service.period_authorities()})
+            if parsed.path == "/api/period-document/preview":
+                # 只读识别：预览阶段绝不写入任何 authority。
+                source_path = parse_qs(parsed.query).get("path", [""])[0]
+                return self._json(self.server.service.preview_period_document(source_path))
             if parsed.path == "/api/av-source-map":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.av_source_map(query.get("run_id", [""])[0]))
@@ -255,6 +259,15 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     reason=str(payload.get("reason", "")),
                     evidence=payload.get("evidence") if isinstance(payload.get("evidence"), dict) else None,
                 ), HTTPStatus.CREATED)
+            if path == "/api/period-document/import":
+                # 权威资料批量导入：一次确认写入多条人工月 authority。
+                return self._json(self.server.service.import_period_document(
+                    str(payload.get("path", "")),
+                    str(payload.get("source_sha256", "")),
+                    str(payload.get("confirmed_by", "")),
+                ), HTTPStatus.CREATED)
+            if path == "/api/pick-period-document":
+                return self._json({"path": self._pick_period_document()})
             if path == "/api/teacher-access":
                 return self._json(self.server.service.create_teacher_access(str(payload.get("teacher_id", "")), str(payload.get("display_name", ""))), HTTPStatus.CREATED)
             if path == "/api/payroll-submissions":
@@ -397,6 +410,20 @@ class PayrollHandler(SimpleHTTPRequestHandler):
     @staticmethod
     def _pick_excel() -> str | None:
         script = 'POSIX path of (choose file with prompt "选择 Excel 文件" of type {"org.openxmlformats.spreadsheetml.sheet", "com.microsoft.excel.xls", "com.microsoft.excel.xlsm"})'
+        try:
+            return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    @staticmethod
+    def _pick_period_document() -> str | None:
+        """Pick the authoritative 人工月 document (Markdown / CSV / Excel).
+
+        Deliberately unfiltered by UTI: the office keeps this material as .md,
+        .csv and .xlsx, and an unknown UTI would make the dialog fail silently.
+        The reader reports an actionable error for an unsupported file.
+        """
+        script = 'POSIX path of (choose file with prompt "选择人工月资料（Markdown / CSV / Excel）")'
         try:
             return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
         except (OSError, subprocess.CalledProcessError):
