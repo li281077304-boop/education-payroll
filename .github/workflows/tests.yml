@@ -1,0 +1,40 @@
+name: tests
+
+# Minimal status check: every push (and pull request) publishes an independent
+# pass/fail for the pytest suite, so "did this break the payroll tool" no longer
+# depends on a developer machine.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded run on the same branch is noise; cancel it.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The dependencies below mirror [project] in pyproject.toml.  The tests
+      # import `payroll_core` / `payroll_ui` / `tools` through the pytest
+      # `pythonpath` setting, so no install of the package itself is needed and
+      # the checkout is never modified.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "PyYAML>=6.0" "openpyxl>=3.1" "xlrd>=2.0.1" "pytest>=8.0"
+
+      # The same entry point developers use locally: loopback traffic bypasses
+      # any proxy and the pytest temp root stays inside the workspace.
+      - name: Run pytest
+        run: sh tools/run_tests.sh -q

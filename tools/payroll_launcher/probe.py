@@ -36,12 +36,27 @@ class ProbeResult:
         return int(pid) if isinstance(pid, int) else None
 
 
+def _direct_opener() -> urllib.request.OpenerDirector:
+    """An opener that never consults HTTP_PROXY / HTTPS_PROXY / ALL_PROXY.
+
+    The health probe always talks to a loopback address of the machine it runs
+    on.  If a development shell, a VPN client or a transparent corporate proxy
+    exports proxy variables, ``urlopen`` would send the loopback request to
+    that proxy and misread the proxy's own answer as "the port is owned by a
+    foreign program".  An empty :class:`ProxyHandler` disables proxy lookup for
+    this opener only, so an absent port is always reported as absent instead of
+    depending on the ambient environment.
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def probe(host: str, port: int, data_dir: Path, timeout: float = 0.8) -> ProbeResult:
     """Classify the process on ``host:port`` without side effects."""
     expected = data_dir_fingerprint(data_dir)
     url = f"http://{host}:{port}{HEALTH_PATH}"
+    opener = _direct_opener()
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with opener.open(url, timeout=timeout) as response:
             if response.status != 200:
                 return ProbeResult(ProbeKind.FOREIGN, f"端口返回状态 {response.status}")
             raw = response.read()

@@ -162,6 +162,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/payroll-policy-registry":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.payroll_policy_registry(query.get("run_id", [""])[0], query.get("period", [""])[0]))
+            if parsed.path == "/api/period-authorities":
+                return self._json({"authorities": self.server.service.period_authorities()})
             if parsed.path == "/api/av-source-map":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.av_source_map(query.get("run_id", [""])[0]))
@@ -242,6 +244,17 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.save_policy_version(str(payload.get("effective_from", "")), str(payload.get("effective_to", "")), str(payload.get("source", "")), payload.get("profiles", []), payload.get("supersedes_version_id"), str(payload.get("source_hash", ""))), HTTPStatus.CREATED)
             if path == "/api/company-template":
                 return self._json(self.server.service.register_company_template(str(payload.get("path", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)
+            if path == "/api/period-authorities":
+                # 人工月资料入库：该工资月份以后的每次核算都自动沿用同一周期。
+                return self._json(self.server.service.record_period_authority(
+                    str(payload.get("payroll_period", "")),
+                    str(payload.get("period_start", "")),
+                    str(payload.get("period_end", "")),
+                    str(payload.get("boundary_source", "")),
+                    confirmed_by=str(payload.get("confirmed_by", "")),
+                    reason=str(payload.get("reason", "")),
+                    evidence=payload.get("evidence") if isinstance(payload.get("evidence"), dict) else None,
+                ), HTTPStatus.CREATED)
             if path == "/api/teacher-access":
                 return self._json(self.server.service.create_teacher_access(str(payload.get("teacher_id", "")), str(payload.get("display_name", ""))), HTTPStatus.CREATED)
             if path == "/api/payroll-submissions":
@@ -326,6 +339,9 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
                 if action == "period-check":
                     return self._json(self.server.service.resolve_period_check(run_id, str(payload.get("decision", ""))))
+                if action == "period-authority":
+                    # 按该工资月份的人工月 authority 重新绑定并重读排课覆盖范围。
+                    return self._json(self.server.service.ensure_period_authority(run_id, force=bool(payload.get("force"))))
                 if action == "period-window":
                     return self._json(self.server.service.confirm_period_window(
                         run_id,

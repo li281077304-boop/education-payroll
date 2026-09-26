@@ -33,6 +33,12 @@ venv/
 .env.*
 work/
 
+# pytest scratch (tools/run_tests.sh keeps its temp root inside the repo so a
+# sandboxed TMPDIR cannot break the run; the directory itself is never code).
+.pytest-basetemp/
+.pytest_tmp_base/
+.pytest_cache/
+
 # Generated macOS launcher bundles embed this machine's absolute paths, so the
 # repository keeps the builder (macos/build_app.sh) instead of the artifact.
 macos/dist/

@@ -2,12 +2,14 @@
   "date": "2026-09-26",
   "project": "education-payroll",
   "type": "REAL_MANUAL_UI_UAT",
-  "status": "OPEN",
+  "status": "PARTIAL",
+  "status_legend": {"PASS": "真实证据支持通过", "PARTIAL": "已修复或已实现，但缺少真实界面点击确认", "OPEN": "未解决", "BLOCKED": "被外部条件阻断"},
   "privacy": "Anonymized; no real teacher names, salary values, raw file paths, or workbook contents.",
   "current_ui_evidence": {
     "period": "2026-08",
-    "open_issue_count": 31,
-    "source": "visible Payroll UI"
+    "open_issue_count_at_uat": 31,
+    "open_issue_count_after_fix": 45,
+    "note": "问题数上升是因为周期阻塞消失后，真实的业务输入缺口（基本工资、续费确认、退费确认等）逐条显式列出，而不是继续被周期异常遮蔽。"
   },
   "accepted_behavior": [
     "Default compulsory-hours policy and a teacher exception can be saved and confirmed.",
@@ -15,20 +17,139 @@
     "Do not modify star bonus or personal-policy calculations in this UAT."
   ],
   "observations": [
-    {"id": "UAT-01", "area": "basic_salary_import", "severity": "P0", "status": "OPEN", "expected": "Import a compatible historical salary table in bulk; only unmatched teachers require manual completion."},
-    {"id": "UAT-02", "area": "issue_action_flow", "severity": "P0", "status": "OPEN", "expected": "Processing an issue opens its actionable confirmation form and shows a durable result."},
-    {"id": "UAT-03", "area": "async_feedback", "severity": "P0", "status": "OPEN", "expected": "Long-running actions show progress, disable duplicate submission, and report success or actionable failure."},
-    {"id": "UAT-04", "area": "preview_copy", "severity": "P1", "status": "OPEN", "expected": "Keep preview notes concise and expose detailed explanations on demand."},
-    {"id": "UAT-05", "area": "template_navigation", "severity": "P0", "status": "OPEN", "expected": "Missing-template state provides a direct setup action and resumes generation after save."},
-    {"id": "UAT-06", "area": "period_validation", "severity": "P0", "status": "OPEN", "expected": "Compare the actual imported coverage against the run period; do not report a false August coverage anomaly."},
-    {"id": "UAT-07", "area": "renewal_review", "severity": "P0", "status": "OPEN", "expected": "Show imported renewal checks in the current run with period and teacher match status."},
-    {"id": "UAT-08", "area": "star_source_visibility", "severity": "P1", "status": "OPEN", "expected": "Show the current star value and where it comes from without changing star bonus or personal-policy rules."}
+    {
+      "id": "UAT-01", "area": "basic_salary_import", "severity": "P0", "status": "PARTIAL",
+      "expected": "Import a compatible historical salary table in bulk; only unmatched teachers require manual completion.",
+      "root_cause": "基本工资只能逐格录入，没有任何整表识别与导入链路。",
+      "fix": "已实现只读整表识别（G～L）+ 教师匹配 + 预览 + 确认后才写入当前 Run；未匹配教师保留补录入口；来源文件 SHA-256 在校验通过后才写入，且已保存的教师资料下月自动复用。",
+      "test": "tests/test_base_salary_import.py（10 项：二级合并表头、姓名二义性 fail closed、来源重复教师 fail closed、G～L 缺列 fail closed、公式无缓存值 fail closed、来源指纹变化检测、空白 H/J 仅在同排 M 公式与缓存共同证明为 0 时按 0）；tests/test_payroll_20260926_uat.py。",
+      "remaining": "本轮未在真实浏览器里完整点完一次导入（识别→预览→确认→补录）。"
+    },
+    {
+      "id": "UAT-02", "area": "issue_action_flow", "severity": "P0", "status": "PASS",
+      "expected": "Processing an issue opens its actionable confirmation form and shows a durable result.",
+      "root_cause": "本轮真实 UAT 中，义务课时默认规则与一位教师的例外确认流程已可完成；未发现阻断。",
+      "fix": "本轮未改动该流程（属于用户已认可的行为），也未改动星级加成 / 个人政策 / 工资公式。",
+      "test": "本轮真实 UAT：默认 30 小时 + 一位教师例外（0 小时、原因“带组且没有星级”）保存并确认成功。定向回归 70 项通过。",
+      "remaining": "无（默认惯例与例外保持分离、可追溯）。"
+    },
+    {
+      "id": "UAT-03", "area": "async_feedback", "severity": "P0", "status": "PARTIAL",
+      "expected": "Long-running actions show progress, disable duplicate submission, and report success or actionable failure.",
+      "root_cause": "UAT 观察到「暂不录入，先生成工资表」点击后没有可见反馈：它只保存了一个 defer 决定并跳转页面，没有做核算，按钮文案与实际动作不一致。",
+      "fix": "① 该按钮现在一次点击内完成：保存 defer 决定 → 自动重新核算 → 生成工资预览；有其它业务阻塞则进入异常处理，无阻塞直接进入工资预览，不需要再点一次「自动核算」；M/AV 保持真实待补充，绝不按 0。② 按钮文案改为「暂不录入，先生成工资预览」，与实际动作一致。③ 该接口在 api() 中登记了专用的处理中文字「正在保存并核算…」。",
+      "test": "tests/test_defer_base_salary_chain.py（8 项：缺确认人不写入、缺材料返回 BLOCKED、一次点击即完成核算与预览、M/AV 不按 0、有阻塞返回阻塞理由、状态不得虚报、无阻塞直达预览、可重复执行）；tests/test_button_feedback_ui.py（6 项：忙碌文字、防重复提交、错误可操作、每个关键接口都有具名反馈）。",
+      "remaining": "其余按钮（自动核算、保存人工周期、续费确认、公司模板、最终生成）由统一忙碌机制覆盖并有自动化验证，但本轮未在真实浏览器里逐个点击复测。"
+    },
+    {
+      "id": "UAT-04", "area": "preview_copy", "severity": "P1", "status": "PARTIAL",
+      "expected": "Keep preview notes concise and expose detailed explanations on demand.",
+      "root_cause": "预览行内说明偏长，影响快速核对。",
+      "fix": "主表保持 7 个快速核对字段（M/AA/AC/AD/AE/AF/AV）；续费（AH/AI/AJ/AK/兼职）与教师星级收进行内折叠，新增页级折叠「本期使用的依据（人工月 / 星级来源）」。",
+      "test": "tests/test_period_authority_ui.py 断言主表字段集合与折叠依据面板存在。",
+      "remaining": "未真实浏览确认视觉长度。"
+    },
+    {
+      "id": "UAT-05", "area": "template_navigation", "severity": "P0", "status": "PARTIAL",
+      "expected": "Missing-template state provides a direct setup action and resumes generation after save.",
+      "root_cause": "缺模板时只有一句提示，没有入口也找不到导航。",
+      "fix": "缺模板时最终生成会直接带用户进入公司模板设置；保存模板后返回原 Run 的工资预览并可继续生成。",
+      "test": "tests/test_uat_night_regression.py::test_production_export_requires_the_company_template；tests/test_button_feedback_ui.py::test_missing_company_template_sends_the_user_to_the_template_setting_and_back。",
+      "remaining": "未真实点击；模板结构契约（可只有表头行）沿用既有 anti-copy 规则，未改动。"
+    },
+    {
+      "id": "UAT-06", "area": "period_validation", "severity": "P0", "status": "PARTIAL",
+      "expected": "Compare the actual imported coverage against the run period; do not report a false August coverage anomaly.",
+      "root_cause": "系统把工资月份默认当成自然月（2026-08 = 8/1～8/31），于是课表覆盖到 8/30 时 incomplete_tail=true → 最终导出被 PERIOD_COVERAGE_INCOMPLETE 阻断，再要求用户人工确认 8/30 是截止日。真实证据：同一台机器上 9/17 曾人工确认 2026-08 的实际周期，但没有任何可复用的记录，10 天后新建的 Run 又退回自然月。",
+      "fix": "工资月份 → 该月“人工月 / 工资周期”authority（payroll_period / period_start / period_end / 来源 / 版本）→ 用它筛选与判断完整性；课表日期只用于校验人工月，文件名仅作低优先级证据。有人工月时不使用自然月月末；课表超出人工周期才提示越界（PERIOD_OUTSIDE_AUTHORITY）；没有人工月时回退自然月并在界面明确标注“自然月兜底”；人工确认一次即形成该月份可复用的权威记录，不再每月重复确认；原有的“确认实际排课周期”降为例外修正入口。",
+      "test": "tests/test_period_authority.py（16 项：自动绑定、reopen 不丢失、切换月份重新绑定、无 authority 时明确 fallback、8/1～8/30 + 课表 8/1～8/30 完整、8/31 越界提示、CSV 按人工月过滤、文件名月份不能覆盖、人工确认形成可复用记录、重复确认不产生新版本、不同窗口 supersede 且保留历史、历史确认可恢复、自然月不被提升、本 Run 人工设定的窗口不被静默覆盖）；tests/test_period_authority_http.py（3 项，按浏览器方式走 /api/period-authorities 与 /api/runs/<id>/period-authority）。",
+      "remaining": "真实数据已按新语义复算通过（见 real_data_actions），但“在浏览器里点开人工月卡片并保存”这一步未真实点击。",
+      "real_data_result": "当前 2026-08 Run：绑定前 8/1～8/31（自然月，incomplete_tail=true）→ 绑定后 8/1～8/30（人工月资料，incomplete_tail=false、outside_period=false、排课记录数不变 2385）；自动核算后 PERIOD_COVERAGE_INCOMPLETE 与 PERIOD_OUTSIDE_AUTHORITY 均不再出现。"
+    },
+    {
+      "id": "UAT-07", "area": "renewal_review", "severity": "P0", "status": "PARTIAL",
+      "expected": "Show imported renewal checks in the current run with period and teacher match status.",
+      "root_cause": "旧识别链会把年度续费文件里的 1 月工作表当成 8 月资料，并把“有续费资料”误报成“续费已进工资”；保存的续费记录只有续费人数，缺少工资用的 AH/AI/AJ 课时合计。",
+      "fix": "只读取工资月份对应的工作表；把“续费资料已导入”和“续费已确认并进入本次工资”在界面上分开；预览 AH/AI/AJ 后经人工确认才写入当前 Run 的 renewal snapshot，AK 再由确认后的 AH/AI/AJ 计算。",
+      "test": "tests/test_payroll_20260926_uat.py::test_monthly_renewal_import_is_visible_but_wage_fields_require_confirmation（含 Ak=AH*1+AI*1.5+AJ*0.75 校验）；tests/test_renewal_production.py。",
+      "remaining": "未在本轮真实界面复测“已导入 / 已确认并进入工资”两种状态的显示。"
+    },
+    {
+      "id": "UAT-08", "area": "star_source_visibility", "severity": "P1", "status": "PARTIAL",
+      "expected": "Show the current star value and where it comes from without changing star bonus or personal-policy rules.",
+      "root_cause": "用户看不到星级从哪里确定、42/43 代表什么。",
+      "fix": "工资预览新增页级折叠「本期使用的依据」，显示教师星级的 authority 名称 / 版本 / 生效期 / 来源；基础资料新增「教师星级来源」卡片只读展示同样信息。星级值与星级加成算法未改动。",
+      "test": "tests/test_period_authority_ui.py::test_the_preview_shows_the_period_and_star_authority_evidence（断言版本、生效期、来源可见）。",
+      "remaining": "未真实浏览。"
+    },
+    {
+      "id": "UAT-09", "area": "basic_info_layering", "severity": "P1", "status": "PARTIAL",
+      "expected": "普通月度工资流程不要直接暴露大量工程配置。",
+      "root_cause": "基础资料页把星级加成金额、个人政策、7 类核心规则等低频工程配置与月度流程混在一起。",
+      "fix": "基础资料页外层只保留：公司工资模板、人工月 / 工资周期、历史基本工资、教师星级来源；星级加成、个人政策、7 类核心规则、班型折算、历史兼容规则收进「高级设置（管理员）」折叠区。未重构计算引擎。",
+      "test": "tests/test_period_authority_ui.py::test_the_daily_flow_keeps_engineering_configuration_in_advanced_settings。",
+      "remaining": "未真实浏览。"
+    }
+  ],
+  "environment": [
+    {
+      "id": "ENV-01", "area": "launcher_health_probe", "status": "PASS",
+      "root_cause": "launcher 的 localhost health probe 使用会读取代理变量的 opener。开发 shell / 沙箱导出 HTTP_PROXY / ALL_PROXY 时，127.0.0.1 的探测请求被本地代理接走，空闲端口被误判成 foreign / port-taken（tests/test_launcher.py 恰好 3 项假失败）。",
+      "fix": "probe 改用显式禁用代理的 opener（ProxyHandler({})），不再依赖环境恰好没有代理。",
+      "test": "tests/test_launcher.py 带代理环境 26 项通过；新增 2 项回归（导出代理时空闲端口仍判 absent、带代理仍能识别本服务）。",
+      "note": "历史误判记录：曾怀疑 shim、重复 stash 与 restore；最终确认是本项。"
+    },
+    {
+      "id": "ENV-02", "area": "pytest_temp_root", "status": "PASS",
+      "root_cause": "launcher / 沙箱通过 PYTHONPATH 注入 sitecustomize shim，拦截 mkdir 且不认 exist_ok，导致 pytest 的 tmp_path 大面积 PermissionError；同一问题在仓库内临时目录下还会放大。",
+      "fix": "提供项目统一测试入口 tools/run_tests.sh：剥离 shim 的 PYTHONPATH 条目、清空代理变量、把 pytest 临时根固定到仓库内的稳定目录（并在 .gitignore 中排除）。",
+      "test": "同一入口跑全量 495 项通过。"
+    },
+    {
+      "id": "ENV-03", "area": "export_timestamp_path_dependence", "status": "PASS",
+      "root_cause": "真实缺陷（非环境）：导出时间戳是在整条路径上做正则。本机仓库目录名以 -20260913 结尾，目录片段先被匹配到但没有时分，函数于是返回“没有时间戳”，使“导出污染 / 升学升级”规则失效 —— 同一份代码只因临时目录位于仓库内就失败（tests/test_grade_inference.py 2 项）。",
+      "fix": "改为先取文件名，只有在文件名本身没有可用时间戳时才回退到所在目录；不再引入 pathlib 依赖（该模块刻意不接触文件系统）。",
+      "test": "tests/test_grade_inference.py 58 项通过；新增 2 项确定性回归（日期型目录名不得覆盖文件名时间戳、临时目录名带日期片段时历史年级仍须正确推断）。既有两个用例现在在仓库内 / 仓库外两种临时根下都通过。"
+    },
+    {
+      "id": "ENV-04", "area": "github_ci", "status": "PARTIAL",
+      "root_cause": "仓库没有 GitHub CI，push 后无法独立显示通过 / 失败。",
+      "fix": "新增 .github/workflows/tests.yml：Python 3.12、安装 pyproject 中列出的依赖、调用同一个 tools/run_tests.sh。",
+      "test": "本地以同一命令跑通（495 项）；GitHub 首次运行结果待本次 push 后确认。",
+      "remaining": "CI 在 GitHub 上的首次结果需要 push 后查看，之后回填。"
+    },
+    {
+      "id": "ENV-05", "area": "agent_test_hygiene", "status": "PASS",
+      "root_cause": "为跑测试随意 git clean / stash 会破坏工作区。",
+      "fix": "本轮未执行任何 git clean；对照“改动前行为”时使用仓库旁的独立 git worktree，不改动当前工作区，用完即删除。",
+      "test": "定向测试通过后再跑全量（只跑一次）：495 passed / 0 failed。"
+    }
+  ],
+  "real_data_actions": [
+    {
+      "action": "备份真实数据库",
+      "detail": "写入前把 payroll-ui.sqlite3 完整复制到应用数据目录的 backups/ 下（带时间戳）。",
+      "status": "DONE"
+    },
+    {
+      "action": "恢复 2026-08 的人工月记录",
+      "detail": "先 dry-run 扫描：从历史 Run 的已确认窗口得到一个候选（人工确认来源）。随后记录 2026-08 = 2026-08-01～2026-08-30（来源：人工月资料；确认人：本机核算负责人（2026-09-26 手工 UAT）），证据里同时保留 9/17 那次实际排课范围确认与候选 Run 引用。",
+      "status": "DONE",
+      "note": "口径待你确认：8/1 起（本轮记录）还是 8/3 起（9/17 实际排课范围）。两者对当前 8 月排课都成立，因为首课为 8/3；界面上一处即可改成 8/3。"
+    },
+    {
+      "action": "把当前 8 月 Run 绑到人工月并复算",
+      "detail": "绑定 + 自动核算；周期历史新增一条可追溯记录。",
+      "status": "DONE"
+    }
   ],
   "acceptance": {
     "original_sources_unchanged": true,
     "run_data_remains_traceable": true,
     "unresolved_items_must_not_be_marked_pass": true,
-    "real_ui_regression_required": true
+    "real_ui_regression_required": true,
+    "real_ui_regression_done": false
   },
-  "implementation": {"started": false}
+  "regression": {"command": "sh tools/run_tests.sh", "result": "495 passed, 0 failed", "baseline_before_this_round": "451 passed, 0 failed"},
+  "implementation": {"started": true, "finished": true, "scope": "2026-09-26 手工 UAT 收口（P0-1 / P0-2 / P0-3 回归 / P1 界面 / 测试环境）"}
 }

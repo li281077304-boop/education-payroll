@@ -18,7 +18,24 @@ from openpyxl import load_workbook
 
 from payroll_core.excel.check_workbook import read_check_workbook_schedule
 from payroll_core.excel.package import discover_payroll_package
-from payroll_core.period import coverage_for, dominant_month, month_from_filename, normalize_period_window, previous_period
+from payroll_core.period import (
+    AUTHORITY_DERIVED_CONFIRMED_RUN,
+    AUTHORITY_MANUAL_RECORD,
+    AUTHORITY_NATURAL_MONTH_FALLBACK,
+    AUTHORITY_USER_CONFIRMED,
+    EXPLICIT_AUTHORITY_SOURCES,
+    authority_source_label,
+    build_period_authority,
+    coverage_for,
+    dominant_month,
+    is_explicit_authority_source,
+    month_from_filename,
+    month_of_day,
+    natural_month_authority,
+    normalize_period_window,
+    period_authority_summary,
+    previous_period,
+)
 from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping, resolve_schedule_import
 from payroll_core.mapping.schedule import read_schedule_with_mapping
 from payroll_core.models.evidence import AdapterIssue
@@ -1006,6 +1023,19 @@ class PayrollService(CoreFlow):
         persisted_af = self._effective_af_policy(period)
         run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": persisted_af, "base_salary_inputs": persisted_salary, "base_salary_input_snapshot": self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([])}
         self._bind_new_calculation(run)
+        supplied_window = bool(
+            str(period_start or "").strip() or str(period_end or "").strip() or str(period_boundary_source or "").strip()
+        )
+        if supplied_window:
+            # The caller stated the window explicitly; it outranks any stored
+            # 人工月 record for the same month.
+            run["period_authority"] = period_authority_summary(build_period_authority(
+                period, window["period_start"], window["period_end"], window["period_boundary_source"],
+                confirmed_by="创建本记录时指定", reason="创建本工资核算时直接指定了核算周期。",
+            ))
+        else:
+            # 工资月份 → 该月人工月 authority；没有人工月资料才使用自然月兜底。
+            self.bind_period_authority(run)
         run["run_policy_snapshot"] = self._build_run_policy_snapshot(run)
         self._bind_template_from_run_files(run)
         self.store.save(run)
@@ -1235,7 +1265,15 @@ class PayrollService(CoreFlow):
         return self.check(run_id) if self._materials_ready(run) else self.render(run)
 
     def defer_base_salary(self, run_id: str, confirmed_by: str, reason: str = "") -> dict:
-        """Allow an explicit generate-now decision without inventing M=0."""
+        """暂不录入基本工资，并立刻把它承诺的核算做完。
+
+        The button says "暂不录入，先生成…", so recording the decision and then
+        only switching tabs would be a lie: the user would still have to press
+        「自动核算」again.  This records the decision, runs the check, and reports
+        an explicit outcome so the UI can enter the payroll preview or the
+        exception flow.  M/AV stay genuinely pending — a deferred decision is
+        not a zero.
+        """
         run = self._load(run_id)
         self._require_fresh(run)
         actor = str(confirmed_by or "").strip()
@@ -1246,7 +1284,82 @@ class PayrollService(CoreFlow):
         run["base_salary_deferred_at"] = datetime.now(timezone.utc).isoformat()
         run["base_salary_deferred_reason"] = str(reason or "用户选择暂不录入基本工资；后续补录后可重新生成。")
         self.store.save(run)
-        return self.render(run)
+
+        missing = self._missing_materials(run)
+        if missing:
+            rendered = self.render(self._load(run_id))
+            rendered["defer_outcome"] = {
+                "status": "BLOCKED",
+                "reason": "MATERIALS_MISSING",
+                "message": "已记录暂不录入基本工资，但还缺：" + "、".join(missing) + "。请补齐后再核算。",
+                "blockers": [],
+                "missing_materials": missing,
+                "base_salary_state": "MISSING_SOURCE",
+            }
+            return rendered
+        try:
+            checked = self.check(run_id)
+        except ValueError as exc:
+            rendered = self.render(self._load(run_id))
+            rendered["defer_outcome"] = {
+                "status": "BLOCKED",
+                "reason": "CHECK_FAILED",
+                "message": str(exc),
+                "blockers": [],
+                "missing_materials": [],
+                "base_salary_state": "MISSING_SOURCE",
+            }
+            return rendered
+
+        blockers = [str(item) for item in ((checked.get("generated_payroll") or {}).get("blockers") or [])]
+        m_state = self._base_salary_state(checked)
+        if not checked.get("generated_payroll"):
+            # 没有完整工资计算链时不能假装已经生成预览。
+            checked["defer_outcome"] = {
+                "status": "NEEDS_ATTENTION",
+                "reason": "NO_PREVIEW",
+                "message": "已记录暂不录入基本工资，但当前核算记录还没有完整工资预览，请先完成自动核算。",
+                "blockers": blockers,
+                "missing_materials": [],
+                "base_salary_state": m_state or "MISSING_SOURCE",
+            }
+            return checked
+        if blockers:
+            checked["defer_outcome"] = {
+                "status": "NEEDS_ATTENTION",
+                "reason": "BUSINESS_BLOCKERS",
+                "message": "基本工资已按“暂不录入”记录，核算已完成，但还有其它阻塞需要处理："
+                           "先处理完这些异常再生成工资表。",
+                "blockers": blockers,
+                "missing_materials": [],
+                "base_salary_state": m_state,
+            }
+            return checked
+        checked["defer_outcome"] = {
+            "status": "PREVIEW_READY",
+            "reason": "READY",
+            "message": "已按“暂不录入基本工资”完成核算并生成工资预览；基本工资与总工资保持待补充，"
+                       "补录后可重新生成。",
+            "blockers": [],
+            "missing_materials": [],
+            "base_salary_state": m_state,
+        }
+        return checked
+
+    @staticmethod
+    def _base_salary_state(checked: dict) -> str:
+        """Report whether M is really pending instead of silently zero."""
+        rows = ((checked.get("generated_payroll") or {}).get("rows")) or []
+        states = {
+            str((row.get("final_fields") or {}).get("M", {}).get("state") or "")
+            for row in rows
+        }
+        if not states:
+            return ""
+        if states == {"DETERMINED"}:
+            return "DETERMINED"
+        # “待补充”必须是明确的缺失状态，不能被写成 0 或已确定。
+        return "MISSING_SOURCE"
 
     def list(self) -> list[dict]:
         return [self.render(self._load(item["id"])) for item in self.store.list()]
@@ -1721,6 +1834,8 @@ class PayrollService(CoreFlow):
             return
         if "PERIOD_COVERAGE_INCOMPLETE" in payroll.blockers:
             raise ValueError("排课周期不完整，请补齐后再生成最终工资表。")
+        if "PERIOD_OUTSIDE_AUTHORITY" in payroll.blockers:
+            raise ValueError("课表日期超出该工资月份的人工周期，请先确认人工周期或更正排课来源。")
         if "PERIOD_MATERIAL_CONFLICT" in payroll.blockers or "PERIOD_NEEDS_CONFIRMATION" in payroll.blockers:
             raise ValueError("材料所属月份尚未确认，确认后再生成最终工资表。")
 
@@ -1945,7 +2060,13 @@ class PayrollService(CoreFlow):
         blockers = set(payroll.blockers)
         coverage = check.get("coverage") or {}
         if coverage.get("incomplete_tail"):
+            # The deadline is the Run's window end, which is the 人工月 authority
+            # when one exists (see coverage_for/month_end).  A schedule that ends
+            # on the authority's last day therefore never lands here.
             blockers.add("PERIOD_COVERAGE_INCOMPLETE")
+        if check.get("outside_authority"):
+            # 课表日期超出该工资月份的人工周期：提示越界，而不是默默按自然月算。
+            blockers.add("PERIOD_OUTSIDE_AUTHORITY")
         if check.get("conflict"):
             blockers.add("PERIOD_MATERIAL_CONFLICT")
         if check.get("mismatch") and check.get("decision") not in {"SWITCHED", "KEPT"}:
@@ -2229,14 +2350,32 @@ class PayrollService(CoreFlow):
         mismatch = bool(source_month and source_month != run["period"])
         filename_disagrees = bool(file_month and source_month and (file_month != source_month if file_has_year else file_month != source_month[5:7]))
         source_conflict = len(raw_months) > 1 and run["period"] not in raw_months
+        authority = run.get("period_authority") or {}
+        boundary_source = str(run.get("period_boundary_source") or AUTHORITY_NATURAL_MONTH_FALLBACK)
+        # 越界只在存在人工月 authority 时才提示：排课来源里出现了人工周期之外的
+        # 日期。These rows are already excluded from the money (the adapter filters
+        # by the window); the point is to tell the user the two facts disagree
+        # instead of silently computing the month from the natural month end.
+        outside_dates = sorted({
+            day for day in (month_of_day(item) for item in raw_source_dates)
+            if day and (day < start or day > end)
+        })
+        outside_authority = (
+            bool(coverage.outside_period) or bool(outside_dates)
+        ) and is_explicit_authority_source(boundary_source)
         return {"run_month": run["period"], "period_start": start, "period_end": end,
-                "period_boundary_source": run.get("period_boundary_source", "LEGACY_CALENDAR_DEFAULT"),
+                "period_boundary_source": boundary_source,
+                "period_source_label": authority.get("source_label") or authority_source_label(boundary_source),
+                "period_authority_is_fallback": bool(authority.get("is_fallback", not is_explicit_authority_source(boundary_source))),
+                "period_authority": authority,
                 "source_month": source_month, "mismatch": mismatch,
                 "source_months": raw_months, "source_conflict": source_conflict,
                 "source_file": file_name,
                 "file_name_month": file_month, "file_name_has_year": file_has_year,
                 "filename_disagrees": filename_disagrees, "coverage": coverage.as_dict(),
-                "final_generation_blocked": bool(coverage.incomplete_tail) or source_conflict,
+                "outside_authority": outside_authority,
+                "outside_authority_dates": outside_dates[:5],
+                "final_generation_blocked": bool(coverage.incomplete_tail) or source_conflict or outside_authority,
                 "conflict": source_conflict,
                 "decision": "" if not mismatch else "PENDING"}
 
@@ -2371,6 +2510,212 @@ class PayrollService(CoreFlow):
         invalidate_business_decisions(run.setdefault("business_decisions", []))
         run["business_context_stale"] = True
 
+    # ------------------------------------------------------------------ 人工月 authority
+    #
+    # 工资月份 ≠ 教学周期。The window the money covers is the authority; the
+    # uploaded schedule only has to be consistent with it.  These helpers keep
+    # that boundary in one reusable record per payroll month, so a boundary a
+    # human established once is not re-confirmed in every later Run.
+    def period_authorities(self) -> list[dict]:
+        """Every stored 人工月 record, newest first (for 基础资料)."""
+        records = []
+        for item in self.store.list_period_authorities():
+            summary = period_authority_summary(item)
+            summary.update({
+                "status": item.get("status", "ACTIVE"),
+                "created_at": item.get("created_at", ""),
+                "reason": item.get("reason", ""),
+                "supersedes": item.get("supersedes"),
+            })
+            records.append(summary)
+        return records
+
+    def period_authority_for(self, period: str) -> dict | None:
+        """The current 人工月 authority of one payroll month, when a human set one."""
+        for item in self.store.list_period_authorities(str(period)):
+            if item.get("status", "ACTIVE") == "ACTIVE":
+                return item
+        return None
+
+    def record_period_authority(
+        self,
+        payroll_period: str,
+        period_start: str,
+        period_end: str,
+        boundary_source: str,
+        *,
+        confirmed_by: str = "",
+        reason: str = "",
+        evidence: dict | None = None,
+    ) -> dict:
+        """Store the 人工月 authority of a payroll month so later Runs reuse it.
+
+        Re-confirming the *same* window is deliberately not a new revision: the
+        record is one durable fact, not an ever-growing version list.
+        """
+        if not valid_period(payroll_period):
+            raise ValueError("请选择有效月份。")
+        if not is_explicit_authority_source(boundary_source):
+            raise ValueError("人工月记录必须标明来源（人工月资料或人工确认）。")
+        candidate = build_period_authority(
+            payroll_period, period_start, period_end, boundary_source,
+            confirmed_by=confirmed_by, reason=reason, evidence=evidence,
+        )
+        existing = self.period_authority_for(payroll_period)
+        now = datetime.now(timezone.utc).isoformat()
+        if existing and (existing.get("period_start"), existing.get("period_end")) == (
+            candidate["period_start"], candidate["period_end"]
+        ):
+            refreshed = {
+                **existing,
+                "confirmed_by": str(confirmed_by or existing.get("confirmed_by", "")),
+                "reason": str(reason or existing.get("reason", "")),
+            }
+            if refreshed != existing:
+                refreshed["updated_at"] = now
+                self.store.save_period_authority(refreshed)
+            return refreshed
+        item = build_period_authority(
+            payroll_period, period_start, period_end, boundary_source,
+            revision=int(existing.get("revision") or 1) + 1 if existing else 1,
+            authority_id=uuid.uuid4().hex[:16],
+            confirmed_by=confirmed_by, reason=reason, evidence=evidence,
+            supersedes=existing.get("id") if existing else None,
+        )
+        item["created_at"] = now
+        if existing:
+            superseded = {**existing, "status": "SUPERSEDED", "superseded_by": item["id"], "updated_at": now}
+            self.store.save_period_authority(superseded)
+        self.store.save_period_authority(item)
+        return item
+
+    def backfill_period_authorities(self, *, apply: bool = False) -> dict:
+        """Recover 人工月 records from Runs a human already confirmed.
+
+        Only Runs that carry an explicit boundary source are eligible; a natural
+        month is never promoted into a 人工月 authority.
+        """
+        months_with_authority = {
+            item["payroll_period"] for item in self.period_authorities()
+            if item.get("status", "ACTIVE") == "ACTIVE"
+        }
+        proposals: dict[str, dict] = {}
+        for run in sorted(self.store.list(), key=lambda item: item.get("created_at", "")):
+            period = str(run.get("period") or "")
+            source = str(run.get("period_boundary_source") or "").strip()
+            if not valid_period(period) or period in months_with_authority:
+                continue
+            if source not in EXPLICIT_AUTHORITY_SOURCES:
+                continue
+            if not run.get("period_start") or not run.get("period_end"):
+                continue
+            proposals[period] = {
+                "payroll_period": period,
+                "period_start": run["period_start"],
+                "period_end": run["period_end"],
+                "boundary_source": source,
+                "evidence": {"derived_from_run": run["id"], "run_created_at": run.get("created_at", "")},
+                "reason": f"该工资月份曾在核算记录 {run['id']} 中人工确认过，按同一周期恢复为可复用人工月。",
+            }
+        if apply:
+            for proposal in proposals.values():
+                self.record_period_authority(
+                    proposal["payroll_period"], proposal["period_start"], proposal["period_end"],
+                    AUTHORITY_DERIVED_CONFIRMED_RUN, confirmed_by="恢复历史确认",
+                    reason=proposal["reason"], evidence=proposal["evidence"],
+                )
+        return {"apply": apply, "applied": sorted(proposals) if apply else [], "proposals": [proposals[key] for key in sorted(proposals)]}
+
+    @staticmethod
+    def _run_window_is_deliberate(run: dict) -> bool:
+        """True when this Run already carries a window a human decided on."""
+        source = str(run.get("period_boundary_source") or "").strip()
+        return bool(source) and source != AUTHORITY_NATURAL_MONTH_FALLBACK
+
+    def bind_period_authority(self, run: dict, *, force: bool = False) -> bool:
+        """Make the payroll month's 人工月 authority the boundary of this Run.
+
+        Returns True only when the Run's window actually changed.  A window the
+        user deliberately set on this Run is never silently overwritten.
+        """
+        if not force and self._run_window_is_deliberate(run):
+            return False
+        authority = self.period_authority_for(run["period"])
+        if authority is None:
+            summary = period_authority_summary(natural_month_authority(run["period"]))
+            if run.get("period_authority") == summary:
+                return False
+            run.update(normalize_period_window(run["period"]))
+            run["period_authority"] = summary
+            return True
+        window = normalize_period_window(
+            run["period"], authority["period_start"], authority["period_end"], authority["boundary_source"]
+        )
+        summary = period_authority_summary(authority)
+        if run.get("period_authority") == summary and (run.get("period_start"), run.get("period_end")) == (
+            window["period_start"], window["period_end"]
+        ):
+            return False
+        run.update(window)
+        run["period_authority"] = summary
+        return True
+
+    def _reread_schedule_window(self, run: dict) -> None:
+        """Re-read the bound schedule under the Run's current window.
+
+        Coverage, completion and the in-period row count all depend on the
+        window, so a window change must never reuse the previous read.
+        """
+        schedule = run.get("files", {}).get("schedule")
+        if not schedule:
+            return
+        path = Path(schedule.get("path", ""))
+        if not path.is_file():
+            run.setdefault("stale_files", []).append("schedule")
+            return
+        result = self._read_for_run("schedule", path, run)
+        if result.errors:
+            run.setdefault("stale_files", []).append("schedule")
+            return
+        schedule["records"] = len(result.records)
+        schedule["teachers"] = len({item.teacher for item in result.records if getattr(item, "teacher", "")})
+        run["period_check"] = self._period_evidence(
+            run, result.records, path.name, path,
+            evidence_dates=result.coverage.get("all_lesson_dates", ()) if path.suffix.lower() == ".csv" else (),
+        )
+        self._replace_material_period_evidence(run, "schedule", {
+            "role": "schedule", "source_file": path.name,
+            "source_month": (run.get("period_check") or {}).get("source_month"),
+            "basis": "课表实际课程日期",
+        })
+        self._refresh_material_period_check(run)
+
+    def ensure_period_authority(self, run_id: str, *, force: bool = False) -> dict:
+        """Bind the Run to its month's 人工月 authority, then re-read coverage.
+
+        This is the normal path: a Run created before any authority existed (or
+        created on a natural month) heals itself as soon as the authority is
+        known, without the user confirming the same boundary again.  ``force``
+        is for the explicit "save this 人工月 and use it now" action.
+        """
+        run = self._load(run_id)
+        if not self.bind_period_authority(run, force=force):
+            run.setdefault("period_authority", period_authority_summary(natural_month_authority(run["period"])))
+            self.store.save(run)
+            return self.render(self._load(run_id))
+        run.setdefault("period_window_history", []).append({
+            "previous": None,
+            "confirmed": {"period_start": run["period_start"], "period_end": run["period_end"],
+                          "source": run.get("period_boundary_source", "")},
+            "confirmed_by": (run.get("period_authority") or {}).get("confirmed_by", ""),
+            "reason": ("用户保存人工月后改用该周期。" if force else "按该工资月份已有的人工月 authority 自动绑定。"),
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+            "history_event": "AUTHORITY_BOUND",
+        })
+        self._reread_schedule_window(run)
+        self.store.save(run)
+        return self.render(run)
+
     def change_period(self, run_id: str, period: str) -> dict:
         if not valid_period(period):
             raise ValueError("请选择有效月份。")
@@ -2379,8 +2724,9 @@ class PayrollService(CoreFlow):
             return self.render(run)
         previous = run["period"]
         run["period"] = period
-        window = normalize_period_window(period)
-        run.update(window)
+        # 切换工资月份后必须重新绑定：该月有人工月 authority 就用它，
+        # 没有才回落到自然月。绝不能把上个月的人工周期带过来。
+        self.bind_period_authority(run, force=True)
         self._rebind_period_authorities(run, previous)
         for role, item in run.get("files", {}).items():
             path = Path(item["path"])
@@ -2452,6 +2798,14 @@ class PayrollService(CoreFlow):
 
         previous = {key: run.get(key) for key in ("period_start", "period_end", "period_boundary_source")}
         run.update(window)
+        # 人工确认形成可复用的权威记录：同工资月份的下一次核算自动沿用，
+        # 不再要求用户重复确认同一个周期。
+        authority = self.record_period_authority(
+            run["period"], window["period_start"], window["period_end"], AUTHORITY_USER_CONFIRMED,
+            confirmed_by=actor, reason=note,
+            evidence={"run_id": run["id"], "source_file": source_path.name, "basis": "用户确认的实际排课周期"},
+        )
+        run["period_authority"] = period_authority_summary(authority)
         run.setdefault("period_window_history", []).append({
             "previous": previous,
             "confirmed": {"period_start": window["period_start"], "period_end": window["period_end"], "source": window["period_boundary_source"]},
@@ -2562,6 +2916,21 @@ class PayrollService(CoreFlow):
         if missing:
             raise ValueError("请先导入：" + "、".join(missing))
         self._require_fresh(run)
+        # 自动核算前先落到该工资月份的人工月 authority。A Run created before
+        # its month's boundary was known stops treating the natural month end as
+        # the deadline, without asking the user to confirm the same date twice.
+        if self.bind_period_authority(run):
+            run.setdefault("period_window_history", []).append({
+                "previous": None,
+                "confirmed": {"period_start": run["period_start"], "period_end": run["period_end"],
+                              "source": run.get("period_boundary_source", "")},
+                "confirmed_by": (run.get("period_authority") or {}).get("confirmed_by", ""),
+                "reason": "按该工资月份已有的人工月 authority 自动绑定。",
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                "history_event": "AUTHORITY_BOUND",
+            })
+            self._reread_schedule_window(run)
+            self.store.save(run)
         run["status"] = "CHECKING"
         run.pop("last_error", None)
         self.store.save(run)
@@ -3851,6 +4220,12 @@ class PayrollService(CoreFlow):
         return {
             **run, **window,
             "period_display": {"label": window["period_label"], "start": window["period_start"], "end": window["period_end"], "boundary_source": window["period_boundary_source"]},
+            # 界面必须能说出"这个月的周期是谁定的"。A Run created before the
+            # authority existed still reports its real window instead of
+            # pretending the natural month is the rule.
+            "period_authority": run.get("period_authority") or period_authority_summary(build_period_authority(
+                run["period"], window["period_start"], window["period_end"], window["period_boundary_source"],
+            )),
             "status_label": status_label,
             "materials": materials,
             "health": {

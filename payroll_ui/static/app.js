@@ -127,7 +127,7 @@ async function api(url, options = {}) {
       const path = new URL(url, window.location.href).pathname;
       const labels = [
         ["/check", "正在重新核对…"], ["/preview", "正在核算…"], ["/generate", "正在生成工资表…"],
-        ["/base-salary", "正在保存…"], ["/period-window", "正在保存周期…"], ["/af-policy", "正在保存…"],
+        ["/base-salary-defer", "正在保存并核算…"], ["/base-salary", "正在保存…"], ["/period-window", "正在保存周期…"], ["/af-policy", "正在保存…"],
         ["/company-template", "正在保存模板…"], ["/decisions", "正在保存…"],
       ];
       const label = labels.find(([suffix]) => path.endsWith(suffix))?.[1] || "正在处理…";
@@ -202,13 +202,25 @@ async function home() {
 
 async function authorityDashboard(runId = null, focus = "") {
   try {
-    const [catalog, companyTemplates] = await Promise.all([api("/api/authorities"), api("/api/company-template")]);
+    const [catalog, companyTemplates, periodPayload] = await Promise.all([api("/api/authorities"), api("/api/company-template"), api("/api/period-authorities")]);
     const section = (title, versions, kind, click) => `<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>${title}</h2><p class="muted">版本会保留来源、生效期与被哪些核算记录使用；修正时请创建新版本，不要删除旧版本。</p></div><button class="secondary" onclick="${click}">查看与修正</button></div>${versions.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>版本</th><th>生效期</th><th>状态</th><th>来源</th><th>已用于</th></tr></thead><tbody>${versions.map(v => `<tr><td>${escapeHtml(v.source_version || v.id)}</td><td>${escapeHtml(v.effective_from)} ～ ${escapeHtml(v.effective_to)}</td><td>${escapeHtml(v.status || "ACTIVE")}</td><td>${escapeHtml(v.source)}</td><td>${v.used_by_runs?.length || 0} 个核算</td></tr>`).join("")}</tbody></table></div>` : '<p class="muted">尚未保存版本。</p>'}</section>`;
     const rebind = runId ? `<section class="card"><h2>让当前核算改用修正版</h2><p class="muted">这是明确的人工操作。切换后会要求重新全盘核对，相关人工意见会变为“需重新确认”。</p>${authorityRebindControl("rating", catalog.ratings, runId)}${authorityRebindControl("policy", catalog.policies, runId)}</section>` : "";
+    // 普通月度工资流程只需要这几块：公司工资模板 / 人工月 / 历史基本工资 /
+    // 教师星级来源。星级加成金额、个人政策、7 类核心规则等属于低频工程配置，
+    // 收进下方“高级设置”。
+    const authorityList = periodPayload.authorities || [];
+    const runPeriod = runId ? (current?.period || "") : "";
+    const runAuthority = (runId && current?.period_authority) || {};
+    const periodCard = `<section id="period-authority-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>人工月 / 工资周期</h2><p class="muted">工资月份对应的实际教学周期。确认一次后，该月份以后的核算都自动沿用，不需要每月重复确认。</p></div><span class="status ${runAuthority.is_fallback ? "warn" : "ok"}">${runAuthority.is_fallback ? "自然月兜底" : runAuthority.payroll_period ? "已设置" : "未设置"}</span></div>${runId ? `<p class="muted small">${escapeHtml(runPeriod)}：${escapeHtml(runAuthority.period_start || "?")} ～ ${escapeHtml(runAuthority.period_end || "?")}（${escapeHtml(runAuthority.source_label || "未设置")}）</p>${periodAuthorityForm(runAuthority, "dashboard")}` : '<p class="muted small">打开一个工资核算记录后，可在这里维护该月份的人工周期。</p>'}${authorityList.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>工资月份</th><th>人工周期</th><th>来源</th><th>确认人</th></tr></thead><tbody>${authorityList.map((item) => `<tr><td>${escapeHtml(item.payroll_period)}</td><td>${escapeHtml(item.period_start)} ～ ${escapeHtml(item.period_end)}</td><td>${escapeHtml(item.source_label || "")}</td><td>${escapeHtml(item.confirmed_by || "—")}</td></tr>`).join("")}</tbody></table></div>` : '<p class="muted">尚未保存人工月记录。</p>'}</section>`;
+    const baseSalaryCount = Object.keys(current?.base_salary_inputs || {}).length;
+    const baseSalaryState = current?.base_salary_input_snapshot ? `已带入 ${baseSalaryCount} 位教师` : current?.base_salary_deferred ? "已记录暂不录入（M 保持待补充）" : "尚未导入";
+    const baseSalaryCard = `<section id="base-salary-card" class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>历史基本工资</h2><p class="muted">用一张历史工资表批量带入 G～L，未匹配教师再单独补录；已保存的教师资料下个月自动复用。</p></div><span class="status ${current?.base_salary_input_snapshot ? "ok" : "warn"}">${escapeHtml(baseSalaryState)}</span></div>${runId ? `<div class="action-bar"><button class="secondary" onclick="openBaseSalaryPage('${escapeHtml(runId)}')">去导入或补录</button></div>` : '<p class="muted small">打开一个工资核算记录后，可在这里导入或补录基本工资。</p>'}</section>`;
+    const starAuthorityRef = current?.authority_context?.rating || {};
+    const ratingSourceCard = `<section id="rating-source-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>教师星级来源</h2><p class="muted">星级来自独立资料的版本与生效期，不由 AE 档位金额反推；这里只查看来源，不改星级值和加成算法。</p></div><button class="secondary" onclick="ratingDashboard('${runId || ""}')">查看与修正</button></div><div class="facts"><div><span>当前核算使用</span><strong>${escapeHtml(starAuthorityRef.name || "尚未绑定")}</strong></div><div><span>版本</span><strong>${escapeHtml(starAuthorityRef.version_id || "—")}</strong></div><div><span>生效期</span><strong>${escapeHtml(starAuthorityRef.effective_period || "—")}</strong></div><div><span>来源</span><strong>${escapeHtml(starAuthorityRef.source || "—")}</strong></div></div></section>`;
     const rules = catalog.rules.map(r => `<tr><td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.effective_from)} ～ ${escapeHtml(r.effective_to)}</td><td>${escapeHtml(r.source_version)}</td><td>${escapeHtml(r.source)}</td></tr>`).join("");
     const activeTemplate = companyTemplates.find((item) => item.status === "ACTIVE");
     const templateCard = `<section id="company-template-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>公司工资模板</h2><p class="muted">设置一次后，新月份自动使用；系统保存结构副本，工资值仍来自当前核算。</p></div><span class="status ${activeTemplate ? "ok" : "warn"}">${activeTemplate ? "已设置" : "未设置"}</span></div><div class="facts"><div><span>当前模板</span><strong>${escapeHtml(activeTemplate?.name || "尚未设置")}</strong></div><div><span>设置时间</span><strong>${escapeHtml(activeTemplate?.created_at ? fmtDate(activeTemplate.created_at) : "—")}</strong></div></div><div class="action-bar"><button onclick="chooseCompanyTemplate('${escapeHtml(runId || "")}')">${activeTemplate ? "更换模板" : "选择公司工资模板"}</button>${runId ? `<button class="secondary" onclick="openRun('${escapeHtml(runId)}')">返回当前工资预览</button>` : ""}</div></section>`;
-    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>核对依据</h1><p class="muted">修正基础资料会新建版本；历史版本和已使用记录都不会被覆盖。</p></div><button class="secondary" onclick="${runId ? `openRun('${runId}')` : "home()"}">返回</button></div>${rebind}${templateCard}<section class="card core-entry-card"><div class="section-head"><div><p class="eyebrow">核心规则链</p><h2>核心规则配置（7 类）</h2><p class="muted">班型、人数、年级、AD、星级加成、个人政策和兼职单价统一从版本化资料读取；同一月份有多个版本时必须由你显式选择。</p></div><button onclick="coreRulesDashboard('${runId || ""}')">打开核心规则面板</button></div></section>${section("教师星级", catalog.ratings, "rating", `ratingDashboard('${runId || ""}')`)}${section("教师工资政策", catalog.policies, "policy", `policyDashboard('${runId || ""}')`)}<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>班型折算规则（旧入口）</h2><p class="muted">保留现有入口，历史版本继续可查；新的核心规则链请从上方七类面板维护。</p></div><button class="secondary" onclick="classTypeRulesPage('${runId || ""}')">查看与配置</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史兼容</p><h2>历史兼容规则（只读）</h2><p class="muted">仅供旧核算记录继续解释原结果；配置化核算请以上方“核心规则配置”为准。</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>规则</th><th>生效期</th><th>版本</th><th>来源</th></tr></thead><tbody>${rules}</tbody></table></div></section>`, false);
+    shell(`<div class="section-head"><div><p class="eyebrow">基础资料与规则</p><h1>核对依据</h1><p class="muted">修正基础资料会新建版本；历史版本和已使用记录都不会被覆盖。</p></div><button class="secondary" onclick="${runId ? `openRun('${runId}')` : "home()"}">返回</button></div>${rebind}${templateCard}${periodCard}${baseSalaryCard}${ratingSourceCard}<details class="card advanced-settings"><summary>高级设置（管理员）：星级加成、个人政策与 7 类核心规则</summary><p class="muted small">以下属于低频工程配置，日常月度工资流程不需要改动。任何修改都会新建版本，不会覆盖历史核算记录。</p><section class="card core-entry-card"><div class="section-head"><div><p class="eyebrow">核心规则链</p><h2>核心规则配置（7 类）</h2><p class="muted">班型、人数、年级、AD、星级加成、个人政策和兼职单价统一从版本化资料读取；同一月份有多个版本时必须由你显式选择。</p></div><button onclick="coreRulesDashboard('${runId || ""}')">打开核心规则面板</button></div></section>${section("教师星级", catalog.ratings, "rating", `ratingDashboard('${runId || ""}')`)}${section("教师工资政策", catalog.policies, "policy", `policyDashboard('${runId || ""}')`)}<section class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>班型折算规则（旧入口）</h2><p class="muted">保留现有入口，历史版本继续可查；新的核心规则链请从上方七类面板维护。</p></div><button class="secondary" onclick="classTypeRulesPage('${runId || ""}')">查看与配置</button></div></section><section class="card"><div class="section-head"><div><p class="eyebrow">历史兼容</p><h2>历史兼容规则（只读）</h2><p class="muted">仅供旧核算记录继续解释原结果；配置化核算请以上方“核心规则配置”为准。</p></div></div><div class="table-wrap"><table class="table"><thead><tr><th>规则</th><th>生效期</th><th>版本</th><th>来源</th></tr></thead><tbody>${rules}</tbody></table></div></section></details>`, false);
     if (focus === "template") $("#company-template-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) { showMessage(error.message); }
 }
@@ -607,7 +619,7 @@ function baseSalaryPage() {
     return `<tr class="base-salary-row" data-teacher="${escapeHtml(row.teacher)}"><td><strong>${escapeHtml(row.teacher)}</strong><input class="base-teacher-id" type="hidden" value="${escapeHtml(entry.teacher_id || row.teacher)}"></td>${fields.map(([code, label]) => `<td><label class="small">${label}<input class="base-${code.toLowerCase()}" type="number" step="0.01" value="${escapeHtml(values[code]?.value ?? "")}" placeholder="${code}"></label></td>`).join("")}<td><strong class="base-m-value">${escapeHtml(entry.m?.value ?? "待填写")}</strong><div class="small muted">M=(G+H+I+J)/K×L，只读计算</div></td><td><span class="status ${mState === "DETERMINED" ? "ok" : "warn"}">${stateLabel}</span></td></tr>`;
   }).join("");
   const deferred = current.base_salary_deferred ? `<div class="banner info"><strong>基本工资暂未录入</strong><span>本次已按你的选择继续生成；M 保持“待补充”，补录 G～L 后可重新生成。</span></div>` : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">先导入一张历史工资表；系统只读计算 M。导入后如有少数未匹配教师，可在下方补录。</p></div></div>${deferred}${baseSalaryImportMarkup()}<details class="base-salary-manual"><summary>查看或补录未匹配教师</summary><div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" value="${escapeHtml(current.base_salary_input_snapshot?.confirmed_by || current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="${escapeHtml(current.base_salary_input_snapshot?.source || "本次核算补录")}"></label></div><div class="action-bar"><span class="muted small">缺少任何 G～L 时，M 保持待补充。</span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存补录并重新预览</button></div></details><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()" ${rows.length ? "" : "disabled"}>暂不录入，先生成工资表</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">先导入一张历史工资表；系统只读计算 M。导入后如有少数未匹配教师，可在下方补录。</p></div></div>${deferred}${baseSalaryImportMarkup()}<details class="base-salary-manual"><summary>查看或补录未匹配教师</summary><div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" value="${escapeHtml(current.base_salary_input_snapshot?.confirmed_by || current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="${escapeHtml(current.base_salary_input_snapshot?.source || "本次核算补录")}"></label></div><div class="action-bar"><span class="muted small">缺少任何 G～L 时，M 保持待补充。</span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存补录并重新预览</button></div></details><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()" ${rows.length ? "" : "disabled"}>暂不录入，先生成工资预览</button></div></section>`;
 }
 
 function bindBaseSalaryDropZone() {
@@ -719,12 +731,16 @@ async function deferBaseSalaryQuick() {
     $("#defer-base-confirmed-by")?.focus();
     return showMessage("请填写确认人，才能暂不录入并继续生成。");
   }
+  // 这一次请求会保存决定**并且**完成核算与工资预览，所以按钮在整段过程中
+  // 都保持禁用+“正在保存并核算…”，不需要用户再点一次“自动核算”。
   try {
     current = await api(`/api/runs/${current.id}/base-salary-defer`, { method: "POST", body: JSON.stringify({ confirmed_by: person, reason: "用户选择暂不录入基本工资；后续补录后可重新生成。" }) });
-    tab = "payroll";
+    const outcome = current.defer_outcome || {};
+    // 无其它阻塞 → 直接进工资预览；有阻塞或缺材料 → 进入异常处理。
+    tab = outcome.status === "PREVIEW_READY" ? "payroll" : "issues";
     renderRun();
-    showMessage("已记录暂不录入基本工资；M 和总工资保持待补充，可继续生成草稿。", "success");
-  } catch (error) { showMessage(error.message); }
+    showMessage(outcome.message || "已记录暂不录入基本工资。", outcome.status === "PREVIEW_READY" ? "success" : "error");
+  } catch (error) { refreshAfterError(error); }
 }
 
 async function avSourceMapPage(runId = current?.id || "") {
@@ -801,7 +817,7 @@ function materialsPage() {
     ? `<button onclick="setTab('payroll')">查看工资预览</button>`
     : `<button ${current.health.ready && !periodNeedsChoice ? "" : "disabled"} onclick="preparePayrollPreview()">${periodNeedsChoice ? blockedLabel : "开始核算并查看预览"}</button>`;
   const auditAction = `<button ${current.health.ready && !periodNeedsChoice ? "" : "disabled"} onclick="recheck()">${periodNeedsChoice ? blockedLabel : "开始核对"}</button>`;
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入原始排课数据；学科组提交表、续费表、退费表有则补充。材料可拖入、直接粘贴，选择按钮仅作为备用入口。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包（可选）</strong><span>可一次拖入多份材料，系统自动归类；也可以按下方四类分别补充。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : auditAction}</div></div></section>${gradeSupportSection(current.grade_help)}`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入原始排课数据；学科组提交表、续费表、退费表有则补充。材料可拖入、直接粘贴，选择按钮仅作为备用入口。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包（可选）</strong><span>可一次拖入多份材料，系统自动归类；也可以按下方四类分别补充。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}${periodMismatchCard()}${periodAuthorityCard()}${coverageWarningCard()}<div class="action-bar"><div>${current.health.missing.length ? `<strong>还缺：</strong>${current.health.missing.map(escapeHtml).join("、")}` : (current.mode === "GENERATE" ? "排课数据已准备，下一步先自动核算并检查异常，再预览工资。" : "必需材料已准备，可以开始核对。")}</div><div><button class="secondary" onclick="refreshRun()">重新检查材料</button>${current.mode === "GENERATE" ? generateAction : auditAction}</div></div></section>${gradeSupportSection(current.grade_help)}`;
 }
 
 function productionMaterialCards() {
@@ -867,7 +883,65 @@ function coverageWarningCard() {
   const coverage = current?.period_check?.coverage;
   if (!coverage || !coverage.incomplete_tail || current?.period_check?.decision === "PENDING") return "";
   const blocking = current?.period_check?.final_generation_blocked;
-  return `<section class="card ${blocking ? "warning-card" : ""}"><h2>确认实际排课周期</h2><p class="muted">当前读取的课程日期为 ${escapeHtml(coverage.first_date || "?")} 至 ${escapeHtml(coverage.last_date || "?")}；记录中的核算周期为 ${escapeHtml(coverage.period_start || current.period)} 至 ${escapeHtml(coverage.period_end || "?")}。</p><p class="small warn">最后一节课早于自然月末，不足以单独证明课表缺失。请核对实际截止日后保存；系统会按确认的周期重新核算。</p><details><summary>设置本次实际核算周期</summary><div class="decision-form"><label>开始日期<input id="confirmed-period-start" type="date" value="${escapeHtml(coverage.first_date || current.period_start || "")}"></label><label>结束日期<input id="confirmed-period-end" type="date" value="${escapeHtml(coverage.last_date || current.period_end || "")}"></label><label>确认人<input id="confirmed-period-person" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><label>确认依据<input id="confirmed-period-reason" value="已核对本期排课来源的实际截止日" placeholder="说明实际核算周期依据"></label></div><div class="action-bar"><button onclick="confirmActualPeriod()">保存周期并重新核对</button></div></details></section>`;
+  const authority = current?.period_authority || {};
+  const boundary = authority.period_end
+    ? `人工周期截止日 ${authority.period_end}` : "自然月月末";
+  return `<section class="card ${blocking ? "warning-card" : ""}"><h2>确认实际排课周期</h2><p class="muted">当前读取的课程日期为 ${escapeHtml(coverage.first_date || "?")} 至 ${escapeHtml(coverage.last_date || "?")}；记录中的核算周期为 ${escapeHtml(coverage.period_start || current.period)} 至 ${escapeHtml(coverage.period_end || "?")}。</p><p class="small warn">最后一节课早于${escapeHtml(boundary)}，不足以单独证明课表缺失。请核对实际截止日后保存；系统会按确认的周期重新核算。</p><details><summary>设置本次实际核算周期</summary><div class="decision-form"><label>开始日期<input id="confirmed-period-start" type="date" value="${escapeHtml(coverage.first_date || current.period_start || "")}"></label><label>结束日期<input id="confirmed-period-end" type="date" value="${escapeHtml(coverage.last_date || current.period_end || "")}"></label><label>确认人<input id="confirmed-period-person" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><label>确认依据<input id="confirmed-period-reason" value="已核对本期排课来源的实际截止日" placeholder="说明实际核算周期依据"></label></div><div class="action-bar"><span class="muted small">这是例外修正入口。若该周期对整月都成立，请改用下方“人工月 / 工资周期”保存一次，之后不必再重复确认。</span><button onclick="confirmActualPeriod()">保存周期并重新核对</button></div></details></section>`;
+}
+
+// ------------------------------------------------------------------ 人工月 / 工资周期
+//
+// 工资月份 → 该月的人工周期 → 用它筛选排课并判断完整性。文件名和课表日期都只是
+// 校验证据，不能反过来定义人工月。
+
+function periodAuthorityForm(authority, prefix) {
+  const coverage = current?.period_check?.coverage || {};
+  return `<div class="decision-form"><label>开始日期<input id="${prefix}-authority-start" type="date" value="${escapeHtml(authority.period_start || coverage.first_date || "")}"></label><label>结束日期<input id="${prefix}-authority-end" type="date" value="${escapeHtml(authority.period_end || coverage.last_date || "")}"></label><label>确认人<input id="${prefix}-authority-person" value="${escapeHtml(current?.af_policy_confirmation?.confirmed_by || authority.confirmed_by || "")}" placeholder="填写姓名"></label><label>依据<input id="${prefix}-authority-reason" value="${escapeHtml(authority.reason || "")}" placeholder="例如：公司工资周期按每月 1 日～30 日"></label></div><div class="action-bar"><span class="muted small">保存后这个周期会成为 ${escapeHtml(authority.payroll_period || current?.period || "")} 的长期依据，并立即按新周期重新核对本次核算。</span><button onclick="savePeriodAuthority('${prefix}')">保存人工月并重新核对</button></div>`;
+}
+
+async function savePeriodAuthority(prefix) {
+  const person = $(`#${prefix}-authority-person`)?.value?.trim() || "";
+  if (!person) {
+    $(`#${prefix}-authority-person`)?.focus();
+    return showMessage("请填写确认人，才能保存人工月。");
+  }
+  const payload = {
+    payroll_period: current.period,
+    period_start: $(`#${prefix}-authority-start`)?.value || "",
+    period_end: $(`#${prefix}-authority-end`)?.value || "",
+    boundary_source: "MANUAL_PERIOD_RECORD",
+    confirmed_by: person,
+    reason: $(`#${prefix}-authority-reason`)?.value?.trim() || "用户在界面确认的人工月 / 工资周期",
+  };
+  try {
+    await api("/api/period-authorities", { method: "POST", body: JSON.stringify(payload) });
+    // 本次核算必须改用刚保存的人工月（即使它此前已有一个例外周期）。
+    current = await api(`/api/runs/${current.id}/period-authority`, { method: "POST", body: JSON.stringify({ force: true }) });
+    renderRun();
+    showMessage(`已保存 ${current.period} 的人工月，并按该周期重新核对。以后这个月份不会再要求重复确认。`, "success");
+  } catch (error) { await refreshAfterError(error); }
+}
+
+function periodAuthorityCard() {
+  const authority = current?.period_authority || {};
+  if (!authority.payroll_period) return "";
+  const check = current?.period_check || {};
+  const range = `${escapeHtml(authority.period_start || "?")} ～ ${escapeHtml(authority.period_end || "?")}`;
+  const outside = check.outside_authority
+    ? `<p class="small warn">排课来源里出现了人工周期之外的日期：${escapeHtml((check.outside_authority_dates || []).join("、") || "见来源文件")}。这些课程没有计入本期；请确认人工周期或更正排课来源。</p>`
+    : "";
+  if (authority.is_fallback) {
+    return `<section class="card warning-card"><h2>人工月 / 工资周期：暂按自然月兜底</h2><p class="muted">${escapeHtml(authority.payroll_period)} 还没有人工月资料，因此筛选与完整性判断暂按自然月 ${range}。若本单位该月的实际工资周期不是自然月，请在这里确认一次。</p>${outside}<details><summary>设置 ${escapeHtml(authority.payroll_period)} 的人工月 / 工资周期</summary>${periodAuthorityForm(authority, "materials")}</details></section>`;
+  }
+  return `<section class="card"><h2>人工月 / 工资周期</h2><p class="muted">${escapeHtml(authority.payroll_period)} 的人工周期为 ${range}（${escapeHtml(authority.source_label || "")}${authority.confirmed_by ? `，确认人：${escapeHtml(authority.confirmed_by)}` : ""}）。排课筛选和完整性都按这个周期判断，不再使用自然月月末。</p>${outside}<details><summary>修正该工资月份的人工周期</summary>${periodAuthorityForm(authority, "materials")}</details></section>`;
+}
+
+async function openBaseSalaryPage(runId) {
+  try {
+    await openRun(runId);
+    tab = "base-salary";
+    renderRun();
+  } catch (error) { showMessage(error.message); }
 }
 
 async function confirmActualPeriod() {
@@ -1003,6 +1077,16 @@ function payrollPreviewPage() {
   }
   const starAuthority = current.authority_context?.rating || {};
   const starSource = [starAuthority.source, starAuthority.effective_period, starAuthority.name].filter(Boolean).join(" · ") || "尚未绑定星级来源";
+  const periodAuthority = current.period_authority || {};
+  const periodRange = periodAuthority.period_start
+    ? `${periodAuthority.period_start} ～ ${periodAuthority.period_end}` : "—";
+  const basisPanel = `<details class="preview-details preview-basis"><summary>本期使用的依据（人工月 / 星级来源）</summary><div class="preview-secondary"><div><span>人工月 / 工资周期</span><strong>${escapeHtml(periodRange)}</strong><div class="small muted">来源：${escapeHtml(periodAuthority.source_label || "—")}${periodAuthority.confirmed_by ? ` · 确认人：${escapeHtml(periodAuthority.confirmed_by)}` : ""}</div></div><div><span>教师星级来源</span><strong>${escapeHtml(starAuthority.name || "尚未绑定")}</strong><div class="small muted">版本：${escapeHtml(starAuthority.version_id || "—")} · 生效期：${escapeHtml(starAuthority.effective_period || "—")} · 来源：${escapeHtml(starAuthority.source || "—")}</div></div></div></details>`;
+  const periodNotes = [
+    periodAuthority.is_fallback
+      ? `<div class="banner info"><strong>周期暂按自然月兜底</strong><span>${escapeHtml(periodAuthority.payroll_period || current.period)} 还没有人工月资料，筛选与完整性暂按自然月。确认一次后该月份长期沿用。</span><button class="secondary" onclick="setTab('materials')">去确认人工月</button></div>` : "",
+    current.period_check?.outside_authority
+      ? `<div class="banner info"><strong>课表日期超出人工周期</strong><span>超出 ${escapeHtml(periodRange)} 的日期没有计入本期；请先确认人工周期或更正排课来源。</span><button class="secondary" onclick="setTab('materials')">去确认人工月</button></div>` : "",
+  ].join("");
   const rowHtml = rows.map((row) => {
     const primaryCodes = ["M", "AA", "AC", "AD", "AE", "AF", "AV"];
     const fields = primaryCodes.map((code) => `<td>${coreCalculationCell(payrollPreviewField(row, code), true)}</td>`).join("");
@@ -1028,7 +1112,7 @@ function payrollPreviewPage() {
     : importedRenewal
       ? `<div class="banner info"><strong>续费资料已导入，工资字段待确认</strong><span>系统会读取当前月份的 1V1、班课和领航合计；确认后才进入 AH、AI、AJ、AK。</span><button class="secondary" onclick="previewRenewalMaterial()">核对本月续费课时</button></div>`
       : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="action-bar"><span class="small muted">AE 的 42/43 等数值是每小时金额；教师星级另由当期星级资料确定。</span><button class="secondary" onclick="ratingDashboard('${escapeHtml(current.id)}')">查看星级来源</button></div><div class="table-wrap"><table class="table core-calculation-table payroll-preview-table"><thead><tr><th>教师</th><th>M 基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE 课时单价</th><th>AF</th><th>AV 总工资</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${renewalPreviewMarkup()}${path}<details class="preview-details"><summary>查看导出说明</summary><div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div></details><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button aria-label="导出工资表" ${current.mode === "GENERATE" && !periodNeedsChoice ? "" : "disabled"} onclick="exportPayroll()">${periodNeedsChoice ? "请先确认工资月份" : "生成工资表"}</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="action-bar"><span class="small muted">AE 的 42/43 等数值是每小时金额；教师星级另由当期星级资料确定。</span><button class="secondary" onclick="ratingDashboard('${escapeHtml(current.id)}')">查看星级来源</button></div>${periodNotes}${basisPanel}<div class="table-wrap"><table class="table core-calculation-table payroll-preview-table"><thead><tr><th>教师</th><th>M 基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE 课时单价</th><th>AF</th><th>AV 总工资</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${renewalPreviewMarkup()}${path}<details class="preview-details"><summary>查看导出说明</summary><div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div></details><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button aria-label="导出工资表" ${current.mode === "GENERATE" && !periodNeedsChoice ? "" : "disabled"} onclick="exportPayroll()">${periodNeedsChoice ? "请先确认工资月份" : "生成工资表"}</button></div></section>`;
 }
 
 function overviewPage() {
@@ -1110,7 +1194,7 @@ function afPolicyBlock() {
 
 function issuesPage() {
   const baseSalaryBlock = current.mode === "GENERATE" && !current.base_salary_input_snapshot && !current.base_salary_deferred
-    ? `<section class="action-first base-salary-action"><h3>导入基本工资</h3><p class="muted">使用一张历史工资表批量带入；未匹配教师才补录。暂不录入时，M 和总工资仍标为待补充。</p><div class="action-bar"><button onclick="setTab('base-salary')">导入历史工资数据</button><button class="secondary" onclick="showMessage('可以稍后从基本工资页导入，当前不会按 0 计算。', 'success')">稍后补充</button></div><label class="person-field">暂不录入确认人<input id="defer-base-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()">暂不录入，先生成工资表</button></div></section>`
+    ? `<section class="action-first base-salary-action"><h3>导入基本工资</h3><p class="muted">使用一张历史工资表批量带入；未匹配教师才补录。暂不录入时，M 和总工资仍标为待补充。</p><div class="action-bar"><button onclick="setTab('base-salary')">导入历史工资数据</button><button class="secondary" onclick="showMessage('可以稍后从基本工资页导入，当前不会按 0 计算。', 'success')">稍后补充</button></div><label class="person-field">暂不录入确认人<input id="defer-base-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()">暂不录入，先生成工资预览</button></div></section>`
     : "";
   return `<section class="card"><div class="section-head"><div><p class="eyebrow">异常中心</p><h2>待处理问题</h2><p class="muted">先按业务原因统计需要完成的动作，再展开具体教师证据。</p></div><button onclick="recheck()">重新核对全部材料</button></div><div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters(event)" oncompositionend="updateFilters(event)"></label></div>${baseSalaryBlock}<div id="issues-content">${issueResultsMarkup()}</div>${afPolicyBlock()}<div id="issue-detail"></div></section>`;
 }

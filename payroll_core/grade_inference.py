@@ -228,14 +228,8 @@ def _student_course_contexts(item: object) -> tuple[StudentCourseContext, ...]:
     return ()
 
 
-def export_timestamp_from_source(value: object) -> str:
-    """Extract an export timestamp from a dated source name/path.
-
-    Source timestamps are evidence, not a configured rollover date.  A file
-    without a traceable timestamp is intentionally unusable for automatic
-    export-pollution resolution.
-    """
-    match = EXPORT_TIMESTAMP_PATTERN.search("" if value is None else str(value))
+def _timestamp_from_text(value: str) -> str:
+    match = EXPORT_TIMESTAMP_PATTERN.search(value)
     if not match or not match.group("hour") or not match.group("minute"):
         return ""
     try:
@@ -245,6 +239,37 @@ def export_timestamp_from_source(value: object) -> str:
         ).isoformat(timespec="minutes")
     except ValueError:
         return ""
+
+
+def export_timestamp_from_source(value: object) -> str:
+    """Extract an export timestamp from a dated source name/path.
+
+    Source timestamps are evidence, not a configured rollover date.  A file
+    without a traceable timestamp is intentionally unusable for automatic
+    export-pollution resolution.
+
+    The file name is searched first and the containing directories only as a
+    fallback.  Searching the whole path in one pass made the result depend on
+    where the file happened to live: a directory whose name carries a date-like
+    fragment (for example the checkout `.../education-payroll-longrun-20260913/`)
+    matched before the real export stamp in the file name, the match then had no
+    hour/minute, and this function reported "no timestamp".  A folder name must
+    never override the evidence carried by the export itself.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    if not text:
+        return ""
+    # Split the file name from its directories with plain string handling: this
+    # module deliberately never touches the filesystem.
+    head, _, name = text.replace("\\", "/").rpartition("/")
+    stamp = _timestamp_from_text(name)
+    if stamp:
+        return stamp
+    # Only when the file itself carries no usable stamp may its location be used
+    # as evidence (for example `/exports/202609011200/课表.xlsx`).
+    return _timestamp_from_text(head) if head else ""
 
 
 def course_export_snapshot_index(snapshots: Iterable[CourseExportSnapshot]) -> dict[tuple[str, str, str, str], tuple[CourseExportSnapshot, ...]]:

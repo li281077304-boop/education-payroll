@@ -157,6 +157,42 @@ def test_probe_detects_absent_port(tmp_path):
     assert result.kind is ProbeKind.ABSENT
 
 
+def test_probe_ignores_an_exported_proxy_for_loopback(tmp_path, monkeypatch):
+    """A local proxy in the environment must not change the port verdict.
+
+    Development shells, VPN clients and sandboxes routinely export
+    ``HTTP_PROXY`` / ``ALL_PROXY`` pointed at a local proxy.  If the health
+    probe used a proxy-aware opener, the loopback request would be answered by
+    that proxy, an idle port would be reported as ``FOREIGN``, and the launcher
+    would refuse to start (or wrongly reuse) the service.  The real regression
+    was seen with ``ALL_PROXY`` at a local address, so both spellings are
+    exercised here.
+    """
+    with _FakeServer(payload=b'{"hello":"world"}') as proxy:
+        for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.setenv(name, f"http://127.0.0.1:{proxy.port}")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        idle = probe(HOST, free_port(), tmp_path / "app-data", timeout=0.4)
+
+    assert idle.kind is ProbeKind.ABSENT
+
+
+def test_probe_recognises_our_service_even_with_a_proxy_exported(tmp_path, monkeypatch):
+    data_dir = tmp_path / "app-data"
+    with _FakeServer(payload=b'{"hello":"world"}') as proxy:
+        monkeypatch.setenv("ALL_PROXY", f"http://127.0.0.1:{proxy.port}")
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{proxy.port}")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        with _ServerFixture(data_dir) as fixture:
+            result = probe(HOST, fixture.port, data_dir, timeout=2.0)
+
+    assert result.kind is ProbeKind.OURS
+
+
 def test_probe_recognises_our_service_on_our_data_dir(tmp_path):
     data_dir = tmp_path / "app-data"
     with _ServerFixture(data_dir) as fixture:

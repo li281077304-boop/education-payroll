@@ -7,6 +7,7 @@ from payroll_core.grade_inference import (
     StudentGradeEvidence,
     course_export_grade_override,
     detect_same_name_ambiguous_students,
+    export_timestamp_from_source,
     infer_historical_grade,
     remove_export_pollution,
 )
@@ -284,6 +285,33 @@ def test_later_exported_class_upgrade_is_ignored_for_old_lesson():
     ], target_date="2026-08-10")
     assert result.grade == "八年级" and result.status == "DETERMINED"
     assert len(result.ignored_evidence) == 1
+
+
+def test_export_timestamp_comes_from_the_file_name_not_the_folder(tmp_path):
+    """文件名里的导出时间优先；目录名里的日期片段不能顶掉它。
+
+    2026-09-26：本机仓库目录名以 `-20260913` 结尾，整条路径一起做正则时，
+    目录片段先被匹配到、但又没有时分，于是解析结果变成"没有时间戳"，
+    进而让"导出污染/升级"规则失效 —— 同一份代码只因为临时目录在仓库内
+    就失败。这里用与临时目录位置无关的方式把该行为固定下来。
+    """
+    assert export_timestamp_from_source(
+        "/Users/x/education-payroll-longrun-20260913/.tmp/schedule_202608311200.xlsx"
+    ) == "2026-08-31T12:00"
+    assert export_timestamp_from_source(r"C:\exports\schedule_202609011519.xlsx") == "2026-09-01T15:19"
+    assert export_timestamp_from_source("/exports/202609011200/课表.xlsx") == "2026-09-01T12:00"
+    assert export_timestamp_from_source("/Users/x/education-payroll-longrun-20260913/课表.xlsx") == ""
+
+
+def test_export_pollution_survives_a_dated_parent_directory(tmp_path):
+    """端到端复现：临时目录名里带日期片段时，历史年级仍必须正确推断."""
+    dated = tmp_path / "education-payroll-longrun-20260913"
+    dated.mkdir()
+    service = PayrollService(dated / "local")
+    first = _gift_workbook(dated / "schedule_202608311200.xlsx", "八年级数学", "学生甲", "2026-08-10 09:00")
+    second = _gift_workbook(dated / "schedule_202609211200.xlsx", "九年级数学", "学生甲", "2026-08-10 09:00")
+    assert service.import_grade_history(str(first), "2026-08")["direct_grade_evidence"] == 1
+    assert service.import_grade_history(str(second), "2026-08")["ignored_export_pollution"] == 1
 
 
 def test_grade_history_import_marks_later_export_upgrade_as_ignored(tmp_path):

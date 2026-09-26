@@ -177,6 +177,119 @@ def month_of_day(value: str) -> str | None:
     return match.group(0) if match else None
 
 
+# --------------------------------------------------------------------------- #
+# 人工月 / 工资周期 authority
+#
+# A payroll month ("2026-08") is *not* the same fact as the teaching window the
+# money covers ("2026-08-01".."2026-08-30").  The window is the authority; the
+# uploaded schedule only has to be consistent with it.  These constants name
+# where an authority came from so the UI and the audit trail can say which
+# evidence defined the boundary instead of silently assuming a natural month.
+# --------------------------------------------------------------------------- #
+
+PERIOD_AUTHORITY_VERSION = "PERIOD_AUTHORITY/v1"
+
+# 人工月资料（含 CSV 形式的排课/周期资料）
+AUTHORITY_MANUAL_RECORD = "MANUAL_PERIOD_RECORD"
+# 用户在界面确认的实际排课周期
+AUTHORITY_USER_CONFIRMED = "USER_CONFIRMED"
+# 从同月已经人工确认过的历史 Run 恢复而来
+AUTHORITY_DERIVED_CONFIRMED_RUN = "DERIVED_FROM_CONFIRMED_RUN"
+# 没有任何人工月资料时的自然月兜底
+AUTHORITY_NATURAL_MONTH_FALLBACK = "LEGACY_CALENDAR_DEFAULT"
+
+EXPLICIT_AUTHORITY_SOURCES = frozenset({
+    AUTHORITY_MANUAL_RECORD,
+    AUTHORITY_USER_CONFIRMED,
+    AUTHORITY_DERIVED_CONFIRMED_RUN,
+})
+
+# Sources that describe a boundary a human actually established.  Anything else
+# (including the natural-month fallback) must be labelled as such in the UI.
+_BOUNDARY_LABELS = {
+    AUTHORITY_MANUAL_RECORD: "人工月资料",
+    AUTHORITY_USER_CONFIRMED: "人工确认的实际排课周期",
+    AUTHORITY_DERIVED_CONFIRMED_RUN: "沿用同月已确认的人工周期",
+    AUTHORITY_NATURAL_MONTH_FALLBACK: "自然月兜底（尚无人工月资料）",
+}
+
+
+def is_explicit_authority_source(source: str | None) -> bool:
+    """True when the boundary came from a human-established authority."""
+    return str(source or "").strip() in EXPLICIT_AUTHORITY_SOURCES
+
+
+def authority_source_label(source: str | None) -> str:
+    return _BOUNDARY_LABELS.get(str(source or "").strip(), "未标明来源")
+
+
+def build_period_authority(
+    payroll_period: str,
+    period_start: str | None = None,
+    period_end: str | None = None,
+    source: str | None = None,
+    *,
+    revision: int = 1,
+    authority_id: str = "",
+    confirmed_by: str = "",
+    reason: str = "",
+    evidence: dict | None = None,
+    status: str = "ACTIVE",
+    supersedes: str | None = None,
+) -> dict:
+    """Normalise one 人工月 record into the single stored shape.
+
+    The window itself is validated by :func:`normalize_period_window`, so a
+    stored authority can never disagree with a Run window that was built from
+    the same rules.
+    """
+    window = normalize_period_window(payroll_period, period_start, period_end, source)
+    boundary_source = window["period_boundary_source"]
+    return {
+        "id": authority_id,
+        "version": PERIOD_AUTHORITY_VERSION,
+        "payroll_period": str(payroll_period),
+        "period_start": window["period_start"],
+        "period_end": window["period_end"],
+        "boundary_source": boundary_source,
+        "is_fallback": not is_explicit_authority_source(boundary_source),
+        "source_label": authority_source_label(boundary_source),
+        "status": status,
+        "revision": int(revision),
+        "supersedes": supersedes,
+        "confirmed_by": str(confirmed_by or ""),
+        "reason": str(reason or ""),
+        "evidence": dict(evidence or {}),
+    }
+
+
+def natural_month_authority(payroll_period: str, *, evidence: dict | None = None) -> dict:
+    """The explicit fallback: a natural month, clearly labelled as a fallback."""
+    start, end = calendar_bounds(payroll_period)
+    return build_period_authority(
+        payroll_period, start, end, AUTHORITY_NATURAL_MONTH_FALLBACK,
+        confirmed_by="系统兜底", reason="尚无该工资月份的人工月资料，暂按自然月核算。",
+        evidence=evidence or {"basis": "NATURAL_MONTH"},
+    )
+
+
+def period_authority_summary(authority: dict | None) -> dict:
+    """The small, user-facing projection of an authority (no internal noise)."""
+    if not authority:
+        return {}
+    return {
+        "payroll_period": authority.get("payroll_period", ""),
+        "period_start": authority.get("period_start", ""),
+        "period_end": authority.get("period_end", ""),
+        "boundary_source": authority.get("boundary_source", ""),
+        "source_label": authority.get("source_label", ""),
+        "is_fallback": bool(authority.get("is_fallback")),
+        "authority_id": authority.get("id", ""),
+        "revision": int(authority.get("revision") or 1),
+        "confirmed_by": authority.get("confirmed_by", ""),
+    }
+
+
 def _parse_period(period: str) -> tuple[int, int]:
     match = _PERIOD.match(str(period).strip()[:7])
     if not match:

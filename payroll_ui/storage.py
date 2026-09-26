@@ -40,6 +40,10 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS company_payroll_templates (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS teacher_base_salary_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS af_default_policies (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            # 人工月 / 工资周期 authority.  Keyed by payroll month so a boundary a
+            # human established once is reused by every later Run of that month
+            # instead of being re-confirmed run after run.
+            db.execute("CREATE TABLE IF NOT EXISTS period_authorities (id TEXT PRIMARY KEY, payroll_period TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
 
     def count_runs(self) -> int:
         """Cheap row count used by the launcher's identity handshake.
@@ -280,6 +284,28 @@ class RunStore:
 
     def save_af_default_policy(self, item: dict) -> None:
         self._upsert("af_default_policies", item)
+
+    def save_period_authority(self, item: dict) -> None:
+        payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO period_authorities(id,payroll_period,created_at,payload) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payroll_period=excluded.payroll_period, payload=excluded.payload",
+                (item["id"], item["payroll_period"], item["created_at"], payload),
+            )
+
+    def list_period_authorities(self, payroll_period: str = "") -> list[dict]:
+        """Return stored 人工月 records, newest first (optionally one month only)."""
+        with sqlite3.connect(self.path) as db:
+            if payroll_period:
+                rows = db.execute(
+                    "SELECT payload FROM period_authorities WHERE payroll_period=? ORDER BY created_at DESC",
+                    (payroll_period,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT payload FROM period_authorities ORDER BY payroll_period DESC, created_at DESC"
+                ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def list_af_default_policies(self) -> list[dict]:
         return self._list_entities("af_default_policies")
