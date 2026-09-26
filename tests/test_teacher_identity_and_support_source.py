@@ -27,6 +27,7 @@ FIELD_COLUMNS = {
     "该档每小时金额": 31, "总课时费": 32,
     "房租": 41, "社保": 42, "工装费": 43, "内部推荐奖金": 44,
     "月度激励": 45, "补发工资": 46, "考勤罚款": 47, "总工资数": 48,
+    "1对1课时": 34, "班课&1对2领航伴课次": 35, "小班领航伴学课次": 36,
 }
 PARENT_HEADERS = {"序号": 1, "科组": 2, "姓名": 3, "邮箱": 4, "入职日期": 5, "教师级别": 6,
                   "基本工资": 7, "该档每小时金额": 31, "总课时费": 32, "其他": 41, "总工资数": 48}
@@ -396,6 +397,49 @@ def test_support_annotation_refresh_preserves_confirmed_payroll_values(tmp_path)
     assert {teacher: {key: after["entries"][teacher].get(key) for key in ("identity", "items", "base_salary")} for teacher in after["entries"]} == before
     assert after["confirmed_by"] == confirmer
     assert after["created_at"] == created_at
+
+
+def test_support_comments_follow_mapped_fields_including_renewal_columns(tmp_path):
+    from openpyxl import load_workbook
+    from openpyxl.comments import Comment
+    from payroll_core.excel.standard_payroll_render import render_generated_payroll
+    from payroll_ui.support_department import preview_support_department
+    from test_standard_payroll_output import _generated, _sanitized_template
+
+    source = _support_workbook(tmp_path / "支持部.xlsx", [
+        _teacher("教师甲", **{"社保": -100, "1对1课时": 3, "班课&1对2领航伴课次": 2, "小班领航伴学课次": 1}),
+    ])
+    source_book = load_workbook(source)
+    source_sheet = source_book.active
+    for col, text in ((8, "岗位津贴源批注\n"), (34, "支持部 AH 原批注\n"), (35, "支持部 AI 原批注"), (36, "支持部 AJ 原批注"), (42, "社保源批注")):
+        source_sheet.cell(5, col).comment = Comment(text, "测试")
+    source_book.save(source)
+
+    preview = preview_support_department(source, "2026-08", [{"teacher_id": "teacher-1", "display_name": "教师甲"}])
+    annotations = preview["rows"][0]["annotations"]
+    assert {item["field_code"] for item in annotations} == {"H", "AH", "AI", "AJ", "AP"}
+    snapshot = {"entries": {"teacher-1": {
+        "display_name": "教师甲", "identity": {},
+        "items": {"AP": -100}, "base_salary": {}, "annotations": annotations,
+    }}}
+    template = _sanitized_template(tmp_path)
+    path = render_generated_payroll(
+        _generated(business_inputs=[{
+            "id": "renewal", "teacher_id": "教师甲", "period": "2026-08",
+            "input_type": "RENEWAL_RESULT", "status": "APPROVED",
+            "payload": {"one_to_one_hours": 3, "class_hours": 2, "mentor_hours": 1},
+        }]),
+        tmp_path / "mapped-comments.xlsx", template_path=template, support_snapshot=snapshot,
+    )
+    sheet = load_workbook(path, data_only=False).worksheets[0]
+    assert sheet["H5"].comment.text == "岗位津贴源批注\n"
+    assert sheet["AH5"].comment.text == "支持部 AH 原批注\n"
+    assert sheet["AI5"].comment.text == "支持部 AI 原批注"
+    assert sheet["AJ5"].comment.text == "支持部 AJ 原批注"
+    assert sheet["AP5"].comment.text == "社保源批注"
+    assert sheet["AH5"].value == 3
+    assert sheet["AI5"].value == 2
+    assert sheet["AJ5"].value == 1
 
 
 def test_support_import_rejects_a_changed_file(tmp_path):

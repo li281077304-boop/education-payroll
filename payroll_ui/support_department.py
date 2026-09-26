@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from payroll_core.excel.inspect import load_workbook_pair
+from payroll_core.final_fields import FIELD_LABELS, RENEWAL_ALIASES
 
 from .base_salary_import import (
     REQUIRED_FIELDS,
@@ -63,19 +64,66 @@ SUPPORT_INHERITED = ("AO", "AP", "AQ", "AR", "AT", "AU")
 # workbook may physically contain the column, but it is not the authority for
 # it, so it is reported and left to the subject-group source.
 SUPPORT_SEPARATE_AUTHORITY = ("AS",)
-_SUPPORT_COMMENT_TARGETS = {
-    "teacher_name": ("TEACHER", "教师姓名"),
+_SUPPORT_IDENTITY_TARGETS = {
     "group": ("B", "科组"), "email": ("D", "邮箱"),
     "hire_date": ("E", "入职日期"), "teacher_level": ("F", "教师级别"),
+}
+_SUPPORT_EXTRA_LABELS = {
+    code: (code, SUPPORT_EXTRA_FIELDS[code][0])
+    for code in (*SUPPORT_INHERITED, *SUPPORT_SEPARATE_AUTHORITY)
+}
+_SUPPORT_BASE_SALARY_LABELS = {
     "G": ("G", "基本工资"), "H": ("H", "岗位津贴"),
     "I": ("I", "工龄工资/教师等级"), "J": ("J", "其他待遇"),
     "K": ("K", "应出勤"), "L": ("L", "实际出勤"),
-    "AH": ("AH", "一对一续费备注"), "AI": ("AI", "班课续费备注"),
-    "AJ": ("AJ", "领航续费备注"),
-    "AO": ("AO", "房租"), "AP": ("AP", "社保"),
-    "AQ": ("AQ", "工装费"), "AR": ("AR", "内部推荐奖金"),
-    "AT": ("AT", "补发工资"), "AU": ("AU", "考勤罚款"),
 }
+_SUPPORT_RENEWAL_COMMENT_LABELS = {
+    "AH": ("AH", "1对1课时"),
+    "AI": ("AI", "班课&1对2领航伴课次"),
+    "AJ": ("AJ", "小班领航伴学课次"),
+}
+
+
+def _support_comment_columns(sheet, header_rows: list[int], mapping: dict[str, int], extra: dict[str, int]) -> dict[int, tuple[str, str, str]]:
+    """Resolve comments from actual mapped source fields, not a comment-column allowlist.
+
+    Values in AH/AI/AJ are separately resolved through the Run's renewal
+    snapshot, but support-workbook comments on those same business columns are
+    expressly preserved as source comments.
+    """
+    fields: dict[int, tuple[str, str, str]] = {}
+    for source_field, column in mapping.items():
+        if source_field == "teacher_name":
+            fields[column] = ("TEACHER", "教师姓名", source_field)
+        elif source_field in _SUPPORT_BASE_SALARY_LABELS:
+            code, label = _SUPPORT_BASE_SALARY_LABELS[source_field]
+            fields[column] = (code, label, source_field)
+    for source_field, column in extra.items():
+        target = _SUPPORT_IDENTITY_TARGETS.get(source_field)
+        if target is None and source_field in SUPPORT_INHERITED:
+            target = _SUPPORT_EXTRA_LABELS.get(source_field)
+        if target:
+            fields[column] = (*target, source_field)
+
+    renewal_aliases = {code: {"".join(_header_text(alias).split()) for alias in aliases} for code, aliases in RENEWAL_ALIASES.items()}
+    # The company template uses these concise child headers; aliases are
+    # matched semantically so their comments survive without importing values.
+    renewal_aliases["AH"].update({"1对1课时", "一对一课时"})
+    renewal_aliases["AI"].update({"班课&1对2领航伴课次", "班课领航伴课次"})
+    renewal_aliases["AJ"].update({"小班领航伴学课次"})
+    for column in range(1, sheet.max_column + 1):
+        if column in fields:
+            continue
+        fragments = {
+            "".join(_header_text(fragment).split())
+            for fragment in _header_for_column(sheet, header_rows, column).splitlines()
+            if fragment.strip()
+        }
+        for code, aliases in renewal_aliases.items():
+            if fragments.intersection(aliases):
+                fields[column] = (*_SUPPORT_RENEWAL_COMMENT_LABELS[code], code)
+                break
+    return fields
 
 _CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _STAR_TOKEN = re.compile(r"([一二三四五六七八九\d]{1,2})\s*星")
@@ -221,18 +269,14 @@ def preview_support_department(path: str | Path, period: str, roster: list[dict[
 
     extra = _extra_columns(raw_sheet, selected["header_rows"])
     available = {name: _header_for_column(raw_sheet, selected["header_rows"], column) for name, column in extra.items()}
-    comment_column_fields = {column: name for name, column in selected["mapping"].items()}
-    comment_column_fields.update({column: name for name, column in extra.items()})
+    comment_targets = _support_comment_columns(raw_sheet, selected["header_rows"], selected["mapping"], extra)
     all_source_comments = []
     for cells in raw_sheet.iter_rows():
         for cell in cells:
             comment = getattr(cell, "comment", None)
             if comment is None or not str(comment.text or "").strip():
                 continue
-            source_field = comment_column_fields.get(cell.column, "")
-            target = _SUPPORT_COMMENT_TARGETS.get(source_field)
-            if target is None:
-                target = _SUPPORT_COMMENT_TARGETS.get(cell.column_letter)
+            target = comment_targets.get(cell.column)
             header = _header_for_column(raw_sheet, selected["header_rows"], cell.column) or cell.column_letter
             header = " / ".join(str(header).split())
             all_source_comments.append((target[0] if target else cell.column_letter, header))
@@ -299,16 +343,10 @@ def preview_support_department(path: str | Path, period: str, roster: list[dict[
             number = _numeric(raw)
             items[name] = number
         identity = {name: raw_sheet.cell(row_number, column).value for name, column in extra.items() if name in {"group", "email", "hire_date", "teacher_level"}}
-        comment_columns = {
-            "teacher_name": selected["mapping"]["teacher_name"],
-            **{code: selected["mapping"][code] for code in REQUIRED_FIELDS},
-            **{name: column for name, column in extra.items() if name in SUPPORT_INHERITED or name in {"group", "email", "hire_date", "teacher_level"}},
-        }
         annotations = []
-        for source_field, column in comment_columns.items():
-            target = _SUPPORT_COMMENT_TARGETS.get(source_field)
+        for column, (target_code, target_label, source_field) in comment_targets.items():
             comment = getattr(raw_sheet.cell(row_number, column), "comment", None)
-            if not target or not comment or not str(comment.text or "").strip():
+            if not comment or not str(comment.text or "").strip():
                 continue
             source_header = (
                 _header_for_column(raw_sheet, selected["header_rows"], column)
@@ -318,8 +356,8 @@ def preview_support_department(path: str | Path, period: str, roster: list[dict[
             annotations.append({
                 "teacher_id": str(candidates[0].get("teacher_id") or teacher),
                 "teacher": candidates[0].get("display_name") or teacher,
-                "field_code": target[0], "display_label": target[1],
-                "text": str(comment.text).strip(), "source_type": SUPPORT_SOURCE_TYPE,
+                "field_code": target_code, "display_label": target_label,
+                "text": str(comment.text), "source_type": SUPPORT_SOURCE_TYPE,
                 "source_file": source.name, "source_sheet": selected["sheet"],
                 "source_row": str(row_number), "source_field": source_header,
                 "generated_from": "SUPPORT_SOURCE_CELL_COMMENT",

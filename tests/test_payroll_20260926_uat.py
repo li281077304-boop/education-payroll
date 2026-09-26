@@ -286,11 +286,9 @@ def test_preview_and_export_refund_annotations_use_the_same_approved_rows(tmp_pa
     assert sheet.cell(5, _template_headers(sheet)["af"]).comment is None
     assert refund_cell.value == -60
     assert refund_cell.comment is not None
-    assert "学生甲" in refund_cell.comment.text
-    assert "退费" in refund_cell.comment.text
-    assert "人头金额：-50" in refund_cell.comment.text
-    assert "业绩金额：-10" in refund_cell.comment.text
-    assert "脱敏退费结果.xlsx" in refund_cell.comment.text
+    assert refund_cell.comment.text == "教师甲: 学生甲 退费 人头-50业绩-10\n(退费表8月)"
+    assert "【工资项目】" not in refund_cell.comment.text
+    assert "来源：" not in refund_cell.comment.text
     assert "/private/" not in refund_cell.comment.text
 
 
@@ -302,7 +300,7 @@ def test_support_annotation_is_written_to_the_matching_template_cell(tmp_path):
     annotation = {
         "teacher_id": "teacher-1", "teacher": "教师甲", "field_code": "H",
         "display_label": "H｜岗位津贴", "text": "本期岗位津贴来源说明。",
-        "source_type": "SUPPORT_DEPARTMENT", "source_file": "支持部.xlsx",
+        "source_type": "SUPPORT_DEPARTMENT_PAYROLL_SOURCE", "source_file": "支持部.xlsx",
         "source_sheet": "教学部", "source_row": "5", "source_field": "岗位津贴",
         "generated_from": "SUPPORT_SOURCE_CELL_COMMENT",
     }
@@ -312,8 +310,7 @@ def test_support_annotation_is_written_to_the_matching_template_cell(tmp_path):
     workbook = load_workbook(path)
     comment = workbook[workbook.sheetnames[0]]["H5"].comment
     assert comment is not None
-    assert comment.text.count("本期岗位津贴来源说明") == 1
-    assert "支持部.xlsx" in comment.text
+    assert comment.text == "本期岗位津贴来源说明。"
 
 
 def test_class_annotation_explains_current_core_contributions_without_recalculating(tmp_path):
@@ -333,16 +330,70 @@ def test_class_annotation_explains_current_core_contributions_without_recalculat
     rows = [{"teacher": row["teacher"], "fields": {code: row[key] for key, code in names.items()}} for row in result["rows"]]
     generated = generated_from_calculation({
         "period": "2026-08", "rows": rows, "course_contributions": result["course_contributions"],
-        "source_records": [{"record_key": result["course_contributions"][0]["record_key"], "teacher": "教师甲", "source": "脱敏排课.xlsx", "provenance": {"attended": {"sheet": "排课", "coordinate": "J5"}}}],
+        "source_records": [{
+            "record_key": result["course_contributions"][0]["record_key"], "teacher": "教师甲",
+            "grade": "九年级", "attended": 2, "class_type": "小班", "lesson_status": "已上课",
+            "source": "脱敏排课.xlsx", "provenance": {"attended": {"sheet": "排课", "coordinate": "J5"}},
+        }],
     })
     template = _sanitized_template(tmp_path)
     path = render_generated_payroll(generated, tmp_path / "班课说明.xlsx", template_path=template)
     workbook = load_workbook(path)
     sheet = workbook[workbook.sheetnames[0]]
     assert sheet["AC5"].comment is not None
-    assert "AC 合计" in sheet["AC5"].comment.text
-    assert "attended=2" in sheet["AC5"].comment.text
-    assert "脱敏排课.xlsx" in sheet["AC5"].comment.text
-    assert "排课" in sheet["AC5"].comment.text
-    assert "第 5 行" in sheet["AC5"].comment.text
+    assert sheet["AC5"].comment.text == "九年级：\n2人班  1次"
+    assert "record_key" not in sheet["AC5"].comment.text
+    assert "attended=" not in sheet["AC5"].comment.text
     assert sheet["AC5"].value == generated.rows[0].class_value
+
+
+def test_renewal_snapshot_does_not_create_excel_comments(tmp_path):
+    from openpyxl import load_workbook
+    from payroll_core.final_fields import FINAL_FIELD_CODES
+    from payroll_core.excel.standard_payroll_render import render_generated_payroll
+    from test_standard_payroll_output import _generated, _sanitized_template
+
+    renewal = {
+        "id": "renewal-u", "teacher_id": "教师甲", "period": "2026-08",
+        "input_type": "RENEWAL_RESULT", "status": "APPROVED",
+        "payload": {"one_to_one_hours": 3, "class_hours": 2, "mentor_hours": 1},
+    }
+    template = _sanitized_template(tmp_path)
+    path = render_generated_payroll(
+        _generated(business_inputs=[renewal]), tmp_path / "无续费批注.xlsx",
+        template_path=template,
+    )
+    sheet = load_workbook(path).worksheets[0]
+    assert [sheet.cell(5, 33 + FINAL_FIELD_CODES.index(code)).comment for code in ("AH", "AI", "AJ", "AK")] == [None] * 4
+    assert [sheet.cell(5, 33 + FINAL_FIELD_CODES.index(code)).value for code in ("AH", "AI", "AJ")] == [3, 2, 1]
+
+
+def test_support_and_baseline_refund_comments_merge_without_overwrite(tmp_path):
+    from openpyxl import load_workbook
+    from payroll_core.final_fields import FINAL_FIELD_CODES
+    from payroll_core.excel.standard_payroll_render import render_generated_payroll
+    from test_standard_payroll_output import _generated, _sanitized_template
+
+    source_refund = {
+        "id": "refund-u", "teacher_id": "教师甲", "period": "2026-08",
+        "input_type": "REFUND_RESULT", "status": "APPROVED",
+        "payload": {"student": "学生甲", "business_type": "新签", "headcount_amount": -50},
+    }
+    source_comment = {
+        "teacher_id": "teacher-1", "teacher": "教师甲", "field_code": "AN",
+        "display_label": "退费", "text": "支持部原批注文本", "source_type": "SUPPORT_DEPARTMENT_PAYROLL_SOURCE",
+        "source_file": "支持部.xlsx", "source_sheet": "Sheet1", "source_row": "5",
+        "source_field": "AN", "generated_from": "SUPPORT_SOURCE_CELL_COMMENT",
+    }
+    snapshot = {"entries": {"teacher-1": {"display_name": "教师甲", "annotations": [source_comment]}}}
+    template = _sanitized_template(tmp_path)
+    path = render_generated_payroll(
+        _generated(business_inputs=[source_refund]), tmp_path / "同格合并.xlsx",
+        template_path=template, support_snapshot=snapshot, manual_adjustments=[source_refund],
+    )
+    sheet = load_workbook(path).worksheets[0]
+    cell = sheet.cell(5, 33 + FINAL_FIELD_CODES.index("AN"))
+    assert cell.comment.text.startswith("支持部原批注文本\n\n")
+    assert "教师甲: 学生甲 新签 人头-50" in cell.comment.text
+    assert "(退费表8月)" in cell.comment.text
+    assert cell.value == -50

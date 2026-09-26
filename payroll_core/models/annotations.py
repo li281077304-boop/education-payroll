@@ -29,10 +29,14 @@ def normalize_annotations(items: Iterable[Mapping[str, Any]]) -> list[PayrollAnn
     seen: set[tuple[str, ...]] = set()
     for item in items:
         try:
-            annotation = PayrollAnnotation(**{key: str(item.get(key) or "").strip() for key in PayrollAnnotation.__dataclass_fields__})
+            values = {
+                key: (str(item.get(key) or "") if key == "text" else str(item.get(key) or "").strip())
+                for key in PayrollAnnotation.__dataclass_fields__
+            }
+            annotation = PayrollAnnotation(**values)
         except (AttributeError, TypeError):
             continue
-        if not annotation.teacher or not annotation.field_code or not annotation.text:
+        if not annotation.teacher or not annotation.field_code or not annotation.text.strip():
             continue
         key = (
             annotation.teacher_id, annotation.field_code, annotation.text,

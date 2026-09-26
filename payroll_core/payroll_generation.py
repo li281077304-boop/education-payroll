@@ -315,6 +315,10 @@ def build_generated_payroll(*, period: str, schedule_records: Iterable[ScheduleR
     source_records = [{
         "record_key": course_record_key(record),
         "teacher": record.teacher,
+        "grade": record.grade,
+        "class_type": record.class_type,
+        "attended": record.attended,
+        "lesson_status": record.lesson_status,
         "source": record.source,
         "provenance": {field: asdict(evidence) if hasattr(evidence, "__dataclass_fields__") else dict(evidence) for field, evidence in record.provenance.items()},
     } for record in records]

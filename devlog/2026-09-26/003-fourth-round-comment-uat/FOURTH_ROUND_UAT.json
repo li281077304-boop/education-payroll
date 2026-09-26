@@ -1,0 +1,85 @@
+{
+  "version": "PAYROLL_FOURTH_ROUND_COMMENT_UAT/v1",
+  "date": "2026-09-26",
+  "baseline": {
+    "file": "2026数学&理化组8月薪资表——基准版.xlsx",
+    "sha256": "d0cbb9c848fabf59f849c56d6075dc0090686a7d3341575f3270c51437a96196",
+    "alternate_not_found": "2026数学&理化组8月薪资表——基准版不许抄.xlsx",
+    "sheet": "Sheet1",
+    "comments_total": 74,
+    "teacher_row_comments": 70,
+    "teachers_with_comments": 29,
+    "comments_by_column": {
+      "AC": 24, "AN": 13, "I": 8, "F": 7, "J": 5, "AP": 5,
+      "AS": 3, "AF": 3, "AH": 1, "AI": 1, "AJ": 1, "AB": 1,
+      "H": 1, "AM": 1
+    },
+    "class_performance_comment_contract_found": false
+  },
+  "implementation": {
+    "renewal_generated_comments": false,
+    "support_source_comments_dynamic_by_mapped_field": true,
+    "support_source_comment_text_exact": true,
+    "refund_comment_renderer": "AUGUST_BASELINE_STYLE",
+    "class_hours_comment_renderer": "AUGUST_BASELINE_GRADE_HEADCOUNT_OCCURRENCE_STYLE",
+    "independent_class_performance_comment": "OPEN_NO_BASELINE_CONTRACT"
+  },
+  "real_run": {
+    "run_id": "7f2f44465a86",
+    "period": "2026-08",
+    "support_source_sha256": "35a45f7e726cd4a86e5d2191758b02a7fae1bd363c20528788c5fc798c93c172",
+    "support_source_comment_count": 99,
+    "support_run_annotations": 59,
+    "support_snapshot_to_source_exact": 59,
+    "support_snapshot_to_final_xlsx_exact": 59,
+    "support_wps_sampled_cells": 8,
+    "support_wps_samples_all_have_comments": true,
+    "support_fields_sampled": ["H", "I", "J", "AP", "AT"],
+    "support_teacher_row_AH_AI_AJ_source_comments": 0,
+    "support_template_header_notes_AH4_AI4_AJ4_retained": true,
+    "approved_refund_source_rows": 12,
+    "determined_AN_teachers": 11,
+    "AN_final_comments": 11,
+    "AN_values_vs_canonical_mismatches": 0,
+    "AN_wps_samples": ["AN5", "AN22", "AN31"],
+    "AN_wps_samples_all_have_comments": true,
+    "class_AC_comments": 26,
+    "class_AC_wps_samples": ["AC5", "AC6", "AC7"],
+    "class_AC_wps_samples_all_have_comments": true,
+    "renewal_data_comments": 0
+  },
+  "final_export": {
+    "file": "工资表-2026-08 (5).xlsx",
+    "sha256": "6df40565167fd3beb44452c876920b60250fa4414616197648c0f7a9ce8166ec",
+    "bytes": 316650,
+    "opened_in_wps": true,
+    "total_comments": 99,
+    "comment_only_diff_vs_prior_export": {
+      "cell_value_differences": 0,
+      "formula_differences": 0,
+      "style_differences": 0,
+      "sheet_structure_changed": false
+    },
+    "payroll_release_status": "NEEDS_CONFIRMATION"
+  },
+  "tests": {
+    "focused_pytest": "42 passed",
+    "full_pytest": "566 passed",
+    "javascript_syntax": "PASS",
+    "diff_check": "PASS"
+  },
+  "out_of_scope_open_items_preserved": [
+    {"item": "three part-time monthly choices", "status": "OPEN"},
+    {"item": "official part-time rate authority", "status": "BLOCKED"},
+    {"item": "two unmatched renewal teachers", "status": "OPEN"},
+    {"item": "full real renewal button-chain UAT", "status": "PARTIAL"},
+    {"item": "AG authority", "status": "OPEN"},
+    {"item": "AL authority", "status": "OPEN"},
+    {"item": "AS authority", "status": "OPEN"},
+    {"item": "AV final payroll status", "status": "OPEN"},
+    {"item": "current-month roster source", "status": "OPEN"},
+    {"item": "new rating version import UAT", "status": "PARTIAL"},
+    {"item": "AF exception display UAT", "status": "PARTIAL"},
+    {"item": "Payroll app launcher double-click", "status": "OPEN"}
+  ]
+}

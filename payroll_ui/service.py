@@ -2686,6 +2686,8 @@ class PayrollService(CoreFlow):
                             }
                         source_records.append({
                             "record_key": course_record_key(record), "teacher": record.teacher,
+                            "grade": record.grade, "class_type": record.class_type,
+                            "attended": record.attended, "lesson_status": record.lesson_status,
                             "source": Path(str(record.source or source_name)).name, "provenance": provenance,
                         })
             if not source_records:
