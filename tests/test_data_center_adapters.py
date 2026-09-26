@@ -72,6 +72,41 @@ def test_ooxml_content_with_xls_suffix_is_read_without_manual_rename(tmp_path):
     assert renewal.records[0].renewal_rate == 2 / 6
 
 
+def test_annual_renewal_reader_only_uses_requested_month_sheet(tmp_path):
+    source = tmp_path / "monthly-renewal.xlsx"
+    book = openpyxl.Workbook()
+    january = book.active
+    january.title = "1月"
+    january.append(["教师", "续费人数", "总学生数"])
+    january.append(["教师甲", 9, 10])
+    august = book.create_sheet("8月")
+    august.append(["教师", "续费人数", "总学生数"])
+    august.append(["教师乙", 2, 10])
+    book.save(source)
+
+    result = read_renewal_report(source, "2026-08")
+
+    assert not result.errors
+    assert len(result.records) == 1
+    assert result.records[0].sheet == "8月"
+    assert result.records[0].teacher == "教师乙"
+
+
+def test_payroll_renewal_amount_column_is_not_misread_as_renewal_headcount(tmp_path):
+    source = tmp_path / "payroll.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "标准工资表"
+    sheet.append(["教师", "续费", "总工资"])
+    sheet.append(["教师甲", 18, 100])
+    book.save(source)
+
+    result = read_renewal_report(source, "2026-08")
+
+    assert not result.records
+    assert result.errors
+
+
 def test_refund_report_detects_compound_real_monthly_headers(tmp_path):
     """Monthly refund sheets use labels such as 退费校区/退费总金额."""
     source = tmp_path / "refund.xlsx"

@@ -30,7 +30,8 @@ from payroll_core.models.class_type_rules import (
     structured_rules,
 )
 from payroll_core.payroll_generation import build_legacy_generated_payroll, generated_from_calculation
-from payroll_core.final_fields import renewal_snapshot_entry, renewal_fields_from_snapshot
+from payroll_core.final_fields import RENEWAL_ALIASES, renewal_snapshot_entry, renewal_fields_from_snapshot
+from payroll_core.adapters.business_results import read_business_result
 from payroll_core.excel.standard_payroll_render import is_payroll_template, render_generated_payroll
 from payroll_core.excel.output_paths import default_output_dir, describe_location, safe_output_path
 from payroll_core.excel.inspect import inspect_workbook
@@ -70,6 +71,7 @@ from payroll_ui.submissions import PayrollSubmissionService
 from .storage import RunStore
 from .business import build_groups, build_user_actions, invalidate as invalidate_business_decisions
 from .business_inputs import BusinessInputService, is_active_business_input
+from .base_salary_import import REQUIRED_FIELDS as IMPORT_BASE_SALARY_FIELDS, preview_base_salary, source_changed, source_fingerprint
 from .core_flow import CoreFlow, valid_period
 
 REQUIRED = ("schedule",)
@@ -532,6 +534,20 @@ class PayrollService(CoreFlow):
             return missing[0]
         raise ValueError("无法自动判断这份学科组提交表属于哪个学科，请确认文件内容后重试。")
 
+    @staticmethod
+    def _monthly_renewal_rows(path: Path, period: str) -> list:
+        """Recognize a month-specific AH/AI/AJ source, distinct from weekly rate data."""
+        try:
+            rows = read_business_result(path, period=period)
+        except (OSError, ValueError):
+            return []
+        month = int(period[5:])
+        accepted_sheets = {f"{month}月", f"{month:02d}月", f"{month}月份", f"{month:02d}月份", period, f"{period[:4]}年{month}月"}
+        if not rows or any(item.evidence.get("sheet") not in accepted_sheets for item in rows):
+            return []
+        headers = rows[0].evidence.get("headers") or []
+        return rows if all(any(alias in headers for alias in aliases) for aliases in RENEWAL_ALIASES.values()) else []
+
     def import_material_file(self, run_id: str, kind: str, path: str) -> dict:
         """Import a user-facing material and keep the internal role mapping hidden."""
         run = self._load(run_id)
@@ -566,9 +582,10 @@ class PayrollService(CoreFlow):
                 elif layout == LAYOUTS["math"]:
                     kind = "subject_group"
                 else:
-                    renewal = read_renewal_report(source, run["period"])
+                    monthly = self._monthly_renewal_rows(source, run["period"])
+                    renewal = read_renewal_report(source, run["period"]) if not monthly else None
                     refund = read_refund_report(source, run["period"])
-                    if renewal.records and not refund:
+                    if monthly or (renewal.records and not refund):
                         kind = "renewal"
                     elif refund and not renewal.records:
                         kind = "refund"
@@ -586,24 +603,159 @@ class PayrollService(CoreFlow):
         if kind not in {"renewal", "refund"}:
             raise ValueError("无法识别这类材料。")
         before = version(source)
-        result = read_renewal_report(source, run["period"]) if kind == "renewal" else read_refund_report(source, run["period"])
+        monthly_renewal = self._monthly_renewal_rows(source, run["period"]) if kind == "renewal" else []
+        result = (None if monthly_renewal else read_renewal_report(source, run["period"])) if kind == "renewal" else read_refund_report(source, run["period"])
         if hasattr(result, "errors") and result.errors:
             raise ValueError("文件缺少必要列：" + "；".join(issue.message for issue in result.errors))
-        records = list(result.records) if hasattr(result, "records") else list(result)
+        records = monthly_renewal or (list(result.records) if hasattr(result, "records") else list(result))
         if not records:
             raise ValueError(f"未识别到有效的{ '续费' if kind == 'renewal' else '退费' }记录，请检查工作表和表头。")
         if version(source) != before:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
-        reports = [item.as_dict() for item in records]
+        reports = ([
+            {"period": run["period"], "teacher": item.payload.get("teacher", ""), "sheet": item.evidence.get("sheet", ""),
+             "source_row": item.row, "status": "AWAITING_RUN_CONFIRMATION", "source_file": source.name}
+            for item in records
+        ] if monthly_renewal else [item.as_dict() for item in records])
         material = {
             "name": source.name, "path": str(source), **before,
             "records": len(reports), "label": "续费表" if kind == "renewal" else "退费表",
         }
         run.setdefault("material_inputs", {})[kind] = material
         run[f"{kind}_reports"] = reports
+        if monthly_renewal:
+            run["renewal_material_kind"] = "MONTHLY_FINAL_CANDIDATE"
+            if run.get("run_renewal_result_snapshot"):
+                run.setdefault("renewal_source_confirmation_history", []).append(run.get("renewal_source_confirmation") or {"source_hash": "previous_snapshot"})
+                run["run_renewal_result_snapshot"] = None
+                run.pop("renewal_source_confirmation", None)
+                run.pop("generated_payroll", None)
+                run["business_context_stale"] = True
+                invalidate_business_decisions(run.setdefault("business_decisions", []))
+        elif kind == "renewal":
+            run["renewal_material_kind"] = "WEEKLY_OPERATING_COUNT"
         run["last_error"] = ""
         self.store.save(run)
         return {"run": self.render(run), "material_kind": kind, "recognized_role": kind, "records": len(reports)}
+
+    def preview_renewal_material(self, run_id: str) -> dict:
+        """Show the requested month's AH/AI/AJ rows before Run-level approval."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        material = (run.get("material_inputs") or {}).get("renewal") or {}
+        source = Path(material.get("path") or "")
+        if not source.is_file():
+            raise ValueError("当前核算没有可读取的续费来源，请重新选择续费表。")
+        digest = version(source)["sha256"]
+        if material.get("sha256") and digest != material["sha256"]:
+            raise ValueError("续费来源已变化，请重新导入后再核对。")
+        rows = self._monthly_renewal_rows(source, run["period"])
+        if not rows:
+            raise ValueError("已导入的续费资料不含当前月份明确的 1V1、班课、领航合计，不能用于工资 AH～AK。")
+        roster = self._base_salary_roster(run)
+        by_id = {item["teacher_id"]: item for item in roster}
+        by_name: dict[str, list[dict]] = {}
+        for item in roster:
+            by_name.setdefault("".join(item["display_name"].split()), []).append(item)
+        matched = []
+        conflicts = []
+        outside = 0
+        seen: set[str] = set()
+        for row in rows:
+            source_id = str(row.teacher_id).strip()
+            target = by_id.get(source_id)
+            if target is None:
+                candidates = by_name.get("".join(source_id.split()), [])
+                if len(candidates) > 1:
+                    conflicts.append({"code": "AMBIGUOUS_TEACHER", "sheet": row.evidence.get("sheet"), "source_row": row.row})
+                    continue
+                target = candidates[0] if candidates else None
+            if target is None:
+                outside += 1
+                continue
+            teacher_id = target["teacher_id"]
+            if teacher_id in seen:
+                conflicts.append({"code": "DUPLICATE_TEACHER", "sheet": row.evidence.get("sheet"), "source_row": row.row})
+                continue
+            seen.add(teacher_id)
+            item = {
+                "id": hashlib.sha256(f"{run_id}|{digest}|{row.evidence.get('sheet')}|{row.row}|{teacher_id}".encode()).hexdigest()[:16],
+                "period": run["period"], "teacher_id": teacher_id, "status": "APPROVED",
+                "payload": row.payload, "source_file_hash": digest, "source_ref": source.name,
+                "source_row": f"{row.evidence.get('sheet')}!{row.row}", "evidence": row.evidence,
+            }
+            entry = renewal_snapshot_entry(item, run_id=run_id, period=run["period"], display_name=target["display_name"])
+            incomplete = [code for code in ("AH", "AI", "AJ") if entry[code].get("state") != "DETERMINED"]
+            if incomplete:
+                conflicts.append({"code": "RENEWAL_TOTAL_MISSING", "sheet": row.evidence.get("sheet"), "source_row": row.row, "fields": incomplete})
+                continue
+            matched.append({
+                "teacher_id": teacher_id, "teacher": target["display_name"], "sheet": row.evidence.get("sheet"),
+                "source_row": row.row, "source_result_id": item["id"],
+                **{code: entry[code]["value"] for code in ("AH", "AI", "AJ")},
+            })
+        included = {item["teacher_id"] for item in matched}
+        return {
+            "period": run["period"], "source_name": source.name, "source_sha256": digest,
+            "source_rows": len(rows), "matched": matched,
+            "unmatched_run_teachers": [item["display_name"] for item in roster if item["teacher_id"] not in included],
+            "outside_run_rows": outside, "conflicts": conflicts,
+            "can_confirm": bool(matched) and not conflicts,
+        }
+
+    def confirm_renewal_material(self, run_id: str, expected_sha256: str, confirmed_by: str) -> dict:
+        """Treat one explicit user confirmation as this Run's approval audit event."""
+        actor = str(confirmed_by or "").strip()
+        if not actor:
+            raise ValueError("请填写本次续费来源确认人。")
+        preview = self.preview_renewal_material(run_id)
+        if not expected_sha256 or expected_sha256 != preview["source_sha256"]:
+            raise ValueError("续费来源已变化，请重新预览后确认。")
+        if not preview["can_confirm"]:
+            raise ValueError("续费来源仍有重名、重复或合计缺失，不能用于工资计算。")
+        run = self._load(run_id)
+        source = Path(run["material_inputs"]["renewal"]["path"])
+        rows = self._monthly_renewal_rows(source, run["period"])
+        if version(source)["sha256"] != expected_sha256:
+            raise ValueError("续费来源在确认期间发生变化，请重新预览。")
+        selected = {(item["sheet"], str(item["source_row"])): item for item in preview["matched"]}
+        timestamp = datetime.now(timezone.utc).isoformat()
+        entries = {}
+        for row in rows:
+            matched = selected.get((row.evidence.get("sheet"), str(row.row)))
+            if not matched:
+                continue
+            teacher_id = matched["teacher_id"]
+            approved = {
+                "id": matched["source_result_id"], "period": run["period"], "teacher_id": teacher_id,
+                "status": "APPROVED", "payload": row.payload, "source_file_hash": expected_sha256,
+                "source_ref": source.name, "source_row": f"{row.evidence.get('sheet')}!{row.row}",
+                "evidence": row.evidence, "reviewed_by": actor, "reviewed_at": timestamp,
+            }
+            entries[teacher_id] = renewal_snapshot_entry(approved, run_id=run_id, period=run["period"], display_name=matched["teacher"])
+        snapshot = {
+            "version": "RUN_RENEWAL_RESULT_SNAPSHOT/v1", "run_id": run_id, "period_label": run["period"],
+            "created_at": timestamp, "source_hash": expected_sha256, "entries": entries,
+        }
+        snapshot["sha256"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        run["run_renewal_result_snapshot"] = snapshot
+        run["renewal_source_confirmation"] = {
+            "version": "RUN_RENEWAL_SOURCE_CONFIRMATION/v1", "actor": actor, "confirmed_at": timestamp,
+            "period": run["period"], "source_hash": expected_sha256, "source_name": source.name,
+            "matched": len(entries), "unmatched_run_teachers": preview["unmatched_run_teachers"],
+        }
+        run["material_inputs"]["renewal"]["records"] = len(rows)
+        run["renewal_reports"] = [
+            {"period": run["period"], "sheet": row.evidence.get("sheet", ""), "source_row": row.row,
+             "source_file": source.name, "status": "RUN_CONFIRMED" if (row.evidence.get("sheet"), str(row.row)) in selected else "OUTSIDE_RUN"}
+            for row in rows
+        ]
+        run["renewal_material_kind"] = "MONTHLY_FINAL_CONFIRMED"
+        run["business_context_stale"] = True
+        run.pop("generated_payroll", None)
+        invalidate_business_decisions(run.setdefault("business_decisions", []))
+        self.store.save(run)
+        return self.check(run_id) if self._materials_ready(run) else self.render(run)
 
     def _bind_template_from_run_files(self, run: dict) -> bool:
         """Bind an explicit package or persistent company template only."""
@@ -885,6 +1037,70 @@ class PayrollService(CoreFlow):
         selected["exceptions"] = {}
         selected["effective_to"] = selected.get("effective_to", "9999-12")
         return selected
+
+    @staticmethod
+    def _base_salary_roster(run: dict) -> list[dict[str, str]]:
+        rows = (run.get("core_calculation") or {}).get("rows") or (run.get("generated_payroll") or {}).get("rows") or []
+        roster = []
+        for row in rows:
+            teacher = str(row.get("teacher") or row.get("display_name") or "").strip()
+            if teacher:
+                roster.append({"teacher_id": str(row.get("teacher_id") or teacher).strip(), "display_name": teacher})
+        if not roster:
+            raise ValueError("请先完成一次排课核算，再导入历史工资数据。")
+        return roster
+
+    def preview_base_salary_import(self, run_id: str, path: str) -> dict:
+        """Read an existing payroll table as a G–L candidate without writing the Run."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        source = Path(path).expanduser().resolve()
+        preview = preview_base_salary(source, run["period"], self._base_salary_roster(run))
+        preview["source_name"] = source.name
+        matched = {item["teacher_id"] for item in preview["matched"]}
+        preview["unmatched_run_teachers"] = [
+            item["display_name"] for item in self._base_salary_roster(run) if item["teacher_id"] not in matched
+        ]
+        return preview
+
+    def import_base_salary_from_history(self, run_id: str, path: str, expected_sha256: str, confirmed_by: str, source_name: str = "") -> dict:
+        """Confirm the exact reviewed source and reuse the atomic profile/Run save path."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        actor = str(confirmed_by or "").strip()
+        if not actor:
+            raise ValueError("请填写历史工资数据导入确认人。")
+        source = Path(path).expanduser().resolve()
+        before = source_fingerprint(source)
+        if not expected_sha256 or before["sha256"] != expected_sha256:
+            raise ValueError("历史工资数据文件已变化，请重新预览后再确认导入。")
+        roster = self._base_salary_roster(run)
+        preview = preview_base_salary(source, run["period"], roster)
+        if source_changed(before, source_fingerprint(source)) or preview["source"].get("sha256") != expected_sha256:
+            raise ValueError("历史工资数据文件在读取期间发生变化，请重新预览。")
+        if not preview["can_import"]:
+            raise ValueError("历史工资数据仍有重复、缺列、无效数值或无法确认的公式，请按预览问题修正后重试。")
+        by_id = {item["teacher_id"]: item["display_name"] for item in roster}
+        display_name = Path(source_name).name if source_name else source.name
+        source_label = f"历史工资数据：{display_name}"
+        inputs = []
+        for row in preview["rows"]:
+            teacher_id = row["teacher_id"]
+            if teacher_id not in by_id:
+                raise ValueError("历史工资数据的教师身份与当前核算不一致，请重新预览。")
+            provenance = {**row["provenance"], "source_file": display_name, "kind": "HISTORICAL_BASE_SALARY_IMPORT"}
+            fields = {
+                code: {"value": row["fields"][code], "source": source_label, "provenance": {**provenance, "field": code}}
+                for code in IMPORT_BASE_SALARY_FIELDS
+            }
+            inputs.append({"teacher_id": teacher_id, "teacher": by_id[teacher_id], "fields": fields, "effective_from": run["period"]})
+        saved = self.save_base_salary_inputs(run_id, inputs, actor, source=source_label)
+        return {
+            "run": saved,
+            "imported": len(inputs),
+            "unmatched_run_teachers": [item["display_name"] for item in roster if item["teacher_id"] not in {row["teacher_id"] for row in preview["rows"]}],
+            "source_sha256": expected_sha256,
+        }
 
     def save_base_salary_inputs(self, run_id: str, inputs: list[dict], confirmed_by: str, source: str = "本次 Run 基本工资确认") -> dict:
         """Persist and freeze the source-backed G:L inputs used to calculate M."""
@@ -2217,6 +2433,63 @@ class PayrollService(CoreFlow):
             return self.render(run)
         raise ValueError("请选择切换到课表月份，或仍按当前月份核算。")
 
+    def confirm_period_window(self, run_id: str, period_start: str, period_end: str, confirmed_by: str, reason: str) -> dict:
+        """Record an explicit within-month teaching-period boundary and require a fresh check."""
+        run = self._load(run_id)
+        self._require_fresh(run)
+        actor = str(confirmed_by or "").strip()
+        note = str(reason or "").strip()
+        if not actor or not note:
+            raise ValueError("请填写确认人和实际核算周期依据。")
+        window = normalize_period_window(run["period"], period_start, period_end, "USER_CONFIRMED")
+        if window["period_start"][:7] != run["period"] or window["period_end"][:7] != run["period"]:
+            raise ValueError("本次 UAT 只允许在当前工资月份内确认实际核算周期。")
+        schedule = run.get("files", {}).get("schedule")
+        if not schedule or not Path(schedule.get("path", "")).is_file():
+            raise ValueError("当前核算没有可读取的排课来源，不能确认实际核算周期。")
+        source_path = Path(schedule["path"])
+        source_version = version(source_path)
+
+        previous = {key: run.get(key) for key in ("period_start", "period_end", "period_boundary_source")}
+        run.update(window)
+        run.setdefault("period_window_history", []).append({
+            "previous": previous,
+            "confirmed": {"period_start": window["period_start"], "period_end": window["period_end"], "source": window["period_boundary_source"]},
+            "confirmed_by": actor,
+            "reason": note,
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        for item in run.get("business_decisions", []):
+            if item.get("status") == "ACTIVE":
+                item["status"] = "NEEDS_RECONFIRMATION"
+                item["invalidated_at"] = datetime.now(timezone.utc).isoformat()
+        self._refresh_material_period_check(run)
+        # The explicit window is only useful after source dates are re-read
+        # using that exact boundary. Do not reuse the natural-month coverage.
+        result = self._read_for_run("schedule", source_path, run)
+        if result.errors:
+            raise ValueError("无法按新核算周期重新读取排课来源，请检查原文件。")
+        if version(source_path) != source_version:
+            raise ValueError("排课文件在确认周期时发生变化，没有保存这次设置。")
+        schedule["records"] = len(result.records)
+        schedule["teachers"] = len({item.teacher for item in result.records if getattr(item, "teacher", "")})
+        run["period_check"] = self._period_evidence(
+            run, result.records, source_path.name, source_path,
+            evidence_dates=result.coverage.get("all_lesson_dates", ()) if source_path.suffix.lower() == ".csv" else (),
+        )
+        run["issues"] = []
+        run["field_records"] = []
+        run["issue_groups"] = []
+        run["user_actions"] = []
+        run["decisions"] = []
+        run.pop("core_calculation", None)
+        run.pop("generated_payroll", None)
+        run["business_context_stale"] = True
+        run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
+        run["summary"] = self._summary([])
+        self.store.save(run)
+        return self.render(run)
+
     def create_resolution(self, run_id: str, issue_id: str, kind: str, course_record_id: str, values: dict[str, Any], confirmed_by: str, expected_fingerprint: str) -> dict:
         """Persist one run-scoped AC correction or approved treatment.
 
@@ -2408,12 +2681,24 @@ class PayrollService(CoreFlow):
         profiles = [TeacherCompensationProfile(item["teacher"], item["role"], item.get("rating"), item.get("rating_override"), item.get("special_approval", ""), item.get("obligation_hours", 0), item.get("obligation_hours_deduction_enabled", False), policy_version["effective_from"], policy_version["effective_to"], policy_version["source"], item.get("note", "")) for item in policy_version.get("profiles", [])] if policy_version else []
         if not configured:
             checks += policy_fee_checks(payroll, profiles, default_compensation_bands(), run["period"])
+        run["source_formula_advisories"] = []
         for role in (("baseline",) if "baseline" in reads else tuple(role for role in SCOPE_ROLES if role in reads)):
             audit_rows = payroll if role == "baseline" else reads[role].records
             if configured:
                 audit_rows = [row for row in audit_rows if row.teacher not in exempt]
             for item in self._formula_audit_for_scope(run["files"][role]["path"], audit_rows):
                 status, evidence = self._formula_status_with_policy(item, audit_rows, profiles)
+                if is_generate:
+                    # The submitted sheet supplies scope/evidence. Generated
+                    # payroll values come from Core and an empty company
+                    # template, so source-sheet formula defects are useful
+                    # advisories, not a human task or an export blocker.
+                    if status != "FORMULA_MATCH":
+                        run["source_formula_advisories"].append({
+                            "role": role, "sheet": item.sheet, "cell": item.cell,
+                            "status": status, "reason": evidence,
+                        })
+                    continue
                 checks.append(FieldCheck("工作簿", "formula", None, None, status, f"{Path(item.workbook).name} / {item.sheet} / {item.cell}：{evidence} 正常模式：{item.expected_pattern or '待确认'}；当前公式：{item.formula or '空白/固定值'}。"))
         raw_checks = list(checks)
         # Only historical, field-level actions retain their old display

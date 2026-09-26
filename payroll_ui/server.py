@@ -179,6 +179,12 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.historical_reconciliation(parsed.path.split("/")[3]))
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/grade-help"):
                 return self._json(self.server.service.grade_help(parsed.path.split("/")[3]))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/base-salary/import-preview"):
+                run_id = parsed.path.split("/")[3]
+                source_path = parse_qs(parsed.query).get("path", [""])[0]
+                return self._json(self.server.service.preview_base_salary_import(run_id, source_path))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/renewal-preview"):
+                return self._json(self.server.service.preview_renewal_material(parsed.path.split("/")[3]))
             if parsed.path.startswith("/api/runs/") and "/resolutions/" in parsed.path:
                 parts = parsed.path.split("/")
                 return self._json(self.server.service.active_resolution(parts[3], parts[5]))
@@ -290,6 +296,14 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         reason=str(payload.get("reason", "")),
                     ))
                 if action == "base-salary":
+                    if len(bits) == 5 and bits[4] == "import":
+                        return self._json(self.server.service.import_base_salary_from_history(
+                            run_id,
+                            str(payload.get("path", "")),
+                            str(payload.get("source_sha256", "")),
+                            str(payload.get("confirmed_by", "")),
+                            str(payload.get("source_name", "")),
+                        ))
                     return self._json(self.server.service.save_base_salary_inputs(
                         run_id,
                         list(payload.get("inputs") or []),
@@ -302,10 +316,24 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         str(payload.get("confirmed_by", "")),
                         str(payload.get("reason", "")),
                     ))
+                if action == "renewal-confirm":
+                    return self._json(self.server.service.confirm_renewal_material(
+                        run_id,
+                        str(payload.get("source_sha256", "")),
+                        str(payload.get("confirmed_by", "")),
+                    ))
                 if action == "period":
                     return self._json(self.server.service.change_period(run_id, str(payload.get("period", ""))))
                 if action == "period-check":
                     return self._json(self.server.service.resolve_period_check(run_id, str(payload.get("decision", ""))))
+                if action == "period-window":
+                    return self._json(self.server.service.confirm_period_window(
+                        run_id,
+                        str(payload.get("period_start", "")),
+                        str(payload.get("period_end", "")),
+                        str(payload.get("confirmed_by", "")),
+                        str(payload.get("reason", "")),
+                    ))
                 if action == "decisions":
                     return self._json(self.server.service.decide(run_id, str(payload.get("issue_id", "")), str(payload.get("action", "")), str(payload.get("person", "")), str(payload.get("reason", "")), expected_fingerprint=payload.get("fingerprint")))
                 if action == "management":

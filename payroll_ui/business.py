@@ -120,9 +120,12 @@ def build_groups(run: dict, records: list[dict], rating_version: dict | None, po
             "formula_integrity": "工资表公式异常",
         }.get(cause.rsplit(":", 1)[-1], main["title"])
         active = decision if decision and decision.get("status") != "NEEDS_RECONFIRMATION" else None
+        subject_kind = "WORKBOOK" if teacher in {"工作簿", "工资表"} else "TEACHER"
         output.append({
             "id": ident, "root_cause_key": cause, "fingerprint": bound, "teacher": teacher,
-            "title": title, "fields": [FIELD_LABELS.get(row["field"], row.get("field_label", row["field"])) for row in rows],
+            "subject_kind": subject_kind,
+            "subject_label": "整张工资表" if subject_kind == "WORKBOOK" else teacher,
+            "title": title, "fields": list(dict.fromkeys(FIELD_LABELS.get(row["field"], row.get("field_label", row["field"])) for row in rows)),
             "affected_fields": [row["field"] for row in rows], "reason": main["reason"],
             "status_label": status_labels.get(main["status"], "需要处理"), "severity_rank": min(row["severity_rank"] for row in rows),
             "severity_label": min(rows, key=lambda row: row["severity_rank"])["severity_label"],
@@ -151,7 +154,8 @@ def build_user_actions(run: dict, groups: list[dict]) -> list[dict]:
     actions: list[dict] = []
     for key, members in buckets.items():
         members = sorted(members, key=lambda item: (item.get("severity_rank", 9), item.get("teacher", ""), item.get("id", "")))
-        teachers = sorted({str(item.get("teacher", "")) for item in members if item.get("teacher")})
+        teachers = sorted({str(item.get("teacher", "")) for item in members if item.get("teacher") and item.get("subject_kind", "TEACHER") == "TEACHER"})
+        workbooks = sum(1 for item in members if item.get("subject_kind") == "WORKBOOK")
         fields = sorted({field for item in members for field in item.get("affected_fields", [])})
         title = members[0].get("title", "需要处理")
         if key.rsplit(":", 1)[-1] == "compensation_fee_policy":
@@ -162,6 +166,12 @@ def build_user_actions(run: dict, groups: list[dict]) -> list[dict]:
             "title": title,
             "count": len(members),
             "teacher_count": len(teachers),
+            "workbook_count": workbooks,
+            "subject_count_label": (
+                f"{workbooks} 份工资表" if workbooks and not teachers
+                else f"{len(teachers)} 位教师" if teachers and not workbooks
+                else f"{len(teachers)} 位教师、{workbooks} 份工资表"
+            ),
             "teachers": teachers,
             "fields": fields,
             "group_ids": [item["id"] for item in members],

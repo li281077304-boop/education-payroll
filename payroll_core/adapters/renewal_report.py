@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+import re
 
 from ..models.evidence import AdapterIssue, AdapterResult
 from .weekly_report import _excel_col, _find_header as _find_weekly_header, _is_summary_teacher, _load_rows, _number, _text, _column, _sheet_row_number
@@ -39,9 +40,8 @@ class RenewalReportRecord:
 def _find_header(rows: list[tuple[str, list[Any]]]) -> tuple[int, str, list[str]] | None:
     for index, (sheet, row) in enumerate(rows):
         headers = [_text(value) for value in row]
-        joined = " ".join(headers).replace(" ", "")
         exact_teacher = any(value.replace(" ", "") in {"教师", "教师姓名", "姓名", "任课老师"} for value in headers)
-        if "续费" in joined and exact_teacher:
+        if exact_teacher and _column(headers, "续费人头", "续费人数", "续费人次", "续费数") is not None:
             return index, sheet, headers
     return None
 
@@ -58,6 +58,18 @@ def read_renewal_report(path: str | Path, period: str) -> AdapterResult[RenewalR
             found = (0, "CSV", headers) if headers else None
         else:
             rows = _load_rows(source)
+            # Annual workbooks contain all twelve months.  Restrict the
+            # operating-data parser to the requested month before looking for
+            # a header; a January table must never be labeled as August.
+            month_sheets = {name for name, _ in rows if re.fullmatch(r"(?:20\d{2}[-年])?(?:0?[1-9]|1[0-2])月?(?:份)?", str(name).strip())}
+            if month_sheets and len(period) == 7:
+                month = int(period[5:])
+                accepted = {f"{month}月", f"{month:02d}月", f"{month}月份", f"{month:02d}月份", period, f"{period[:4]}年{month}月"}
+                selected = month_sheets & accepted
+                if not selected:
+                    result.errors.append(AdapterIssue("RENEWAL_PERIOD_SHEET_MISSING", "续费工作簿没有当前工资月份的工作表。"))
+                    return result
+                rows = [(name, values) for name, values in rows if name in selected]
             found = _find_weekly_header(rows) or _find_header(rows)
     except (OSError, ValueError) as exc:
         result.errors.append(AdapterIssue("UNREADABLE_RENEWAL_REPORT", str(exc)))
@@ -67,7 +79,7 @@ def read_renewal_report(path: str | Path, period: str) -> AdapterResult[RenewalR
         return result
     header_index, sheet, headers = found
     teacher_col = next((index for index, value in enumerate(headers) if value.replace(" ", "") in {"教师", "教师姓名", "姓名", "任课老师"}), None)
-    count_col = _column(headers, "续费人头", "续费人数", "续费人次", "续费数", "续费")
+    count_col = _column(headers, "续费人头", "续费人数", "续费人次", "续费数")
     total_col = _column(headers, "总学生数", "总学员数", "单科总数", "总人数", "学生数")
     one_to_one_col = _column(headers, "一对一生数", "一对一学生", "1对1学生", "1V1生数")
     class_students_col = _column(headers, "班课生数", "班课学生", "小班生数")

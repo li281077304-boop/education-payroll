@@ -133,6 +133,24 @@ def test_default_af_policy_is_one_run_level_action_for_all_teachers():
     assert actions[0]["title"] == "确认本月义务课时政策 · 45 位普通全职教师"
 
 
+def test_workbook_formula_issue_is_not_misreported_as_a_teacher():
+    run = _run()
+    groups = _groups(run, [
+        _record("formula-workbook", "formula", teacher="工作簿", expected=None, actual=None, status="FORMULA_MISSING"),
+        _record("formula-workbook-2", "formula", teacher="工作簿", expected=None, actual=None, status="FORMULA_MISSING"),
+    ])
+
+    actions = build_user_actions(run, groups)
+
+    assert len(groups) == 1
+    assert groups[0]["subject_kind"] == "WORKBOOK"
+    assert groups[0]["subject_label"] == "整张工资表"
+    assert len(groups[0]["fields"]) == 1
+    assert actions[0]["teacher_count"] == 0
+    assert actions[0]["workbook_count"] == 1
+    assert actions[0]["subject_count_label"] == "1 份工资表"
+
+
 def test_rate_and_af_policy_only_merge_when_both_sides_imply_same_billable_hours():
     matching = _groups(_run())
     assert any(set(group["affected_fields"]) >= {"rate", "af_policy"} for group in matching)

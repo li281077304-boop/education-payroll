@@ -108,7 +108,7 @@ const card = vm.runInContext('periodMismatchCard()', context);
 assert(card.includes('切换到 2026-08'), 'PENDING must retain the visible switch action');
 assert.strictEqual(vm.runInContext('periodNeedsDecision()', context), true);
 const af = vm.runInContext('afPolicyBlock()', context);
-assert(af.includes('查看/修改本月例外'), 'confirmed default policy must retain exception access');
+assert(af.includes('查看/修改当前核算例外'), 'confirmed default policy must retain exception access');
 vm.runInContext('updateFilters({ isComposing: false })', context);
 assert(elements['#issues-content'].innerHTML.includes('没有符合筛选条件'), 'filter refreshes only results');
 '''
@@ -197,6 +197,25 @@ def test_partial_month_coverage_is_a_warning_not_a_blocker(tmp_path):
     assert coverage["outside_period"] is False
     assert imported["period_check"]["final_generation_blocked"] is True
     assert imported["status"] == "FILES_READY", "只是提醒，不能阻止继续核算"
+
+
+def test_user_confirmed_actual_schedule_window_clears_false_month_end_block(tmp_path):
+    service = PayrollService(tmp_path / "app")
+    run = service.create("2026-08", "GENERATE")
+    path = _schedule(tmp_path / "排课.xlsx", [_lesson("教师甲", "2026-08-01"), _lesson("教师甲", "2026-08-30")])
+    service.import_file(run["id"], "schedule", str(path))
+
+    confirmed = service.confirm_period_window(
+        run["id"], "2026-08-01", "2026-08-30", "核算负责人", "本期实际排课截止日为 8 月 30 日。",
+    )
+
+    assert confirmed["period_start"] == "2026-08-01"
+    assert confirmed["period_end"] == "2026-08-30"
+    assert confirmed["period_boundary_source"] == "USER_CONFIRMED"
+    assert confirmed["period_check"]["coverage"]["incomplete_tail"] is False
+    assert confirmed["period_check"]["final_generation_blocked"] is False
+    assert confirmed["period_window_history"][-1]["reason"] == "本期实际排课截止日为 8 月 30 日。"
+    assert confirmed["status"] == "FILES_READY"
 
 
 def test_coverage_flags_a_fully_covered_month_without_warning():

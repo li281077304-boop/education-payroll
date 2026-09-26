@@ -870,6 +870,26 @@ def test_baseline_formula_issues_outside_submitted_scope_are_not_group_issues(tm
     assert not any(item["field"] == "formula" for item in checked["issues"])
 
 
+def test_generate_mode_keeps_submitted_sheet_formula_defects_as_advisory(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    schedule = tmp_path / "schedule.xlsx"
+    copyfile(FIXTURES / "fake_schedule.xlsx", schedule)
+    math = tmp_path / "math.xlsx"
+    copyfile(FIXTURES / "fake_payroll.xlsx", math)
+    service.import_file(run["id"], "schedule", str(schedule))
+    service.import_file(run["id"], "math", str(math))
+    finding = SimpleNamespace(status="FORMULA_MISSING", field="AF 总课时费", sheet="Sheet1", cell="AF6", evidence="公式缺失")
+    monkeypatch.setattr(service, "_formula_audit_for_scope", lambda _path, _rows: [finding])
+
+    checked = service.check(run["id"])
+
+    assert checked["source_formula_advisories"]
+    assert not any(item["field"] == "formula" for item in checked["issues"])
+
+
 def test_no_deduction_profile_allows_the_matching_af_formula_exception(tmp_path):
     service = PayrollService(tmp_path / "app-data")
     schedule = tmp_path / "schedule.xlsx"; copyfile(FIXTURES / "fake_schedule.xlsx", schedule)

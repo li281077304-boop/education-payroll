@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-26",
+  "project": "education-payroll",
+  "type": "REAL_MANUAL_UI_UAT",
+  "status": "OPEN",
+  "privacy": "Anonymized; no real teacher names, salary values, raw file paths, or workbook contents.",
+  "current_ui_evidence": {
+    "period": "2026-08",
+    "open_issue_count": 31,
+    "source": "visible Payroll UI"
+  },
+  "accepted_behavior": [
+    "Default compulsory-hours policy and a teacher exception can be saved and confirmed.",
+    "The established default policy is not labeled as a monthly exception.",
+    "Do not modify star bonus or personal-policy calculations in this UAT."
+  ],
+  "observations": [
+    {"id": "UAT-01", "area": "basic_salary_import", "severity": "P0", "status": "OPEN", "expected": "Import a compatible historical salary table in bulk; only unmatched teachers require manual completion."},
+    {"id": "UAT-02", "area": "issue_action_flow", "severity": "P0", "status": "OPEN", "expected": "Processing an issue opens its actionable confirmation form and shows a durable result."},
+    {"id": "UAT-03", "area": "async_feedback", "severity": "P0", "status": "OPEN", "expected": "Long-running actions show progress, disable duplicate submission, and report success or actionable failure."},
+    {"id": "UAT-04", "area": "preview_copy", "severity": "P1", "status": "OPEN", "expected": "Keep preview notes concise and expose detailed explanations on demand."},
+    {"id": "UAT-05", "area": "template_navigation", "severity": "P0", "status": "OPEN", "expected": "Missing-template state provides a direct setup action and resumes generation after save."},
+    {"id": "UAT-06", "area": "period_validation", "severity": "P0", "status": "OPEN", "expected": "Compare the actual imported coverage against the run period; do not report a false August coverage anomaly."},
+    {"id": "UAT-07", "area": "renewal_review", "severity": "P0", "status": "OPEN", "expected": "Show imported renewal checks in the current run with period and teacher match status."},
+    {"id": "UAT-08", "area": "star_source_visibility", "severity": "P1", "status": "OPEN", "expected": "Show the current star value and where it comes from without changing star bonus or personal-policy rules."}
+  ],
+  "acceptance": {
+    "original_sources_unchanged": true,
+    "run_data_remains_traceable": true,
+    "unresolved_items_must_not_be_marked_pass": true,
+    "real_ui_regression_required": true
+  },
+  "implementation": {"started": false}
+}
