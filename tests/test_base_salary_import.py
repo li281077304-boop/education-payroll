@@ -55,7 +55,14 @@ def test_preview_reads_two_level_merged_headers_and_matches_stable_id(tmp_path):
     assert str(source) not in repr(preview)
 
 
-def test_preview_allows_partial_match_and_redacts_unmatched_name(tmp_path):
+def test_preview_allows_partial_match_and_reports_scope_separately(tmp_path):
+    """A teacher the file mentions but this month does not calculate is scope.
+
+    The screen has to be able to say *who* that is ("历史资料里有、本月未参与
+    核算"), otherwise the operator is told the system cannot recognise a person
+    it simply has no record for this month.  The redacted ``unmatched`` issue
+    list still carries no name, so the two statements stay distinguishable.
+    """
     source = _workbook(tmp_path / "history.xlsx", rows=[
         ["t-1", 20, 2, 3, 4, 22, 21],
         ["missing", 20, 2, 3, 4, 22, 21],
@@ -65,7 +72,14 @@ def test_preview_allows_partial_match_and_redacts_unmatched_name(tmp_path):
     assert len(preview["rows"]) == 1
     assert preview["can_import"] is True
     assert preview["unmatched"] == [{"code": "UNMATCHED_TEACHER_ID", "sheet": "历史工资", "source_row": 5}]
-    assert "missing" not in repr(preview)
+    # The scope fact names the teacher; the issue list stays redacted.
+    assert preview["history_only"] == [
+        {"teacher": "missing", "sheet": "历史工资", "source_row": 5, "reason": "STABLE_ID_NOT_IN_RUN"}
+    ]
+    assert preview["counts"]["history_only"] == 1
+    assert preview["counts"]["matched"] == 1
+    assert preview["month_without_history"] == [{"teacher": "教师乙", "teacher_id": "t-2"}]
+    assert preview["counts"]["current_run_teachers"] == 2
 
 
 def test_preview_uses_normalized_exact_name_only_when_stable_id_is_absent(tmp_path):

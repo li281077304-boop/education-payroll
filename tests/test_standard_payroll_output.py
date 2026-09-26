@@ -373,11 +373,11 @@ def test_approved_business_results_feed_known_fields_and_ak_without_making_av_ze
     sheet = load_workbook(output)["标准工资表"]
 
     columns = {header: index + 1 for index, header in enumerate(HEADERS)}
-    assert sheet.cell(4, columns["AH 续费一对一课时"]).value == 2
-    assert sheet.cell(4, columns["AI 续费班课课时"]).value == 3
-    assert sheet.cell(4, columns["AJ 领航续费课时"]).value == 4
+    assert sheet.cell(4, columns["AH 1对1课时（续费+推荐）"]).value == 2
+    assert sheet.cell(4, columns["AI 班课&1对2领航伴课次"]).value == 3
+    assert sheet.cell(4, columns["AJ 小班领航伴学课次"]).value == 4
     assert sheet.cell(4, columns["AK 推荐续费奖"]).value == 2 + 3 * 1.5 + 4 * 0.75
-    assert sheet.cell(4, columns["AG 未确认工资项目"]).value is None
+    assert sheet.cell(4, columns["AG 领航伴学课时费"]).value is None
     assert sheet["G4"].value is None
     boundary = load_workbook(output)["外围字段状态"]
     boundary_rows = {boundary.cell(row, 1).value: row for row in range(4, 4 + len(OUT_OF_SCOPE_FINAL_FIELDS))}

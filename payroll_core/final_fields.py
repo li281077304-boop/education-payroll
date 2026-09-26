@@ -37,43 +37,69 @@ LEGACY_AV_COMPONENTS: tuple[str, ...] = tuple(code for code in AV_COMPONENTS if 
 
 FIELD_LABELS: dict[str, str] = {
     "M": "M 实际基本工资",
-    "AG": "AG 未确认工资项目",
-    "AH": "AH 续费一对一课时",
-    "AI": "AI 续费班课课时",
-    "AJ": "AJ 领航续费课时",
+    "AG": "AG 领航伴学课时费",
+    "AH": "AH 1对1课时（续费+推荐）",
+    "AI": "AI 班课&1对2领航伴课次",
+    "AJ": "AJ 小班领航伴学课次",
     "AK": "AK 推荐续费奖",
-    "AL": "AL 未确认工资项目",
+    "AL": "AL 进步率奖金",
     "AM": "AM 管理团队奖",
     "AN": "AN 退费/拒收学员",
-    "AO": "AO 其他",
-    "AP": "AP 未确认工资项目",
-    "AQ": "AQ 未确认工资项目",
-    "AR": "AR 未确认工资项目",
+    "AO": "AO 房租",
+    "AP": "AP 社保",
+    "AQ": "AQ 工装费",
+    "AR": "AR 内部推荐奖金",
     "AS": "AS 月度激励",
-    "AT": "AT 未确认工资项目",
-    "AU": "AU 未确认工资项目",
-    "AV": "AV 总工资",
+    "AT": "AT 补发工资",
+    "AU": "AU 考勤罚款",
+    "AV": "AV 总工资数",
 }
 
+# The teaching-chain columns before M.  Their names are the company's own
+# headers in the 教学部薪资表 / company template, so a screen can always show
+# "code + business name" instead of a bare letter and a number.
+CORE_FIELD_LABELS: dict[str, str] = {
+    "AA": "AA 折算小时数",
+    "AC": "AC 班课折算小时数",
+    "AD": "AD 最终授课小时数据",
+    "AE": "AE 该档每小时金额",
+    "AF": "AF 总课时费",
+    "PART_TIME": "兼职按节课时费",
+}
+
+DISPLAY_LABELS: dict[str, str] = {**CORE_FIELD_LABELS, **FIELD_LABELS}
+
+
+def display_label(code: str) -> str:
+    """The one place a field's user-facing name comes from."""
+    known = DISPLAY_LABELS.get(str(code))
+    if known:
+        return known
+    return f"{code}｜名称待确认"
+
 FIELD_NOTES: dict[str, str] = {
-    "M": "实际基本工资依赖 G 基本工资、H 岗位津贴、I 工龄工资/教师等级、J 其他待遇、K 应出勤、L 实际出勤；缺少任何必需输入时不能按 0 计算。",
-    "AG": "仓库现有资料未明确 AG 的业务含义、计算规则和权威来源。",
+    "M": "实际基本工资依赖 G 基本工资、H 岗位津贴、I 工龄工资/教师等级、J 其他待遇、K 应出勤、L 实际出勤；缺少任何必需输入时不能按 0 计算。兼职教师不适用该字段。",
+    "AG": "领航伴学课时费需要本期领航伴学课时来源；没有来源时不能按 0。",
     "AH": "缺少已审核并绑定的续费最终结果；需要明确 1V1 合计。",
     "AI": "缺少已审核并绑定的续费最终结果；需要明确班课合计。",
     "AJ": "缺少已审核并绑定的续费最终结果；需要明确领航合计。",
     "AK": "AH、AI、AJ 必须全部由同一份已审核续费结果确定后才能计算。",
-    "AL": "仓库现有资料未明确 AL 的业务含义、计算规则和权威来源。",
+    "AL": "进步率奖金需要学科组提交的进步率结果及生效期。",
     "AM": "管理考核金额与管理团队奖公式的口径尚未统一；缺少可直接用于 AM 的权威金额规则。",
     "AN": "缺少已审核并绑定的退费最终结果；需要按扣款教师汇总人头和业绩。",
-    "AO": "仓库现有资料未明确 AO 的业务含义、计算规则和权威来源。",
-    "AP": "仓库现有资料未明确 AP 的业务含义、计算规则和权威来源。",
-    "AQ": "仓库现有资料未明确 AQ 的业务含义、计算规则和权威来源。",
-    "AR": "仓库现有资料未明确 AR 的业务含义、计算规则和权威来源。",
-    "AS": "缺少已审核、明确标注 AS 的月度激励结果及生效期。",
-    "AT": "仓库现有资料未明确 AT 的业务含义、计算规则和权威来源。",
-    "AU": "仓库现有资料未明确 AU 的业务含义、计算规则和权威来源。",
-    "AV": "AV 依赖 M、AF、AG、AK、AL、AM、AN、AO、AP、AQ、AR、AS、AT、AU 全部确定；未知项不能按 0 汇总。",
+    "AO": "房租由支持部工资表提供；没有绑定支持部资料时不能按 0。",
+    "AP": "社保由支持部工资表提供；没有绑定支持部资料时不能按 0。",
+    "AQ": "工装费由支持部工资表提供；没有绑定支持部资料时不能按 0。",
+    "AR": "内部推荐奖金由支持部工资表提供；没有绑定支持部资料时不能按 0。",
+    "AS": "月度激励由学科组提交；缺少已审核、明确标注 AS 的月度激励结果及生效期。",
+    "AT": "补发工资由支持部工资表提供；没有绑定支持部资料时不能按 0。",
+    "AU": "考勤罚款由支持部工资表提供；没有绑定支持部资料时不能按 0。",
+    "AV": "总工资数依赖 M、AF、AG、AK、AL、AM、AN、AO、AP、AQ、AR、AS、AT、AU 全部确定；未知项不能按 0 汇总。",
 }
+
+# Final fields the 支持部 workbook is the formal source for.  The same file is
+# read once and frozen into one snapshot that answers all of them.
+SUPPORT_SOURCED_CODES: tuple[str, ...] = ("AO", "AP", "AQ", "AR", "AT", "AU")
 
 RENEWAL_ALIASES: dict[str, tuple[str, ...]] = {
     "AH": ("AH", "one_to_one_hours", "1V1合计", "一对一合计", "1V1课时", "续费一对一", "续费1V1", "续费一对一课时", "一对一课时"),
@@ -385,6 +411,70 @@ def _av_field(fields: Mapping[str, Mapping[str, Any]], teacher: str) -> dict[str
     }
 
 
+def _support_fields(snapshot: Mapping[str, Any] | None, teacher: str) -> dict[str, dict[str, Any]]:
+    """Read the 支持部 snapshot for the fields that workbook is the source of.
+
+    Three outcomes, and only three:
+
+    * the material states a value -> DETERMINED, with the file and row as
+      evidence ("原值继承");
+    * the material has the column but leaves this teacher's cell blank -> an
+      explicit, reasoned zero (the company's own convention is that a blank
+      means no such activity this month);
+    * the material has no such column at all -> nothing is claimed, and the
+      field keeps its normal "source missing" state.
+
+    A value is never copied into a field the material is not the source of.
+    """
+    if not isinstance(snapshot, Mapping):
+        return {}
+    entries = snapshot.get("entries")
+    if not isinstance(entries, Mapping):
+        return {}
+    entry = entries.get(teacher)
+    if not isinstance(entry, Mapping):
+        entry = next((item for item in entries.values() if isinstance(item, Mapping) and str(item.get("display_name", "")) == teacher), None)
+    if not isinstance(entry, Mapping):
+        return {}
+    present_columns = {
+        str(row.get("final_field")) for row in (snapshot.get("field_map") or [])
+        if isinstance(row, Mapping) and str(row.get("source") or "") not in {"", "NOT_PRESENT_IN_MATERIAL"}
+    }
+    source_name = str(snapshot.get("source_name") or "")
+    items = entry.get("items") if isinstance(entry.get("items"), Mapping) else {}
+    output: dict[str, dict[str, Any]] = {}
+    for code in SUPPORT_SOURCED_CODES:
+        raw = items.get(code)
+        if raw not in (None, ""):
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                output[code] = _empty(code, f"{teacher} 的支持部 {code} 不是有效数字：{raw!r}。")
+                continue
+            output[code] = {
+                "value": value,
+                "state": DETERMINED,
+                "reason": f"{code} 沿用支持部工资表中的原值。",
+                "evidence": [{
+                    "kind": "SUPPORT_DEPARTMENT_SNAPSHOT",
+                    "field": code,
+                    "source": source_name,
+                    "source_sheet": snapshot.get("source_sheet", ""),
+                    "source_row": (entry.get("provenance") or {}).get("source_row", ""),
+                    "inherited": True,
+                }],
+            }
+            continue
+        if code in present_columns:
+            output[code] = {
+                "value": 0.0,
+                "state": DETERMINED,
+                "reason": f"支持部工资资料本期该教师 {code} 为空白，按无此项目计 0。",
+                "evidence": [{"kind": "SUPPORT_SOURCE_BLANK", "field": code, "source": source_name}],
+            }
+    return output
+
+
 def resolve_final_fields(
     *,
     teacher: str,
@@ -393,6 +483,7 @@ def resolve_final_fields(
     employment_type: str = "FULL_TIME",
     default_zero_missing: bool = False,
     renewal_snapshot: Mapping[str, Any] | None = None,
+    support_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Resolve downstream final fields for one teacher.
 
@@ -431,6 +522,27 @@ def resolve_final_fields(
     if default_zero_missing and not refund_items:
         fields["AN"] = _absent_zero("AN")
     fields.update(_explicit_field_inputs(_source_items(items, "OTHER", teacher), teacher))
+    # The support department's own workbook is the formal source for its
+    # columns; reading one frozen snapshot answers all of them at once.
+    for code, field in _support_fields(support_snapshot, teacher).items():
+        fields[code] = field
+    # A bound snapshot changes what "missing" means.  Saying "no support source
+    # is bound" when the source is bound and simply does not list this teacher
+    # would send the operator looking for the wrong thing.
+    if isinstance(support_snapshot, Mapping) and support_snapshot.get("entries"):
+        listed = {str(name) for name in support_snapshot["entries"]}
+        listed.update(str(item.get("display_name", "")) for item in support_snapshot["entries"].values() if isinstance(item, Mapping))
+        present_columns = {
+            str(row.get("final_field")) for row in (support_snapshot.get("field_map") or [])
+            if isinstance(row, Mapping) and str(row.get("source") or "") not in {"", "NOT_PRESENT_IN_MATERIAL"}
+        }
+        for code in SUPPORT_SOURCED_CODES:
+            if fields[code].get("state") != HUMAN_REQUIRED:
+                continue
+            if teacher not in listed:
+                fields[code] = _empty(code, f"支持部工资资料中没有 {teacher} 的记录，{code} 不能按 0。")
+            elif code not in present_columns:
+                fields[code] = _empty(code, f"支持部工资资料本期没有 {code} 这一列，不能按 0。")
 
     # M is a production input-derived field.  It is supplied by the Run's
     # immutable base-salary snapshot and is never accepted as an arbitrary

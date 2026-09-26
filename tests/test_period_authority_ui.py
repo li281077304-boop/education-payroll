@@ -146,9 +146,10 @@ def test_the_preview_shows_the_period_and_star_authority_evidence(tmp_path):
     assert "rating-2026-1" in page, "星级版本要可见"
     assert "2026-01 ～ 2026-12" in page, "星级生效期要可见"
     assert "校区星级名单" in page, "星级来源要可见"
-    # 主表仍然保持精简：M/AA/AC/AD/AE/AF/AV 七个快速核对字段。
-    for label in ("M 基本工资", "AA", "AC", "AD", "AE 课时单价", "AF", "AV 总工资"):
-        assert label in page
+    # 主表仍然保持精简：M/AA/AC/AD/AE/AF/AV 七个快速核对字段，
+    # 而且每个字段都必须是「代码 + 中文业务名称」，不能只给字母。
+    for label in ("M 实际基本工资", "AA 折算小时数", "AC 班课折算小时数", "AD 最终授课小时数据", "AE 该档每小时金额", "AF 总课时费", "AV 总工资数"):
+        assert label in page, label
 
 
 def test_defer_enters_the_payroll_preview_in_a_single_click(tmp_path):

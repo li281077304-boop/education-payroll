@@ -40,6 +40,7 @@ class RunStore:
             db.execute("CREATE TABLE IF NOT EXISTS company_payroll_templates (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS teacher_base_salary_profiles (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS af_default_policies (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS teacher_employment_profiles (id TEXT PRIMARY KEY, teacher TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL)")
             # 人工月 / 工资周期 authority.  Keyed by payroll month so a boundary a
             # human established once is reused by every later Run of that month
             # instead of being re-confirmed run after run.
@@ -284,6 +285,19 @@ class RunStore:
 
     def save_af_default_policy(self, item: dict) -> None:
         self._upsert("af_default_policies", item)
+
+    def save_employment_profile(self, item: dict) -> None:
+        payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO teacher_employment_profiles(id,teacher,created_at,payload) VALUES(?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET teacher=excluded.teacher, payload=excluded.payload",
+                (item["id"], item["teacher"], item["created_at"], payload),
+            )
+
+    def list_employment_profiles(self) -> list[dict]:
+        with sqlite3.connect(self.path) as db:
+            return [json.loads(row[0]) for row in db.execute("SELECT payload FROM teacher_employment_profiles ORDER BY created_at DESC")]
 
     def save_period_authority(self, item: dict) -> None:
         payload = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":"))

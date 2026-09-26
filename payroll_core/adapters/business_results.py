@@ -49,8 +49,46 @@ def _row_payload(row: dict[str, Any], mapping: dict[str, str]) -> tuple[str, dic
     return teacher, payload
 
 
+def _is_zip_container(path: Path) -> bool:
+    """Whether a file is really OOXML, regardless of what its name claims.
+
+    The office renames legacy workbooks to ``.xlsx`` when they save them from
+    WPS, so the extension cannot be trusted.  The container magic can.
+    """
+    try:
+        with path.open("rb") as handle:
+            return handle.read(2) == b"PK"
+    except OSError:
+        return False
+
+
+def _legacy_sheets(source: Path) -> list[tuple[str, list[list[Any]]]]:
+    """Read a legacy BIFF workbook so a renamed .xls still works."""
+    import xlrd
+
+    book = xlrd.open_workbook(str(source))
+    output: list[tuple[str, list[list[Any]]]] = []
+    for name in book.sheet_names():
+        sheet = book.sheet_by_name(name)
+        output.append((name, [list(sheet.row_values(index)) for index in range(sheet.nrows)]))
+    return output
+
+
+def _header_row_index(rows: list[list[Any]]) -> int:
+    """Find the header row instead of assuming it is the first one.
+
+    The 客服部 refund workbook carries a title/blank row above its headers.
+    """
+    aliases = {alias for names in ALIASES.values() for alias in names}
+    for index, row in enumerate(rows[:8]):
+        labels = {str(value).strip() for value in row if value not in (None, "")}
+        if len(labels & aliases) >= 2 or (labels & {"教师"}) or (labels & {"姓名"} and labels & {"人头", "业绩", "退费"}):
+            return index
+    return 0
+
+
 def read_business_result(path: str | Path, *, period: str | None = None) -> list[ImportedBusinessResult]:
-    """Read a CSV or simple Excel final-result table with row-level provenance.
+    """Read a CSV or Excel final-result table with row-level provenance.
 
     The importer preserves all supplied columns in payload. It only identifies
     the teacher needed to bind a result; it does not decide eligibility.
@@ -73,32 +111,43 @@ def read_business_result(path: str | Path, *, period: str | None = None) -> list
         return output
     if suffix not in {".xlsx", ".xlsm", ".xls"}:
         raise ValueError("目前只支持 CSV、.xlsx、.xlsm 或 .xls 的最终结果表。")
-    workbook, cached_workbook = load_workbook_pair(source)
+    # A real .xls whose name ends in .xlsx is common; decide by content.
+    use_legacy = not _is_zip_container(source)
+    if use_legacy:
+        pairs = _legacy_sheets(source)
+    else:
+        workbook, cached_workbook = load_workbook_pair(source)
+        cached_by_title = {sheet.title: sheet for sheet in cached_workbook.worksheets}
+        pairs = [
+            (sheet.title, _sheet_rows(sheet, cached_by_title.get(sheet.title)))
+            for sheet in workbook.worksheets
+        ]
+        for opened in (workbook, cached_workbook):
+            if hasattr(opened, "close"):
+                opened.close()
 
-    def rows_for(sheet):
-        return [[cell.value for cell in row] for row in sheet.iter_rows()]
+    def month_sheet(title: str, month: int) -> bool:
+        # "8月", "08月", "8月份 " and "2026-08" all mean the same month.
+        cleaned = title.strip()
+        return cleaned in {f"{month}月", f"{int(month):02d}月", f"{month}月份", f"{int(month):02d}月份"}
 
     records: list[ImportedBusinessResult] = []
-    sheets = list(workbook.worksheets)
-    cached_sheets = {sheet.title: sheet for sheet in cached_workbook.worksheets}
     if period and len(period) == 7 and period[4] == "-":
-        month = str(int(period[5:]))
-        candidates = {f"{month}月", f"{int(month):02d}月", period}
-        selected = [sheet for sheet in sheets if sheet.title.strip() in candidates]
+        month = int(period[5:])
+        selected = [(title, rows) for title, rows in pairs if month_sheet(title, month) or title.strip() == period]
         if selected:
-            sheets = selected
-    for sheet in sheets:
-        values = rows_for(sheet)
+            pairs = selected
+    for title, values in pairs:
         if not values:
             continue
-        cached_values = rows_for(cached_sheets.get(sheet.title, sheet))
-        headers = [str(value).strip() if value is not None else "" for value in values[0]]
+        header_index = _header_row_index(values)
+        headers = [str(value).strip() if value is not None else "" for value in values[header_index]]
         # The production renewal workbook uses grouped two-row headers.  Give
         # the three subtotal columns stable semantic names without changing
         # the generic one-row importer contract.
-        if len(values) > 1 and headers[:3] == ["序号", "学科组", "教师"]:
+        if headers[:3] == ["序号", "学科组", "教师"] and header_index + 1 < len(values):
             group_headers = list(headers)
-            second = values[1]
+            second = values[header_index + 1]
             for index, name in ((8, "1V1合计"), (24, "班课合计"), (28, "小班领航合计"), (29, "总计")):
                 if index < len(group_headers) and not group_headers[index] and index < len(second) and second[index] == "合计":
                     group_headers[index] = name
@@ -106,15 +155,8 @@ def read_business_result(path: str | Path, *, period: str | None = None) -> list
         mapping = _header_map(headers)
         if not mapping["teacher"]:
             continue
-        for row_number, values_row in enumerate(values[1:], start=2):
-            cached_row = cached_values[row_number - 1] if row_number - 1 < len(cached_values) else ()
-            # Final-result workbooks commonly store the monthly totals as
-            # formulas.  Keep formula provenance in the workbook itself, but
-            # use Excel's cached result for production numeric fields.
-            values_row = tuple(
-                cached_row[index] if index < len(cached_row) and isinstance(value, str) and value.startswith("=") and cached_row[index] is not None else value
-                for index, value in enumerate(values_row)
-            )
+        for offset in range(header_index + 1, len(values)):
+            values_row = tuple(values[offset])
             row = {headers[index]: value for index, value in enumerate(values_row) if index < len(headers) and headers[index]}
             if not any(value not in (None, "") for value in row.values()):
                 continue
@@ -122,11 +164,33 @@ def read_business_result(path: str | Path, *, period: str | None = None) -> list
             # teacher result and must not become a synthetic "None" row.
             if mapping["teacher"] and row.get(mapping["teacher"]) in (None, ""):
                 continue
+            row_number = offset + 1
             teacher, payload = _row_payload(row, mapping)
-            records.append(ImportedBusinessResult(str(payload.get("teacher_id") or teacher), str(row_number), payload, {"source_file": source.name, "sheet": sheet.title, "row": str(row_number), "headers": headers, "display_name": teacher}))
+            records.append(ImportedBusinessResult(
+                str(payload.get("teacher_id") or teacher), str(row_number), payload,
+                {"source_file": source.name, "sheet": title, "row": str(row_number), "headers": headers, "display_name": teacher},
+            ))
     if not records:
         raise ValueError("结果表没有可识别的教师列或有效记录。")
-    for opened in (workbook, cached_workbook):
-        if hasattr(opened, "close"):
-            opened.close()
     return records
+
+
+def _sheet_rows(sheet, cached_sheet=None) -> list[list[Any]]:
+    """Raw + cached values, with formula caches substituted where present.
+
+    Final-result workbooks commonly store the monthly totals as formulas.
+    Keeping the formula as provenance but reading Excel's cached result is what
+    lets a production numeric field be used without recomputing it.
+    """
+    rows = [[cell.value for cell in row] for row in sheet.iter_rows()]
+    if cached_sheet is None:
+        return rows
+    cached_rows = [[cell.value for cell in row] for row in cached_sheet.iter_rows()]
+    output = []
+    for index, row in enumerate(rows):
+        cached_row = cached_rows[index] if index < len(cached_rows) else ()
+        output.append([
+            cached_row[position] if position < len(cached_row) and isinstance(value, str) and value.startswith("=") and cached_row[position] is not None else value
+            for position, value in enumerate(row)
+        ])
+    return output

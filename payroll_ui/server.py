@@ -189,6 +189,19 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 run_id = parsed.path.split("/")[3]
                 source_path = parse_qs(parsed.query).get("path", [""])[0]
                 return self._json(self.server.service.preview_base_salary_import(run_id, source_path))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/support-preview"):
+                run_id = parsed.path.split("/")[3]
+                source_path = parse_qs(parsed.query).get("path", [""])[0]
+                return self._json(self.server.service.preview_support_salary_import(run_id, source_path))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/rating-preview"):
+                run_id = parsed.path.split("/")[3]
+                source_path = parse_qs(parsed.query).get("path", [""])[0]
+                return self._json(self.server.service.preview_rating_from_workbook(run_id, source_path))
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/employment"):
+                run = self.server.service.get(parsed.path.split("/")[3])
+                return self._json(self.server.service.employment_overview(run))
+            if parsed.path == "/api/employment-profiles":
+                return self._json({"profiles": self.server.service.employment_profiles()})
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/renewal-preview"):
                 return self._json(self.server.service.preview_renewal_material(parsed.path.split("/")[3]))
             if parsed.path.startswith("/api/runs/") and "/resolutions/" in parsed.path:
@@ -341,6 +354,42 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         run_id,
                         str(payload.get("confirmed_by", "")),
                         str(payload.get("reason", "")),
+                    ))
+                if action == "support":
+                    # 支持部工资资料：一次确认，同时供基本工资与支持部字段使用。
+                    return self._json(self.server.service.import_support_department(
+                        run_id,
+                        str(payload.get("path", "")),
+                        str(payload.get("source_sha256", "")),
+                        str(payload.get("confirmed_by", "")),
+                        str(payload.get("source_name", "")),
+                    ))
+                if action == "employment":
+                    return self._json(self.server.service.save_employment_profile(
+                        str(payload.get("teacher", "")),
+                        str(payload.get("employment_type", "")),
+                        str(payload.get("confirmed_by", "")),
+                        evidence=payload.get("evidence") if isinstance(payload.get("evidence"), dict) else None,
+                        reason=str(payload.get("reason", "")),
+                        effective_from=str(payload.get("effective_from", "")),
+                        effective_to=str(payload.get("effective_to", "9999-12")),
+                    ), HTTPStatus.CREATED)
+                if action == "rating-from-support":
+                    # 星级就从同一份支持部资料派生，不要求再上传一次。
+                    return self._json(self.server.service.derive_rating_from_support(
+                        run_id,
+                        str(payload.get("confirmed_by", "")),
+                        str(payload.get("effective_from", "")),
+                        str(payload.get("effective_to", "")),
+                    ))
+                if action == "rating-import":
+                    return self._json(self.server.service.save_rating_from_workbook(
+                        run_id,
+                        str(payload.get("path", "")),
+                        str(payload.get("source_sha256", "")),
+                        str(payload.get("confirmed_by", "")),
+                        str(payload.get("effective_from", "")),
+                        str(payload.get("effective_to", "")),
                     ))
                 if action == "renewal-confirm":
                     return self._json(self.server.service.confirm_renewal_material(

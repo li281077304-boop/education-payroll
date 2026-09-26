@@ -18,6 +18,9 @@ FIELD_LABELS = {
     "rate": "AE 课时单价", "formula": "公式完整性", "av": "AV 总工资",
     "base_salary": "M 实际基本工资（G～L 输入）",
     "renewal_result": "续费最终结果（AH/AI/AJ）",
+    "employment": "教师用工性质（全职 / 兼职）",
+    "refund_result": "退费最终结果（AN）",
+    "support_source": "支持部工资资料",
 }
 
 
@@ -36,6 +39,12 @@ def root_cause_key(run_id: str, teacher: str, field: str) -> str:
         cause = "compensation_fee_policy"
     elif field == "base_salary":
         cause = "base_salary_input"
+    elif field == "employment":
+        cause = "employment_type"
+    elif field == "refund_result":
+        cause = "refund_result_source"
+    elif field == "support_source":
+        cause = "support_department_source"
     elif field == "renewal_result":
         cause = "renewal_result_source"
     elif field == "formula":

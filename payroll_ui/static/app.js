@@ -10,6 +10,9 @@ let partTimeRateRows = [];
 let policyProfileRows = [];
 let coreRuleEditingBase = {};
 let baseSalaryImportPreview = null;
+let supportImportPreview = null;
+let supportImportPath = "";
+let supportImportName = "";
 let baseSalaryImportPath = "";
 let baseSalaryImportName = "";
 let renewalMaterialPreview = null;
@@ -128,6 +131,7 @@ async function api(url, options = {}) {
       const labels = [
         ["/check", "正在重新核对…"], ["/preview", "正在核算…"], ["/generate", "正在生成工资表…"],
         ["/base-salary-defer", "正在保存并核算…"], ["/base-salary", "正在保存…"], ["/period-window", "正在保存周期…"], ["/period-authority", "正在同步人工月…"], ["/period-document/import", "正在导入人工月…"], ["/af-policy", "正在保存…"],
+        ["/support", "正在导入支持部工资资料…"], ["/employment", "正在保存用工性质…"],
         ["/company-template", "正在保存模板…"], ["/decisions", "正在保存…"],
       ];
       const label = labels.find(([suffix]) => path.endsWith(suffix))?.[1] || "正在处理…";
@@ -601,11 +605,79 @@ function baseSalaryImportMarkup() {
     FORMULA_CACHE_MISSING: "公式没有可用的计算结果", INVALID_REQUIRED_VALUE: "必需单元格为空或不是数字",
     MISSING_TEACHER_IDENTIFIER: "来源行缺教师身份", UNREADABLE_WORKBOOK: "文件无法读取",
   };
-  const issues = [...(preview?.errors || []), ...(preview?.conflicts || []), ...(preview?.unmatched || [])];
+  // Structural problems block an import; a teacher who is simply not part of
+  // this month's calculation is a scope fact, not an error, so the two are
+  // listed separately instead of both reading as "unrecognised".
+  const issues = [...(preview?.errors || []), ...(preview?.conflicts || [])];
   const issueMarkup = issues.length ? `<div class="warning-list"><strong>导入前要核实</strong>${issues.map((item) => `<p>${escapeHtml(issueNames[item.code] || item.code)}${item.sheet ? ` · ${escapeHtml(item.sheet)}` : ""}${item.source_row ? ` 第 ${escapeHtml(item.source_row)} 行` : ""}${item.field ? ` · ${escapeHtml(item.field)}` : ""}</p>`).join("")}</div>` : "";
   const matchedRows = (preview?.rows || []).map((row) => `<tr><td>${escapeHtml(namesById.get(String(row.teacher_id)) || row.teacher_id)}</td>${["G", "H", "I", "J", "K", "L"].map((code) => `<td>${escapeHtml(row.fields?.[code] ?? "待确认")}</td>`).join("")}</tr>`).join("");
-  const review = preview ? `<div class="base-import-review"><p class="small">已识别 ${escapeHtml(preview.matched?.length || 0)} 位教师；当前核算仍未匹配 ${escapeHtml(preview.unmatched_run_teachers?.length || 0)} 位。${preview.unmatched_run_teachers?.length ? `待补：${escapeHtml(preview.unmatched_run_teachers.join("、"))}。` : ""}</p>${issueMarkup}${matchedRows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>基本工资</th><th>岗位津贴</th><th>工龄/等级</th><th>其他待遇</th><th>应出勤</th><th>实际出勤</th></tr></thead><tbody>${matchedRows}</tbody></table></div>` : ""}<div class="action-bar"><span class="small muted">这里只预览历史来源；确认后才写入当前核算，M 由系统重新计算。</span>${preview.can_import ? `<button onclick="confirmBaseSalaryImport()">确认导入 ${escapeHtml(preview.rows.length)} 位教师</button>` : '<span class="warn">来源仍有冲突，不能导入。</span>'}</div></div>` : "";
-  return `<section id="base-salary-import" class="base-import-card"><h3>导入历史工资数据</h3><p class="muted">选择支持部门的标准薪资表，或上个月教学部工资表。系统识别教师及 G～L，预览后一次导入；只有未匹配教师需要补录。</p><div class="base-import-actions"><button type="button" onclick="$('#base-salary-history-file').click()">选择历史工资表</button><span class="small muted">也可把 Excel 拖到此处</span><input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></div><div id="base-salary-import-status" role="status" aria-live="polite" class="small muted"></div>${review}</section>`;
+  const counts = preview?.counts || {};
+  const roster = preview?.roster || {};
+  const countParams = (preview?.counts || preview?.roster) ? `<div class="table-wrap"><table class="table"><thead><tr><th>来源资料教师</th><th>当前核算教师</th><th>自动匹配</th><th>本月教师缺历史资料</th><th>历史资料有、本月未核算</th><th>需要确认身份</th></tr></thead><tbody><tr><td>${escapeHtml(counts.source_teachers ?? "—")}</td><td>${escapeHtml(counts.current_run_teachers ?? "—")}</td><td>${escapeHtml(counts.matched ?? "—")}</td><td>${escapeHtml(counts.month_without_history ?? "—")}</td><td>${escapeHtml(counts.history_only ?? "—")}</td><td>${escapeHtml(counts.identity_required ?? "—")}</td></tr></tbody></table></div><p class="small muted">匹配名单：${escapeHtml(roster.origin_label || "当前核算教师")}（${escapeHtml(roster.member_count ?? "—")} 人）。${escapeHtml(roster.note || "")}</p>` : "";
+  const monthMissing = (preview?.month_without_history || []).map((item) => item.teacher).filter(Boolean);
+  const historyOnly = preview?.history_only || [];
+  const scopeNote = historyOnly.length ? `<details><summary>历史资料里有、但本月未参与核算的 ${escapeHtml(historyOnly.length)} 人</summary><p class="small muted">${escapeHtml(historyOnly.map((item) => item.teacher).filter(Boolean).join("、"))}</p><p class="small muted">这些人不是“无法识别”，而是本月还没有他们的核算记录（例如本月学科组提交表里没有他们）。</p></details>` : "";
+  const review = preview ? `<div class="base-import-review"><p class="small">已识别 ${escapeHtml(preview.matched?.length || 0)} 位教师；当前核算仍有 ${escapeHtml(monthMissing.length)} 位缺历史资料。${monthMissing.length ? `待补：${escapeHtml(monthMissing.join("、"))}。` : ""}</p>${countParams}${issueMarkup}${scopeNote}${matchedRows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>基本工资</th><th>岗位津贴</th><th>工龄/等级</th><th>其他待遇</th><th>应出勤</th><th>实际出勤</th></tr></thead><tbody>${matchedRows}</tbody></table></div>` : ""}<div class="action-bar"><span class="small muted">这里只预览来源；确认后才写入当前核算，M 由系统重新计算。</span>${preview.can_import ? `<button onclick="${preview.source_type === "SUPPORT_DEPARTMENT_PAYROLL_SOURCE" ? "confirmSupportImport()" : "confirmBaseSalaryImport()"}">确认导入 ${escapeHtml(preview.counts?.matched ?? preview.rows.length)} 位教师</button>` : '<span class="warn">来源仍有冲突，不能导入。</span>'}</div></div>` : "";
+  return `<section id="base-salary-import" class="base-import-card"><h3>导入支持部 / 历史工资数据</h3><p class="muted">支持部提供的教学部薪资表是正式来源：一次导入同时带出教师身份（科组 / 邮箱 / 入职日期 / 教师级别）、G～L 基本工资，以及社保、补发工资等支持部字段，不需要重复上传同一张文件。</p><div class="base-import-actions"><button type="button" onclick="$('#support-salary-file').click()">导入支持部工资资料（推荐）</button><button type="button" class="secondary" onclick="$('#base-salary-history-file').click()">只导入基本工资 G～L</button><span class="small muted">也可把 Excel 拖到此处</span><input id="support-salary-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewSupportFile(event)"><input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></div><div id="base-salary-import-status" role="status" aria-live="polite" class="small muted"></div>${review}</section>`;
+}
+
+// 用工性质：全职 / 兼职 是人的长期事实，不是每月重填的选项。
+// 兼职教师按课时计酬，不适用全职基本工资，所以不会出现在“缺 G～L”的待办里。
+function employmentCard() {
+  const employment = current.employment || {};
+  const counts = employment.counts || {};
+  if (!counts.total) return "";
+  const pending = employment.needs_confirmation || [];
+  const partTime = (employment.teachers || []).filter((item) => item.employment_type === "PART_TIME");
+  const rows = (employment.teachers || []).map((item) => `<tr><td><strong>${escapeHtml(item.teacher)}</strong></td><td>${escapeHtml(item.employment_label || item.employment_type)}</td><td>${escapeHtml(item.source_label || "")}<div class="small muted">${escapeHtml(item.detail || "")}</div></td></tr>`).join("");
+  const pendingForms = pending.length ? `<div class="decision-form"><label>确认人<input id="employment-confirmed-by" value="${escapeHtml(current.base_salary_input_snapshot?.confirmed_by || current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label></div><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>设为</th><th>依据说明</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>${pending.map((name) => {
+    const item = (employment.teachers || []).find((row) => row.teacher === name) || {};
+    return `<tr class="employment-row" data-teacher="${escapeHtml(name)}"><td><strong>${escapeHtml(name)}</strong><div class="small muted">${escapeHtml(item.detail || "")}</div></td><td><select class="employment-type"><option value="FULL_TIME"${item.employment_type === "FULL_TIME" ? " selected" : ""}>全职</option><option value="PART_TIME"${item.employment_type === "PART_TIME" ? " selected" : ""}>兼职</option></select></td><td><input class="employment-reason" value="${escapeHtml(item.detail || "")}"></td><td><button class="secondary" onclick="saveEmploymentProfile('${escapeHtml(name)}')">保存</button></td></tr>`;
+  }).join("")}</tbody></table></div>` : "";
+  return `<section id="employment-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>教师用工性质（全职 / 兼职）</h2><p class="muted">兼职教师按课时计酬，不适用全职基本工资 G～L；系统不会把缺少 G～L 当成资料缺失，也不会把 M 写成 0。确认一次后该教师以后各月自动沿用。</p></div><span class="status ${pending.length ? "warn" : "ok"}">${pending.length ? `待确认 ${pending.length} 位` : "已确定"}</span></div><div class="metric-grid"><div class="metric"><span>全职</span><strong>${escapeHtml(counts.full_time ?? 0)}</strong><small>来自工资资料</small></div><div class="metric"><span>兼职</span><strong>${escapeHtml(counts.part_time ?? 0)}</strong><small>按课时计酬</small></div><div class="metric"><span>待确认</span><strong>${escapeHtml(counts.unknown ?? 0)}</strong><small>需要选择全职/兼职</small></div></div>${partTime.length ? `<div class="banner info"><strong>本月兼职教师</strong><span>${escapeHtml(partTime.map((item) => `${item.teacher}（${item.source_label}）`).join("；"))}</span></div>` : ""}${pendingForms}<details><summary>查看全部 ${escapeHtml(counts.total)} 位教师的用工性质与来源</summary><div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>用工性质</th><th>来源</th></tr></thead><tbody>${rows}</tbody></table></div></details></section>`;
+}
+
+async function saveEmploymentProfile(teacher) {
+  const row = document.querySelector(`.employment-row[data-teacher="${CSS.escape(teacher)}"]`);
+  const person = $("#employment-confirmed-by")?.value?.trim() || current.base_salary_input_snapshot?.confirmed_by || "";
+  if (!person) {
+    $("#employment-confirmed-by")?.focus();
+    return showMessage("请填写用工性质确认人。");
+  }
+  try {
+    await api(`/api/runs/${current.id}/employment`, { method: "POST", body: JSON.stringify({
+      teacher,
+      employment_type: row?.querySelector(".employment-type")?.value || "FULL_TIME",
+      reason: row?.querySelector(".employment-reason")?.value?.trim() || "",
+      confirmed_by: person,
+    }) });
+    current = await api(`/api/runs/${current.id}`);
+    renderRun();
+    showMessage(`已保存 ${teacher} 的用工性质；该教师以后各月沿用。`, "success");
+  } catch (error) { showMessage(error.message); }
+}
+
+function supportSourceCard() {
+  const source = current.support_source || {};
+  if (!source.bound) {
+    return `<section id="support-source-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>支持部工资资料</h2><p class="muted">支持部提供的教学部薪资表是 B / D / E / F、基本工资和社保、补发工资等项目的正式来源。一张表一次导入，多个字段一起使用，不需要重复上传。</p></div><span class="status warn">未绑定</span></div><div class="action-bar"><button class="secondary" onclick="openBaseSalaryPage('${escapeHtml(current.id)}')">去导入支持部工资资料</button></div></section>`;
+  }
+  const rows = (source.field_map || []).filter((item) => item.business_name).map((item) => `<tr><td>${escapeHtml(item.business_name)}</td><td>${escapeHtml(item.final_field)}</td><td>${escapeHtml(item.source_column || "—")}</td><td>${escapeHtml(item.source === "NOT_PRESENT_IN_MATERIAL" ? "本期资料没有" : item.source)}</td><td>${item.inherited ? "原值沿用" : "不沿用"}</td><td>${item.feeds_av ? "是" : "否"}</td></tr>`).join("");
+  const identity = Object.entries(source.identity_fields || {}).filter(([, value]) => value).map(([name, value]) => `${escapeHtml(String(value).split("\n")[0])}`).join("、");
+  const gaps = (source.gaps || []).map((item) => item.business_name).filter(Boolean);
+  return `<section id="support-source-card" class="card"><div class="section-head"><div><p class="eyebrow">基础资料</p><h2>支持部工资资料</h2><p class="muted">来源：${escapeHtml(source.source_name || "")} · 工作表 ${escapeHtml(source.source_sheet || "")} · ${escapeHtml(source.entries || 0)} 位教师 · 确认人 ${escapeHtml(source.confirmed_by || "—")}</p></div><span class="status ok">已绑定</span></div><p class="small muted">同时提供的身份字段：${identity || "—"}</p>${gaps.length ? `<div class="banner info"><strong>本期资料没有这些项目</strong><span>${escapeHtml(gaps.join("、"))}；系统不会替它们填 0。</span></div>` : ""}<div class="table-wrap"><table class="table"><thead><tr><th>业务名称</th><th>最终字段</th><th>支持部源表列</th><th>来源</th><th>是否直接沿用</th><th>是否参与 AV</th></tr></thead><tbody>${rows}</tbody></table></div><div class="action-bar"><button class="secondary" onclick="openBaseSalaryPage('${escapeHtml(current.id)}')">更新支持部工资资料</button><button class="secondary" onclick="deriveRatingFromSupport()">用这份资料的「教师级别」生成星级版本</button></div></section>`;
+}
+
+// 星级正常来自工资资料里的「教师级别」，不需要用户自己维护生效期和版本信息。
+async function deriveRatingFromSupport() {
+  const person = $("#base-salary-confirmed-by")?.value?.trim() || current.base_salary_input_snapshot?.confirmed_by || "";
+  if (!person) return showMessage("请填写星级资料确认人。");
+  try {
+    const result = await api(`/api/runs/${current.id}/rating-from-support`, { method: "POST", body: JSON.stringify({ confirmed_by: person }) });
+    current = await api(`/api/runs/${current.id}`);
+    renderRun();
+    showMessage(`已按支持部资料生成星级版本：${result.created.ratings} 位教师，生效期 ${result.created.effective_from} ～ ${result.created.effective_to}。`, "success");
+  } catch (error) { showMessage(error.message); }
 }
 
 function baseSalaryPage() {
@@ -620,7 +692,7 @@ function baseSalaryPage() {
     return `<tr class="base-salary-row" data-teacher="${escapeHtml(row.teacher)}"><td><strong>${escapeHtml(row.teacher)}</strong><input class="base-teacher-id" type="hidden" value="${escapeHtml(entry.teacher_id || row.teacher)}"></td>${fields.map(([code, label]) => `<td><label class="small">${label}<input class="base-${code.toLowerCase()}" type="number" step="0.01" value="${escapeHtml(values[code]?.value ?? "")}" placeholder="${code}"></label></td>`).join("")}<td><strong class="base-m-value">${escapeHtml(entry.m?.value ?? "待填写")}</strong><div class="small muted">M=(G+H+I+J)/K×L，只读计算</div></td><td><span class="status ${mState === "DETERMINED" ? "ok" : "warn"}">${stateLabel}</span></td></tr>`;
   }).join("");
   const deferred = current.base_salary_deferred ? `<div class="banner info"><strong>基本工资暂未录入</strong><span>本次已按你的选择继续生成；M 保持“待补充”，补录 G～L 后可重新生成。</span></div>` : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">先导入一张历史工资表；系统只读计算 M。导入后如有少数未匹配教师，可在下方补录。</p></div></div>${deferred}${baseSalaryImportMarkup()}<details class="base-salary-manual"><summary>查看或补录未匹配教师</summary><div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" value="${escapeHtml(current.base_salary_input_snapshot?.confirmed_by || current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="${escapeHtml(current.base_salary_input_snapshot?.source || "本次核算补录")}"></label></div><div class="action-bar"><span class="muted small">缺少任何 G～L 时，M 保持待补充。</span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存补录并重新预览</button></div></details><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()" ${rows.length ? "" : "disabled"}>暂不录入，先生成工资预览</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">生产输入</p><h2>基本工资</h2><p class="muted">先导入一张支持部工资表；系统只读计算 M，并把同一份资料的身份与支持部字段一起保存。导入后如有少数未匹配教师，可在下方补录。</p></div></div>${deferred}${baseSalaryImportMarkup()}<details class="base-salary-manual"><summary>查看或补录未匹配教师</summary><div class="table-wrap"><table class="table base-salary-table"><thead><tr><th>教师</th>${fields.map(([, label]) => `<th>${label}</th>`).join("")}<th>M 实际基本工资</th><th>状态</th></tr></thead><tbody>${rowHtml || '<tr><td colspan="9" class="muted">请先导入排课资料并完成一次核算。</td></tr>'}</tbody></table></div><div class="decision-form"><label>确认人<input id="base-salary-confirmed-by" value="${escapeHtml(current.base_salary_input_snapshot?.confirmed_by || current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><label>输入来源<input id="base-salary-source" value="${escapeHtml(current.base_salary_input_snapshot?.source || "本次核算补录")}"></label></div><div class="action-bar"><span class="muted small">缺少任何 G～L 时，M 保持待补充；兼职教师不需要填写。</span><button onclick="saveBaseSalary()" ${rows.length ? "" : "disabled"}>保存补录并重新预览</button></div></details><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()" ${rows.length ? "" : "disabled"}>暂不录入，先生成工资预览</button></div></section>${supportSourceCard()}${employmentCard()}`;
 }
 
 function bindBaseSalaryDropZone() {
@@ -647,6 +719,51 @@ function bindBaseSalaryDropZone() {
 async function previewBaseSalaryFile(event) {
   const file = event.target?.files?.[0];
   if (file) await previewBaseSalaryFileObject(file);
+}
+
+// 支持部工资资料：一次上传同时供基本工资 G～L 与支持部字段使用，
+// 所以走同一张文件、同一次确认，不再要求用户分开上传。
+async function previewSupportFile(event) {
+  const file = event.target?.files?.[0];
+  if (!file) return;
+  const status = $("#base-salary-import-status");
+  if (status) status.textContent = "正在读取支持部工资资料…";
+  try {
+    if (!/\.(xls|xlsx|xlsm)$/i.test(file.name)) throw new Error("请选择 Excel 工资表（.xls、.xlsx 或 .xlsm）。");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const uploaded = await api("/api/upload", { method: "POST", body: JSON.stringify({ name: file.name, content_base64: bytesToBase64(bytes) }) });
+    const preview = await api(`/api/runs/${current.id}/support-preview?path=${encodeURIComponent(uploaded.path)}`);
+    supportImportPath = uploaded.path;
+    supportImportName = file.name;
+    supportImportPreview = { ...preview, run_id: current.id };
+    baseSalaryImportPath = uploaded.path;
+    baseSalaryImportName = file.name;
+    baseSalaryImportPreview = { ...preview, run_id: current.id };
+    renderRun();
+    showMessage(preview.can_import ? `支持部资料已识别 ${preview.counts?.matched ?? preview.rows.length} 位教师，请确认后一次导入。` : "支持部资料中有待核实项目，请查看预览。", preview.can_import ? "success" : "error");
+  } catch (error) {
+    if (status?.isConnected) status.textContent = "支持部资料预览未完成。";
+    showMessage(error.message);
+  }
+}
+
+async function confirmSupportImport() {
+  const preview = supportImportPreview;
+  if (!preview?.can_import || preview.run_id !== current?.id) return showMessage("请先预览当前核算使用的支持部工资资料。");
+  const actor = $("#base-salary-confirmed-by")?.value?.trim() || current.af_policy_confirmation?.confirmed_by || "";
+  if (!actor) {
+    document.querySelector(".base-salary-manual")?.setAttribute("open", "");
+    $("#base-salary-confirmed-by")?.focus();
+    return showMessage("请填写导入确认人。");
+  }
+  try {
+    const result = await api(`/api/runs/${current.id}/support`, { method: "POST", body: JSON.stringify({ path: supportImportPath, source_sha256: preview.source?.sha256 || "", confirmed_by: actor, source_name: supportImportName }) });
+    supportImportPreview = null;
+    baseSalaryImportPreview = null;
+    current = await api(`/api/runs/${current.id}`);
+    renderRun();
+    showMessage(`支持部工资资料已确认导入：基本工资 ${result.imported_base_salary} 位，支持部字段 ${result.entries} 位。`, "success");
+  } catch (error) { showMessage(error.message); }
 }
 
 async function previewBaseSalaryFileObject(file) {
@@ -1139,16 +1256,58 @@ function coreCalculationSection() {
   const fieldKey = (row, key) => row.fields?.[key] || row.fields?.[key.toLowerCase()] || row[key] || null;
   const rendered = rows.map((row) => `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong></td><td>${coreCalculationCell(fieldKey(row, "AA"))}</td><td>${coreCalculationCell(fieldKey(row, "AC"))}</td><td>${coreCalculationCell(fieldKey(row, "AD"))}</td><td>${coreCalculationCell(fieldKey(row, "AE"))}</td><td>${coreCalculationCell(fieldKey(row, "AF"))}</td><td>${coreCalculationCell(fieldKey(row, "PART_TIME"))}</td></tr>`).join("");
   const versionNote = [current.core_rule_version_id ? `核心规则 ${current.core_rule_version_id}` : "", current.part_time_rate_version_id ? `兼职单价 ${current.part_time_rate_version_id}` : ""].filter(Boolean).join(" · ");
-  return `<section class="card core-calculation-card"><div class="section-head"><div><p class="eyebrow">核心计算结果</p><h2>每位教师的核心字段</h2><p class="muted">状态为“估算”“缺资料”或“不适用”的项目不会冒充全薪通过。${escapeHtml(versionNote)}</p></div></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师</th><th>AA</th><th>AC</th><th>AD</th><th>AE</th><th>AF（总课时费）</th><th>兼职按节课时费</th></tr></thead><tbody>${rendered}</tbody></table></div></section>`;
+  return `<section class="card core-calculation-card"><div class="section-head"><div><p class="eyebrow">核心计算结果</p><h2>每位教师的核心字段</h2><p class="muted">状态为“估算”“缺资料”或“不适用”的项目不会冒充全薪通过。${escapeHtml(versionNote)}</p></div></div><div class="table-wrap"><table class="table core-calculation-table"><thead><tr><th>教师</th><th>${escapeHtml(fieldDisplayLabel("AA"))}</th><th>${escapeHtml(fieldDisplayLabel("AC"))}</th><th>${escapeHtml(fieldDisplayLabel("AD"))}</th><th>${escapeHtml(fieldDisplayLabel("AE"))}</th><th>${escapeHtml(fieldDisplayLabel("AF"))}</th><th>兼职按节课时费</th></tr></thead><tbody>${rendered}</tbody></table></div></section>`;
 }
 
+// The final fields are the single canonical result: the workbook export
+// renders exactly the same object.  Reading them first is what keeps the
+// screen and the exported Excel from disagreeing (the core row only carries
+// AA/AC/AD/AE/AF/PART_TIME and has no M at all).
+const CORE_ONLY_CODES = new Set(["AA", "AC", "AD", "AE", "AF", "PART_TIME"]);
+
 function payrollPreviewField(row, code, fallback = null) {
-  const field = row?.fields?.[code];
-  if (field && typeof field === "object") return field;
   const finalField = row?.final_fields?.[code];
   if (finalField && typeof finalField === "object") return finalField;
+  if (!CORE_ONLY_CODES.has(code)) {
+    const core = row?.fields?.[code];
+    if (core && typeof core === "object" && core.state && core.state !== "NOT_APPLICABLE") return core;
+  }
+  const core = row?.fields?.[code];
+  if (core && typeof core === "object") return core;
   const values = { AA: row?.one_to_one, AC: row?.class_value, AD: row?.teaching_hours, AE: row?.ae, AF: row?.af, PART_TIME: row?.part_time_amount };
   return { value: values[code] ?? fallback, state: values[code] == null ? "NEEDS_INPUT" : "DETERMINED" };
+}
+
+// 字段代码 + 中文业务名称。名称来自公司工资模板与支持部工资表的正式表头，
+// 这里只是同一份映射的前端副本；查不到的字段明确写“名称待确认”，不由界面起名。
+const FIELD_DISPLAY_LABELS = {
+  M: "实际基本工资",
+  AA: "折算小时数",
+  AC: "班课折算小时数",
+  AD: "最终授课小时数据",
+  AE: "该档每小时金额",
+  AF: "总课时费",
+  AG: "领航伴学课时费",
+  AH: "1对1课时（续费+推荐）",
+  AI: "班课&1对2领航伴课次",
+  AJ: "小班领航伴学课次",
+  AK: "推荐续费奖",
+  AL: "进步率奖金",
+  AM: "管理团队奖",
+  AN: "退费/拒收学员",
+  AO: "房租",
+  AP: "社保",
+  AQ: "工装费",
+  AR: "内部推荐奖金",
+  AS: "月度激励",
+  AT: "补发工资",
+  AU: "考勤罚款",
+  AV: "总工资数",
+};
+
+function fieldDisplayLabel(code) {
+  const name = FIELD_DISPLAY_LABELS[String(code).toUpperCase()];
+  return name ? `${String(code).toUpperCase()} ${name}` : `${String(code).toUpperCase()}｜名称待确认`;
 }
 
 function renewalPreviewMarkup() {
@@ -1182,6 +1341,16 @@ async function confirmRenewalMaterial() {
   } catch (error) { await refreshAfterError(error); }
 }
 
+// 义务课时例外直接显示真实值，不藏在“查看例外”后面。
+// 数据来自当前 Run 已确认的 AF 政策，界面不写死任何教师或小时数。
+function afExceptionsMarkup() {
+  const policy = current.af_policy_confirmation;
+  if (!policy?.confirmed) return "";
+  const exceptions = Object.entries(policy.exceptions || {});
+  const rows = exceptions.map(([teacher, item]) => `<tr><td><strong>${escapeHtml(teacher)}</strong></td><td>${escapeHtml(item.obligation_hours ?? "—")} 小时</td><td>${item.deduction_enabled ? "扣减" : "不扣减"}</td><td>${escapeHtml(item.reason || "—")}</td></tr>`).join("");
+  return `<details class="preview-details" open><summary>义务课时与教师例外</summary><div class="preview-secondary"><div><span>默认义务课时</span><strong>${escapeHtml(policy.default_obligation_hours ?? "—")} 小时</strong><div class="small muted">确认人：${escapeHtml(policy.confirmed_by || "—")} · ${escapeHtml(policy.reason || "")}</div></div></div>${rows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>义务课时</th><th>是否扣减</th><th>原因</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="small muted">本月没有教师例外。</p>'}<div class="action-bar"><button class="secondary" onclick="setTab('materials')">查看 / 修改例外</button></div></details>`;
+}
+
 function payrollPreviewPage() {
   const generated = current.generated_payroll || {};
   const rows = generated.rows?.length ? generated.rows : (current.core_calculation?.rows || []);
@@ -1206,8 +1375,8 @@ function payrollPreviewPage() {
     const starEvidence = (row.fields?.AE?.evidence || []).map((item) => item?.inputs?.rating).find((value) => value != null && value !== "");
     const star = row.star ?? starEvidence ?? "—";
     const blockers = (row.blockers || []).join("、");
-    const secondaryLabels = { AH: "AH 续费一对一", AI: "AI 续费班课", AJ: "AJ 领航续费", AK: "AK 推荐续费奖", PART_TIME: "兼职按节课时费" };
-    const secondary = ["AH", "AI", "AJ", "AK", "PART_TIME"].map((code) => `<div><span>${secondaryLabels[code]}</span>${coreCalculationCell(payrollPreviewField(row, code), true)}</div>`).join("");
+    const secondaryLabels = { AH: fieldDisplayLabel("AH"), AI: fieldDisplayLabel("AI"), AJ: fieldDisplayLabel("AJ"), AK: fieldDisplayLabel("AK"), PART_TIME: "兼职按节课时费" };
+    const secondary = ["AH", "AI", "AJ", "AK", "PART_TIME"].map((code) => `<div><span>${escapeHtml(secondaryLabels[code])}</span>${coreCalculationCell(payrollPreviewField(row, code), true)}</div>`).join("");
     const shortStatus = row.status === "FINAL" ? "已确认" : blockers ? `待确认（${(row.blockers || []).length} 项）` : "待确认";
     return `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong><div class="small muted">${escapeHtml(shortStatus)}</div><details class="preview-details"><summary>查看续费、星级与依据</summary>${blockers ? `<p class="small muted">待处理：${escapeHtml(blockers)}</p>` : ""}<div class="preview-secondary">${secondary}<div><span>教师星级（与 AE 课时单价不同）</span>${coreCalculationCell({ value: star, state: star === "—" ? "NEEDS_INPUT" : "DETERMINED", reason: starSource }, true)}</div></div></details></td>${fields}</tr>`;
   }).join("");
@@ -1225,7 +1394,7 @@ function payrollPreviewPage() {
     : importedRenewal
       ? `<div class="banner info"><strong>续费资料已导入，工资字段待确认</strong><span>系统会读取当前月份的 1V1、班课和领航合计；确认后才进入 AH、AI、AJ、AK。</span><button class="secondary" onclick="previewRenewalMaterial()">核对本月续费课时</button></div>`
       : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="action-bar"><span class="small muted">AE 的 42/43 等数值是每小时金额；教师星级另由当期星级资料确定。</span><button class="secondary" onclick="ratingDashboard('${escapeHtml(current.id)}')">查看星级来源</button></div>${periodNotes}${basisPanel}<div class="table-wrap"><table class="table core-calculation-table payroll-preview-table"><thead><tr><th>教师</th><th>M 基本工资</th><th>AA</th><th>AC</th><th>AD</th><th>AE 课时单价</th><th>AF</th><th>AV 总工资</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${renewalPreviewMarkup()}${path}<details class="preview-details"><summary>查看导出说明</summary><div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div></details><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button aria-label="导出工资表" ${current.mode === "GENERATE" && !periodNeedsChoice ? "" : "disabled"} onclick="exportPayroll()">${periodNeedsChoice ? "请先确认工资月份" : "生成工资表"}</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 4 步</p><h2>工资预览</h2><p class="muted">工资月份 ${escapeHtml(current.period_label || current.period)} · ${rows.length} 位教师 · 当前状态：${escapeHtml(status)}</p></div><span class="status ${status === "FINAL" ? "ok" : "warn"}">${escapeHtml(status)}</span></div><div class="action-bar"><span class="small muted">AE 的 42/43 等数值是每小时金额；教师星级另由当期星级资料确定。</span><button class="secondary" onclick="ratingDashboard('${escapeHtml(current.id)}')">查看星级来源</button></div>${periodNotes}${basisPanel}${afExceptionsMarkup()}<div class="table-wrap"><table class="table core-calculation-table payroll-preview-table"><thead><tr><th>教师</th><th>${escapeHtml(fieldDisplayLabel("M"))}</th><th>${escapeHtml(fieldDisplayLabel("AA"))}</th><th>${escapeHtml(fieldDisplayLabel("AC"))}</th><th>${escapeHtml(fieldDisplayLabel("AD"))}</th><th>${escapeHtml(fieldDisplayLabel("AE"))}</th><th>${escapeHtml(fieldDisplayLabel("AF"))}</th><th>${escapeHtml(fieldDisplayLabel("AV"))}</th></tr></thead><tbody>${rowHtml}</tbody></table></div>${renewalNote}${renewalPreviewMarkup()}${path}<details class="preview-details"><summary>查看导出说明</summary><div class="banner info"><strong>导出说明</strong><span>${escapeHtml(exportNote)}</span></div></details><div class="action-bar"><button class="secondary" onclick="setTab('issues')">查看异常核对</button><button aria-label="导出工资表" ${current.mode === "GENERATE" && !periodNeedsChoice ? "" : "disabled"} onclick="exportPayroll()">${periodNeedsChoice ? "请先确认工资月份" : "生成工资表"}</button></div></section>`;
 }
 
 function overviewPage() {

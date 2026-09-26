@@ -3,7 +3,12 @@
   "project": "education-payroll",
   "type": "REAL_MANUAL_UI_UAT",
   "status": "PARTIAL",
-  "status_legend": {"PASS": "真实证据支持通过", "PARTIAL": "已修复或已实现，但缺少真实界面点击确认", "OPEN": "未解决", "BLOCKED": "被外部条件阻断"},
+  "status_legend": {
+    "PASS": "真实证据支持通过",
+    "PARTIAL": "已修复或已实现，但缺少真实界面点击确认",
+    "OPEN": "未解决",
+    "BLOCKED": "被外部条件阻断"
+  },
   "privacy": "Anonymized; no real teacher names, salary values, raw file paths, or workbook contents.",
   "current_ui_evidence": {
     "period": "2026-08",
@@ -18,7 +23,10 @@
   ],
   "observations": [
     {
-      "id": "UAT-01", "area": "basic_salary_import", "severity": "P0", "status": "PARTIAL",
+      "id": "UAT-01",
+      "area": "basic_salary_import",
+      "severity": "P0",
+      "status": "PARTIAL",
       "expected": "Import a compatible historical salary table in bulk; only unmatched teachers require manual completion.",
       "root_cause": "基本工资只能逐格录入，没有任何整表识别与导入链路。",
       "fix": "已实现只读整表识别（G～L）+ 教师匹配 + 预览 + 确认后才写入当前 Run；未匹配教师保留补录入口；来源文件 SHA-256 在校验通过后才写入，且已保存的教师资料下月自动复用。",
@@ -26,7 +34,10 @@
       "remaining": "本轮未在真实浏览器里完整点完一次导入（识别→预览→确认→补录）。"
     },
     {
-      "id": "UAT-02", "area": "issue_action_flow", "severity": "P0", "status": "PASS",
+      "id": "UAT-02",
+      "area": "issue_action_flow",
+      "severity": "P0",
+      "status": "PASS",
       "expected": "Processing an issue opens its actionable confirmation form and shows a durable result.",
       "root_cause": "本轮真实 UAT 中，义务课时默认规则与一位教师的例外确认流程已可完成；未发现阻断。",
       "fix": "本轮未改动该流程（属于用户已认可的行为），也未改动星级加成 / 个人政策 / 工资公式。",
@@ -34,7 +45,10 @@
       "remaining": "无（默认惯例与例外保持分离、可追溯）。"
     },
     {
-      "id": "UAT-03", "area": "async_feedback", "severity": "P0", "status": "PARTIAL",
+      "id": "UAT-03",
+      "area": "async_feedback",
+      "severity": "P0",
+      "status": "PARTIAL",
       "expected": "Long-running actions show progress, disable duplicate submission, and report success or actionable failure.",
       "root_cause": "UAT 观察到「暂不录入，先生成工资表」点击后没有可见反馈：它只保存了一个 defer 决定并跳转页面，没有做核算，按钮文案与实际动作不一致。",
       "fix": "① 该按钮现在一次点击内完成：保存 defer 决定 → 自动重新核算 → 生成工资预览；有其它业务阻塞则进入异常处理，无阻塞直接进入工资预览，不需要再点一次「自动核算」；M/AV 保持真实待补充，绝不按 0。② 按钮文案改为「暂不录入，先生成工资预览」，与实际动作一致。③ 该接口在 api() 中登记了专用的处理中文字「正在保存并核算…」。",
@@ -42,7 +56,10 @@
       "remaining": "其余按钮（自动核算、保存人工周期、续费确认、公司模板、最终生成）由统一忙碌机制覆盖并有自动化验证，但本轮未在真实浏览器里逐个点击复测。"
     },
     {
-      "id": "UAT-04", "area": "preview_copy", "severity": "P1", "status": "PARTIAL",
+      "id": "UAT-04",
+      "area": "preview_copy",
+      "severity": "P1",
+      "status": "PARTIAL",
       "expected": "Keep preview notes concise and expose detailed explanations on demand.",
       "root_cause": "预览行内说明偏长，影响快速核对。",
       "fix": "主表保持 7 个快速核对字段（M/AA/AC/AD/AE/AF/AV）；续费（AH/AI/AJ/AK/兼职）与教师星级收进行内折叠，新增页级折叠「本期使用的依据（人工月 / 星级来源）」。",
@@ -50,7 +67,10 @@
       "remaining": "未真实浏览确认视觉长度。"
     },
     {
-      "id": "UAT-05", "area": "template_navigation", "severity": "P0", "status": "PARTIAL",
+      "id": "UAT-05",
+      "area": "template_navigation",
+      "severity": "P0",
+      "status": "PARTIAL",
       "expected": "Missing-template state provides a direct setup action and resumes generation after save.",
       "root_cause": "缺模板时只有一句提示，没有入口也找不到导航。",
       "fix": "缺模板时最终生成会直接带用户进入公司模板设置；保存模板后返回原 Run 的工资预览并可继续生成。",
@@ -58,7 +78,10 @@
       "remaining": "未真实点击；模板结构契约（可只有表头行）沿用既有 anti-copy 规则，未改动。"
     },
     {
-      "id": "UAT-06", "area": "period_validation", "severity": "P0", "status": "PARTIAL",
+      "id": "UAT-06",
+      "area": "period_validation",
+      "severity": "P0",
+      "status": "PARTIAL",
       "expected": "Compare the actual imported coverage against the run period; do not report a false August coverage anomaly.",
       "root_cause": "系统把工资月份默认当成自然月（2026-08 = 8/1～8/31），于是课表覆盖到 8/30 时 incomplete_tail=true → 最终导出被 PERIOD_COVERAGE_INCOMPLETE 阻断，再要求用户人工确认 8/30 是截止日。真实证据：同一台机器上 9/17 曾人工确认 2026-08 的实际周期，但没有任何可复用的记录，10 天后新建的 Run 又退回自然月。",
       "fix": "工资月份 → 该月“人工月 / 工资周期”authority（payroll_period / period_start / period_end / 来源 / 版本）→ 用它筛选与判断完整性；课表日期只用于校验人工月，文件名仅作低优先级证据。有人工月时不使用自然月月末；课表超出人工周期才提示越界（PERIOD_OUTSIDE_AUTHORITY）；没有人工月时回退自然月并在界面明确标注“自然月兜底”；人工确认一次即形成该月份可复用的权威记录，不再每月重复确认；原有的“确认实际排课周期”降为例外修正入口。",
@@ -67,7 +90,10 @@
       "real_data_result": "正式人工月资料（杰牛集团规章制度知识库）导入后：2026-08 Run 由 2026-08-01～08-30（临时口径）改为 2026-08-03～08-30（资料口径），incomplete_tail=false、outside_period=false、outside_authority=false，排课记录数 2385 不变，PERIOD_COVERAGE_INCOMPLETE 与 PERIOD_OUTSIDE_AUTHORITY 均不存在。"
     },
     {
-      "id": "UAT-07", "area": "renewal_review", "severity": "P0", "status": "PARTIAL",
+      "id": "UAT-07",
+      "area": "renewal_review",
+      "severity": "P0",
+      "status": "PARTIAL",
       "expected": "Show imported renewal checks in the current run with period and teacher match status.",
       "root_cause": "旧识别链会把年度续费文件里的 1 月工作表当成 8 月资料，并把“有续费资料”误报成“续费已进工资”；保存的续费记录只有续费人数，缺少工资用的 AH/AI/AJ 课时合计。",
       "fix": "只读取工资月份对应的工作表；把“续费资料已导入”和“续费已确认并进入本次工资”在界面上分开；预览 AH/AI/AJ 后经人工确认才写入当前 Run 的 renewal snapshot，AK 再由确认后的 AH/AI/AJ 计算。",
@@ -75,7 +101,10 @@
       "remaining": "未在本轮真实界面复测“已导入 / 已确认并进入工资”两种状态的显示。"
     },
     {
-      "id": "UAT-08", "area": "star_source_visibility", "severity": "P1", "status": "PARTIAL",
+      "id": "UAT-08",
+      "area": "star_source_visibility",
+      "severity": "P1",
+      "status": "PARTIAL",
       "expected": "Show the current star value and where it comes from without changing star bonus or personal-policy rules.",
       "root_cause": "用户看不到星级从哪里确定、42/43 代表什么。",
       "fix": "工资预览新增页级折叠「本期使用的依据」，显示教师星级的 authority 名称 / 版本 / 生效期 / 来源；基础资料新增「教师星级来源」卡片只读展示同样信息。星级值与星级加成算法未改动。",
@@ -83,7 +112,10 @@
       "remaining": "未真实浏览。"
     },
     {
-      "id": "UAT-09", "area": "basic_info_layering", "severity": "P1", "status": "PARTIAL",
+      "id": "UAT-09",
+      "area": "basic_info_layering",
+      "severity": "P1",
+      "status": "PARTIAL",
       "expected": "普通月度工资流程不要直接暴露大量工程配置。",
       "root_cause": "基础资料页把星级加成金额、个人政策、7 类核心规则等低频工程配置与月度流程混在一起。",
       "fix": "基础资料页外层只保留：公司工资模板、人工月 / 工资周期、历史基本工资、教师星级来源；星级加成、个人政策、7 类核心规则、班型折算、历史兼容规则收进「高级设置（管理员）」折叠区。未重构计算引擎。",
@@ -91,7 +123,10 @@
       "remaining": "未真实浏览。"
     },
     {
-      "id": "UAT-10", "area": "manual_month_authority_import", "severity": "P0", "status": "PARTIAL",
+      "id": "UAT-10",
+      "area": "manual_month_authority_import",
+      "severity": "P0",
+      "status": "PARTIAL",
       "expected": "人工月应作为基础权威资料：从公司制度文件批量识别、一次确认、写入可复用的 authority；以后同月份自动沿用，不再每月询问；来源可追溯且与“用户手填”区分开。",
       "root_cause": "人工月此前依赖用户手填、历史 Run 推断或自然月兜底；没有任何可导入的权威资料入口，导致同一个月被反复确认，口径还可能被推断值污染。",
       "fix": "新增只读识别器（Markdown / CSV / Excel）与「预览 → 一次确认 → 批量写入」链路，复用现有 period authority 模型（payroll_period / period_start / period_end / boundary_source / revision / supersedes），未新建第二套配置系统。来源语义分为 MANUAL_PERIOD_DOCUMENT（制度文件导入）、USER_CONFIRMED（本机手填）、DERIVED_FROM_CONFIRMED_RUN（历史确认恢复）、LEGACY_CALENDAR_DEFAULT（自然月兜底）。资料导入的记录都带 source_type / source_file / source_hash / source_section / source_row / source_text / imported_at / confirmed_by。",
@@ -102,26 +137,34 @@
   ],
   "environment": [
     {
-      "id": "ENV-01", "area": "launcher_health_probe", "status": "PASS",
+      "id": "ENV-01",
+      "area": "launcher_health_probe",
+      "status": "PASS",
       "root_cause": "launcher 的 localhost health probe 使用会读取代理变量的 opener。开发 shell / 沙箱导出 HTTP_PROXY / ALL_PROXY 时，127.0.0.1 的探测请求被本地代理接走，空闲端口被误判成 foreign / port-taken（tests/test_launcher.py 恰好 3 项假失败）。",
       "fix": "probe 改用显式禁用代理的 opener（ProxyHandler({})），不再依赖环境恰好没有代理。",
       "test": "tests/test_launcher.py 带代理环境 26 项通过；新增 2 项回归（导出代理时空闲端口仍判 absent、带代理仍能识别本服务）。",
       "note": "历史误判记录：曾怀疑 shim、重复 stash 与 restore；最终确认是本项。"
     },
     {
-      "id": "ENV-02", "area": "pytest_temp_root", "status": "PASS",
+      "id": "ENV-02",
+      "area": "pytest_temp_root",
+      "status": "PASS",
       "root_cause": "launcher / 沙箱通过 PYTHONPATH 注入 sitecustomize shim，拦截 mkdir 且不认 exist_ok，导致 pytest 的 tmp_path 大面积 PermissionError；同一问题在仓库内临时目录下还会放大。",
       "fix": "提供项目统一测试入口 tools/run_tests.sh：剥离 shim 的 PYTHONPATH 条目、清空代理变量、把 pytest 临时根固定到仓库内的稳定目录（并在 .gitignore 中排除）。",
       "test": "同一入口跑全量 495 项通过。"
     },
     {
-      "id": "ENV-03", "area": "export_timestamp_path_dependence", "status": "PASS",
+      "id": "ENV-03",
+      "area": "export_timestamp_path_dependence",
+      "status": "PASS",
       "root_cause": "真实缺陷（非环境）：导出时间戳是在整条路径上做正则。本机仓库目录名以 -20260913 结尾，目录片段先被匹配到但没有时分，函数于是返回“没有时间戳”，使“导出污染 / 升学升级”规则失效 —— 同一份代码只因临时目录位于仓库内就失败（tests/test_grade_inference.py 2 项）。",
       "fix": "改为先取文件名，只有在文件名本身没有可用时间戳时才回退到所在目录；不再引入 pathlib 依赖（该模块刻意不接触文件系统）。",
       "test": "tests/test_grade_inference.py 58 项通过；新增 2 项确定性回归（日期型目录名不得覆盖文件名时间戳、临时目录名带日期片段时历史年级仍须正确推断）。既有两个用例现在在仓库内 / 仓库外两种临时根下都通过。"
     },
     {
-      "id": "ENV-04", "area": "github_ci", "status": "PASS",
+      "id": "ENV-04",
+      "area": "github_ci",
+      "status": "PASS",
       "root_cause": "仓库没有 GitHub CI，push 后无法独立显示通过 / 失败。",
       "fix": "新增 .github/workflows/tests.yml：Python 3.12、安装 pyproject 中列出的依赖、调用同一个 tools/run_tests.sh。",
       "test": "GitHub Actions 每次提交都跑通：run 36228196989（首次）、36230314936（人工月资料导入）、36230856228（工资月份归属规则修正，commit 7ff3752）。",
@@ -129,7 +172,9 @@
       "note": "推送时 HTTPS 令牌缺少 workflow scope，被拒绝创建 .github/workflows/tests.yml，改用 SSH 通道推送成功。"
     },
     {
-      "id": "ENV-05", "area": "agent_test_hygiene", "status": "PASS",
+      "id": "ENV-05",
+      "area": "agent_test_hygiene",
+      "status": "PASS",
       "root_cause": "为跑测试随意 git clean / stash 会破坏工作区。",
       "fix": "本轮未执行任何 git clean；对照“改动前行为”时使用仓库旁的独立 git worktree，不改动当前工作区，用完即删除。",
       "test": "定向测试每次先跑；全量共跑 3 次（首次发现年级推断的路径缺陷 → 修复后复跑 → 测试改名后复跑），最终 495 passed / 0 failed。"
@@ -142,7 +187,13 @@
     "discrepancy": "任务描述提到“2026 年 3 条实际记录”，实测文件中人工月表为 12 条（全年 52 周）。当前核算相关的是第 7/8/9 条。实现按全部 12 条导入。",
     "payroll_month_rule": "工资月份来自资料自身的编号，不做天数占比推断：资料明确给出「工资月份」列则直接采用该列；否则用「文档年份 + 人工月序号」（2026 年第 8 个人工月 = 2026-08）；列与序号不一致、缺年份或序号不可用时 fail closed，要求先修正资料",
     "payroll_month_rule_note": "2026-09-26 按用户要求修正：此前实现按「周期内天数最多的月份」推断归属，已改为上述序号规则；12 条记录归属结果不变，仅依据文本与校验方式变化。",
-    "key_row": {"manual_month": "8", "weeks": "4 周", "range": "8.03 — 8.30", "payroll_period": "2026-08", "source_row": 62}
+    "key_row": {
+      "manual_month": "8",
+      "weeks": "4 周",
+      "range": "8.03 — 8.30",
+      "payroll_period": "2026-08",
+      "source_row": 62
+    }
   },
   "real_data_actions": [
     {
@@ -183,6 +234,289 @@
     "real_ui_regression_required": true,
     "real_ui_regression_done": false
   },
-  "regression": {"command": "sh tools/run_tests.sh", "result": "527 passed, 0 failed", "baseline_before_this_round": "495 passed, 0 failed"},
-  "implementation": {"started": true, "finished": true, "scope": "2026-09-26 手工 UAT 收口（P0-1 / P0-2 / P0-3 回归 / P1 界面 / 测试环境）"}
+  "regression": {
+    "command": "sh tools/run_tests.sh",
+    "result": "551 passed, 0 failed",
+    "baseline_before_round1": "451 passed, 0 failed",
+    "baseline_before_round2": "527 passed, 0 failed"
+  },
+  "implementation": {
+    "started": true,
+    "finished": true,
+    "scope": "2026-09-26 手工 UAT 收口（P0-1 / P0-2 / P0-3 回归 / P1 界面 / 测试环境）"
+  },
+  "round": "ROUND_2 (2026-09-26 下午，教师身份来源 + 支持部数据链)",
+  "head_commit_before_round2": "557418e7d63aa3c73c3f4a944c50daa6761c1f94",
+  "round2_answers": {
+    "q1_where_did_the_27_teachers_come_from": {
+      "answer": "匹配名单是「当前核算的教师行」（run.core_calculation.rows），它来自本月导入的数学组提交表；不是排课表，也不是任何历史工资表。",
+      "code_path": "payroll_ui/service.py::PayrollService._roster_facts → _base_salary_roster → preview_base_salary(roster=...)",
+      "data_structure": "run['core_calculation']['rows'][].teacher（teacher_id 缺省时用姓名；本 Run 的 teacher_id 均为 None，所以按“去空格后完全同名”匹配）",
+      "real_numbers": {
+        "support_workbook_teachers": 43,
+        "current_run_teachers": 30,
+        "auto_matched": 27,
+        "month_without_history": 3,
+        "history_only_not_calculated_this_month": 16,
+        "identity_required": 0,
+        "schedule_teachers_not_in_roster": 51
+      },
+      "roster_material": "本月学科组提交表（数学组提交表，30 条记录）",
+      "why_other_history_teachers_were_not_recognised": "支持部表里另外 16 位教师（英语组 / 语文组 / 其余理化组）本月没有进入当前核算，所以不在匹配名单里。这是范围事实，不是识别失败——旧界面把它们报成“教师姓名未匹配”，本轮已改成“历史资料里有、本月未参与核算”。",
+      "subject_limit": "无学科过滤条件；名单大小完全由本月学科组提交表的教师数决定。",
+      "only_teachers_with_schedule": "否。名单来自学科组提交表；排课表 51 位教师里有 21 位没有本月提交表记录，因此不会进入名单。",
+      "influenced_by_history_or_baseline": "否。历史 Run、基准工资表都不参与名单构造。",
+      "normalization": "仅做展示性空白归一（去普通空格与全角空格），不做别名/同音/姓氏推断。",
+      "duplicate_names": "同名多条 → AMBIGUOUS_TEACHER_NAME，fail closed，不自动匹配。",
+      "stable_teacher_id": "结构上支持 teacher_id（STABLE_ID 优先匹配），但真实数据里 teacher_id 为空，所以实际走 NORMALIZED_EXACT_NAME。"
+    },
+    "q2_what_the_support_workbook_actually_provides": {
+      "sheet": "教学部（表头第 3–4 行，数据从第 5 行起，43 位教师）",
+      "identity": [
+        "B 科组",
+        "D 邮箱",
+        "E 入职日期",
+        "F 教师级别"
+      ],
+      "base_salary": [
+        "G 基本工资",
+        "H 岗位津贴",
+        "I 工龄工资/教师等级",
+        "J 其他待遇",
+        "K 应出勤",
+        "L 实际出勤"
+      ],
+      "support_only_items": [
+        "AO 房租（本期列存在、教师行为空）",
+        "AP 社保（41 行有值）",
+        "AQ 工装费（空）",
+        "AR 内部推荐奖金（空）",
+        "AT 补发工资（3 行有值）",
+        "AU 考勤罚款（空）"
+      ],
+      "separate_authority": [
+        "AS 月度激励（列存在，但权威来源是学科组提交，不作为支持部沿用项）"
+      ],
+      "computed_never_inherited": [
+        "AA",
+        "AC",
+        "AD",
+        "AE",
+        "AF",
+        "AG",
+        "AK",
+        "AN",
+        "AV"
+      ],
+      "note": "AH/AI/AJ/AL/AM/AN/AG 在支持部表里只有合计行的 SUM 公式，教师行为空，因此本期没有可沿用的原值。"
+    },
+    "q3_b_d_e_f_meaning_and_source_columns": [
+      {
+        "code": "B",
+        "business_name": "科组",
+        "support_source_column": "科组",
+        "final_excel_column": "B",
+        "inherited": true,
+        "feeds_av": false
+      },
+      {
+        "code": "D",
+        "business_name": "邮箱",
+        "support_source_column": "邮箱",
+        "final_excel_column": "D",
+        "inherited": true,
+        "feeds_av": false
+      },
+      {
+        "code": "E",
+        "business_name": "入职日期",
+        "support_source_column": "入职日期",
+        "final_excel_column": "E",
+        "inherited": true,
+        "feeds_av": false
+      },
+      {
+        "code": "F",
+        "business_name": "教师级别",
+        "support_source_column": "教师级别",
+        "final_excel_column": "F",
+        "inherited": true,
+        "feeds_av": false
+      }
+    ],
+    "q4_why_m_still_said_missing_source": {
+      "answer": "两个不同原因，之前被混在一起说成“M 缺资料”。",
+      "cause_1_part_time": "兼职甲 / 兼职乙 / 兼职丙 这 3 位实际是兼职，但系统把用工性质默认成全职，于是按全职规则要求 G～L。这是唯一还会产生 “M 缺资料”的原因。",
+      "cause_2_render_order": "工资预览渲染函数原先“先读 row.fields 再读 row.final_fields”，而 core_calculation.rows 里根本没有 M 字段；一旦预览退化到 core_calculation.rows（尚未核算时），M 就会显示“缺资料”，即使后端 final_fields.M 已 DETERMINED。",
+      "fix": "① 新增可复用的教师用工性质资料（FULL_TIME / PART_TIME / UNKNOWN + 来源 + 证据），兼职教师 M 为 NOT_APPLICABLE，既不提示缺资料也不写 0；② 预览改为 final_fields 优先。",
+      "real_result": "当前 8 月 Run：M = 27 DETERMINED + 3 NOT_APPLICABLE，不再出现 “M 缺资料”；支持部导入的 G～L 数值与导入前逐位一致。"
+    },
+    "q5_why_ak_and_an_missing": {
+      "ak": {
+        "answer": "续费确实从未真正确认落库——run_renewal_result_snapshot 一直是 null，只有一份“只读续费报告”。",
+        "root_cause": "界面能看到 AH/AI/AJ 的预览值，但确认动作没有写进 Run 的续费快照；生成工资时读的是快照，所以 AK 拿不到来源。",
+        "fix": "在真实数据上执行一次确认：preview → confirm_renewal_material，写入 RUN_RENEWAL_RESULT_SNAPSHOT。",
+        "real_result": "来源 49 行 / 匹配 28 位 → 快照 28 条；教师A AH=180 AI=28 AJ=0 → AK=222（=180×1 + 28×1.5 + 0×0.75）。"
+      },
+      "an": {
+        "answer": "退费资料存在，但从未形成“已审核的退费结果”，因为那张文件根本不是 xlsx。",
+        "root_cause": "客服部提供的退费统计表（8月份工作表） 的真实容器是旧版 .xls（OLE 复合文档，magic d0cf11e0），只是扩展名被写成了 .xlsx；最终结果导入器只用 openpyxl（只认真 OOXML/CSV），所以文件永远打不开，business_inputs 表一直是空的。另外工作表名是「8月份 」（带尾空格），旧月份匹配也认不出来。",
+        "fix": "① 结果表读取改成按容器内容判断格式，非 zip 时用 xlrd 读旧版 .xls；② 表头行不再假定在第一行（退费表标题在第 1 行、表头在第 2 行）；③ 月份工作表匹配接受「8月 / 08月 / 8月份」。",
+        "real_result": "退费表读出 12 条、11 位教师，命中 8 月份工作表；审核通过并绑定 12 条 → AN 11 位 DETERMINED（例：教师A -100、教师B -50、教师C -155 = -50 -36 -69）。",
+        "not_zero_when_absent": "没有退费记录的教师 AN 仍为待补充，不会静默按 0。"
+      }
+    }
+  },
+  "round2_observations": [
+    {
+      "id": "R2-01",
+      "area": "teacher_identity_roster",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "匹配名单（_base_salary_roster）取 run['core_calculation']['rows']，也就是本月学科组提交表的教师，但界面把名单外的历史教师报成“教师姓名未匹配”，让人以为系统无法识别。",
+      "data_lineage": "支持部工资表 43 位教师 → 当前核算 30 位（数学组提交表）→ 自动匹配 27 / 本月缺历史资料 3 / 历史表有本月未核算 16 / 需确认身份 0",
+      "fix": "preview 输出拆成 A 两边都有 / B 本月缺历史资料 / C 历史资料有本月未核算 / D 证据不足需确认四类，并给出名单来源说明；界面显示 6 个计数。",
+      "test": "tests/test_teacher_identity_and_support_source.py（roster 溯源、四集合分类、重名 fail closed）；tests/test_base_salary_import.py 断言同步更新。",
+      "remaining": ""
+    },
+    {
+      "id": "R2-02",
+      "area": "employment_type_part_time",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "用工性质被默认成 FULL_TIME，系统因此对兼职教师索要全职基本工资 G～L。",
+      "data_lineage": "教师用工性质 authority（用户确认 / 工资资料 / 仓库已登记兼职规则 / 未确认）→ 本月核算 30 位 → 27 全职 + 3 兼职",
+      "fix": "新增 teacher_employment_profiles（可复用、带生效期与来源）；兼职 M = NOT_APPLICABLE（不写 0）；未确认的用工性质单独成一条待办，措辞是“确认全职/兼职”，不是“缺 G～L”。",
+      "test": "兼职不要求全职 G～L、已登记兼职规则被标记待确认、已登记的兼职姓名/兼职甲一字之差判为待确认身份、支持部在册即文档证据（全职）。",
+      "remaining": ""
+    },
+    {
+      "id": "R2-03",
+      "area": "base_salary_to_m",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "两处：3 位兼职教师被当成全职；预览渲染先读 row.fields（core 行没有 M）再读 final_fields，导致退化时 M 显示缺资料。",
+      "data_lineage": "支持部表 G～L → teacher_base_salary_profile → Run base_salary_input_snapshot → M → AV",
+      "fix": "预览改为 final_fields 优先（canonical result）；兼职教师 M 改为 NOT_APPLICABLE。",
+      "test": "确认后 M determined 并进入 AV；导出与 canonical final_fields 逐字段一致。",
+      "real_data_result": "M：27 DETERMINED + 3 NOT_APPLICABLE；G～L 数值与导入前逐位一致。",
+      "remaining": ""
+    },
+    {
+      "id": "R2-04",
+      "area": "renewal_to_ak",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "续费只在只读报告里，run_renewal_result_snapshot 始终为 null，确认动作从未落库。",
+      "data_lineage": "年度续费表 8月工作表 49 行 → 预览匹配 28 → 确认 → run_renewal_result_snapshot → AH/AI/AJ → AK",
+      "fix": "在真实数据上执行一次确认并写入快照（认证链路本身已存在）。",
+      "test": "续费确认 → AH/AI/AJ → AK → AV 组件。",
+      "real_data_result": "快照 28 条；教师A AH=180 AI=28 AJ=0 → AK=222。",
+      "remaining": ""
+    },
+    {
+      "id": "R2-05",
+      "area": "refund_to_an",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "退费表真实容器是旧版 .xls（扩展名却是 .xlsx），openpyxl 打不开；工作表名「8月份 」也不在旧的月份候选里，因此从未形成已审核退费结果，business_inputs 一直为空。",
+      "data_lineage": "退费统计表 8月份工作表 → 12 条记录 / 11 位教师 → 审核通过 → 绑定 Run → AN → AV",
+      "fix": "结果表按容器内容识别格式（非 zip 用 xlrd）、表头行自动定位、月份工作表匹配接受「8月份」。",
+      "test": "旧版 .xls 伪装 .xlsx 的回归（monkeypatch 读取链）、表头行定位、退费 → AN → AV。",
+      "real_data_result": "AN 11 位 DETERMINED（教师A -100、教师B -50、教师C -155）；无退费记录者保持待补充，不按 0。",
+      "remaining": ""
+    },
+    {
+      "id": "R2-06",
+      "area": "support_department_source",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "支持部工资表被当成“历史基本工资的 M 来源之一”，B/D/E/F 与社保、补发等项目没有正式来源，也没有一次导入多次消费的机制。",
+      "data_lineage": "支持部工资表（教学部 sheet）→ 一次解析 → RUN_SUPPORT_DEPARTMENT_SNAPSHOT（身份 + 基本工资 + 支持部字段 + 字段映射）→ B/D/E/F / AO/AP/AQ/AR/AT/AU → 最终 Excel",
+      "fix": "新增支持部资料识别器与快照；一次确认同时写入 G～L 基本工资（复用原有已验收路径）与支持部字段；产出业务名称→最终字段→源表列→是否沿用→是否参与 AV 的映射表；本期资料没有的列明确标注“本期资料没有”，不按 0。",
+      "test": "一次文件供多字段、同一文件不需重复上传、字段映射语义（月度激励属学科组）、支持部不写入计算字段、导出 B/D/E/F 与支持部一致。",
+      "real_data_result": "支持部表 43 位 / 匹配 27；导出抽查教师A、教师D、教师E：B/D/E/F、AP 社保与支持部原表逐项一致；AT 补发为资料空白 → 明确按 0 并给理由。",
+      "remaining": ""
+    },
+    {
+      "id": "R2-07",
+      "area": "canonical_preview_export",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "预览用 row.fields 优先，导出用 final_fields；两者不是同一份结果。导出还会给已有「核验与来源 / 外围字段状态」的公司模板再建两张同名表（openpyxl 自动改名成 …1）。",
+      "data_lineage": "canonical generated_payroll.final_fields → 预览渲染与 Excel 渲染共用",
+      "fix": "预览改为 final_fields 优先；证据/边界表复用模板已有工作表，不再新建重复表。",
+      "test": "导出与 canonical final_fields 逐字段一致；模板工作表集合不带 …1 重复表。",
+      "real_data_result": "真实导出 sheet 数 3（与公司模板一致），无重复表。",
+      "remaining": ""
+    },
+    {
+      "id": "R2-08",
+      "area": "field_display_names",
+      "severity": "P1",
+      "status": "PARTIAL",
+      "root_cause": "FIELD_LABELS 里 AG/AL/AP/AQ/AR/AT/AU 等写的是“未确认工资项目”，普通用户只看到字母和数字。",
+      "data_lineage": "公司工资模板 / 支持部工资表正式表头 → FIELD_LABELS + CORE_FIELD_LABELS → display_label()",
+      "fix": "用公司自己的表头替换全部占位名（AG 领航伴学课时费、AL 进步率奖金、AO 房租、AP 社保、AQ 工装费、AR 内部推荐奖金、AT 补发工资、AU 考勤罚款、AV 总工资数…）；查不到的字段显示「XX｜名称待确认」。前端预览与核心结果表头同步显示“代码 + 中文名”。",
+      "test": "每个最终字段都有“代码 + 中文名”；未知字段写“名称待确认”。",
+      "remaining": "未在真实浏览器里逐页确认显示效果。"
+    },
+    {
+      "id": "R2-09",
+      "area": "rating_source_from_workbook",
+      "severity": "P1",
+      "status": "PARTIAL",
+      "root_cause": "“导入新的星级版本”要求用户自己维护生效期、星级资料、版本信息，而这些信息本来就在工资表的「教师级别」列里。",
+      "data_lineage": "工资表 教师级别（如 TR/四星级）→ 星级候选 → 用户确认 → rating_versions（新版本 + supersede）",
+      "fix": "新增从工资表识别星级的只读预览与确认入口；支持部资料已绑定时可直接从同一份快照派生星级版本，不需要再上传一次。AE 算法与星级加成金额未改动。",
+      "test": "工资表识别 4/6 星并生成新版本；从已绑定支持部快照派生星级版本。",
+      "remaining": "未在真实浏览器里点过；真实数据未生成新的星级版本（避免在未确认的情况下改变星级来源）。"
+    },
+    {
+      "id": "R2-10",
+      "area": "af_exceptions_display",
+      "severity": "P1",
+      "status": "PARTIAL",
+      "root_cause": "义务课时例外只显示“有 1 项教师例外 / 查看例外”。",
+      "data_lineage": "当前 Run af_policy_confirmation（默认义务课时 + exceptions）→ 预览页直接渲染",
+      "fix": "工资预览直接展开显示默认义务课时与每位例外的教师 / 义务课时 / 是否扣减 / 原因，数据全部来自当前 Run，界面不写死。",
+      "test": "断言渲染函数读取真实字段且默认展开。",
+      "remaining": "未在真实浏览器里确认排版。"
+    },
+    {
+      "id": "R2-11",
+      "area": "monthly_incentive_authority",
+      "severity": "P1",
+      "status": "OPEN",
+      "root_cause": "月度激励（AS）与支持部字段混在一起，没有独立的来源模型。",
+      "data_lineage": "学科组提交的月度激励 → Run snapshot → AS → AV（模型已建立；本期无真实资料）",
+      "fix": "支持部字段映射把 AS 标为 SUBJECT_GROUP_MONTHLY_INCENTIVE 且 inherited=false，明确它不是支持部沿用项。",
+      "test": "字段映射断言 AS 来源为学科组、不沿用。",
+      "remaining": "本期没有学科组月度激励资料，AS 仍为待补充，AV 因此不能汇总。按用户要求不造测试值进入真实工资。"
+    },
+    {
+      "id": "R2-12",
+      "area": "av_still_open",
+      "severity": "—",
+      "status": "OPEN",
+      "root_cause": "AG 领航伴学课时费、AL 进步率奖金、AM 管理团队奖、AS 月度激励 本期都没有来源资料。",
+      "data_lineage": "AV = M + AF + AG + AK + AL + AM + AN + AO + AP + AQ + AR + AS + AT + AU（缺一不可）",
+      "fix": "不改公式，也不按 0 兜底；界面与导出保留待补充状态与逐字段原因。",
+      "test": "现有 AV 组件测试。",
+      "remaining": "需要 AG/AL/AM/AS 的正式来源后才能算出 AV 终值。这是本轮唯一“数据缺口”，不是缺陷。"
+    },
+    {
+      "id": "R2-13",
+      "area": "no_algorithm_change",
+      "severity": "P0",
+      "status": "PASS",
+      "root_cause": "—",
+      "data_lineage": "core_calculation 的 AA/AC/AD/AE/AF/PART_TIME 事实",
+      "fix": "本轮未改动任何计算公式、星级加成金额、人工月 authority、义务课时默认 30 小时政策或公司模板格式。",
+      "test": "真实数据前后指纹比对。",
+      "real_data_result": "核心计算 180 条事实指纹 3c4e0354d63bbf0def8c8ebab963c652 前后完全一致；排课 2385 条不变；af_policy / 政策快照 / 兼职定价快照 / 规则版本 / 人工月 authority 全部一致；支持部导入的 G～L 与 M 逐位一致。",
+      "remaining": ""
+    }
+  ],
+  "status_note": "第二轮真实数据验证全部执行在真实 2026-08 Run 上并已通过；所有仍标 PARTIAL 的项目唯一原因相同：没有在真实浏览器里点击验证。AV 终值仍待 AG/AL/AM/AS 的正式来源（R2-12），这不是缺陷。"
 }

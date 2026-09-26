@@ -219,6 +219,22 @@ def _is_formula(value: object) -> bool:
     return isinstance(value, str) and value.startswith("=")
 
 
+def _source_only_item(teacher: object, sheet: str, row: int, reason: str) -> dict[str, Any]:
+    """One teacher the source file mentions that this month does not calculate.
+
+    This is a *fact about scope*, not a failure: the person exists in the
+    company's payroll material but is not part of this payroll month's
+    calculation.  Naming it explicitly stops the screen from implying the
+    system could not recognise the person.
+    """
+    return {
+        "teacher": str(teacher or "").strip(),
+        "sheet": sheet,
+        "source_row": row,
+        "reason": reason,
+    }
+
+
 def _redacted_issue(code: str, *, sheet: str = "", row: int | None = None, field: str = "") -> dict[str, Any]:
     """Issue metadata intentionally excludes source names, values and paths."""
     result: dict[str, Any] = {"code": code}
@@ -237,6 +253,16 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
     ``period`` is validated here so this read-only output cannot be mistaken
     for an unscoped long-term profile.  The caller must still obtain a human
     confirmation before it enters the Run through ``save_base_salary_inputs``.
+
+    Every teacher the file mentions ends up in exactly one bucket, so the
+    screen can say what is really happening instead of calling a person the
+    system has no roster entry for "unrecognisable":
+
+    * ``matched`` -- present in both this month's calculation and the file;
+    * ``month_without_history`` -- this month's teacher, absent from the file;
+    * ``history_only`` -- in the file, not part of this month's calculation;
+    * ``identity_required`` -- looks like the same person but the evidence is
+      not conclusive, so a human decides.
     """
     source = Path(path)
     preview: dict[str, Any] = {
@@ -249,6 +275,10 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         "conflicts": [],
         "errors": [],
         "rows": [],
+        "history_only": [],
+        "month_without_history": [],
+        "identity_required": [],
+        "counts": {},
         "can_import": False,
     }
     try:
@@ -309,7 +339,8 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         if not any(value not in (None, "") for value in raw_values.values()):
             continue
         source_id = str(raw_values.get("teacher_id") or "").strip()
-        source_name_key = normalize_teacher(raw_values.get("teacher_name") or "")
+        source_name_value = str(raw_values.get("teacher_name") or "").strip()
+        source_name_key = normalize_teacher(source_name_value)
         target: dict[str, Any] | None = None
         match_kind = ""
         if source_id:
@@ -318,6 +349,7 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
                 target, match_kind = found, "STABLE_ID"
             else:
                 preview["unmatched"].append(_redacted_issue("UNMATCHED_TEACHER_ID", sheet=selected["sheet"], row=row_number))
+                preview["history_only"].append(_source_only_item(source_name_value or source_id, selected["sheet"], row_number, "STABLE_ID_NOT_IN_RUN"))
                 continue
         elif source_name_key:
             candidates = by_name.get(source_name_key, [])
@@ -325,9 +357,11 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
                 target, match_kind = candidates[0], "NORMALIZED_EXACT_NAME"
             elif len(candidates) > 1:
                 preview["conflicts"].append(_redacted_issue("AMBIGUOUS_TEACHER_NAME", sheet=selected["sheet"], row=row_number))
+                preview["identity_required"].append(_source_only_item(source_name_value, selected["sheet"], row_number, "AMBIGUOUS_TEACHER_NAME"))
                 continue
             else:
                 preview["unmatched"].append(_redacted_issue("UNMATCHED_TEACHER_NAME", sheet=selected["sheet"], row=row_number))
+                preview["history_only"].append(_source_only_item(source_name_value, selected["sheet"], row_number, "NOT_IN_CURRENT_CALCULATION"))
                 continue
         else:
             preview["errors"].append(_redacted_issue("MISSING_TEACHER_IDENTIFIER", sheet=selected["sheet"], row=row_number))
@@ -337,6 +371,7 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         dedupe_key = (target_id or source_name_key, match_kind)
         if dedupe_key in source_seen:
             preview["conflicts"].append(_redacted_issue("DUPLICATE_SOURCE_TEACHER", sheet=selected["sheet"], row=row_number))
+            preview["identity_required"].append(_source_only_item(source_name_value, selected["sheet"], row_number, "DUPLICATE_SOURCE_TEACHER"))
             continue
         source_seen[dedupe_key] = row_number
         fields: dict[str, float] = {}
@@ -385,6 +420,30 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
     # unmatched for later correction. Structural ambiguity or duplicate
     # identity blocks the whole batch.
     preview["can_import"] = bool(preview["rows"]) and not preview["conflicts"]
+    people = [{"display_name": item} if isinstance(item, str) else dict(item) for item in roster]
+    matched_ids = {str(item["teacher_id"]) for item in preview["matched"]}
+    preview["month_without_history"] = [
+        {"teacher": str(person.get("display_name") or person.get("teacher") or ""), "teacher_id": str(person.get("teacher_id") or "")}
+        for person in people
+        if str(person.get("teacher_id") or "") not in matched_ids
+    ]
+    # Every teacher name the material mentions: matched + history-only +
+    # identity-pending.  Reported separately from the current month's roster so
+    # the screen can show both sides of the comparison honestly.
+    source_names = {
+        str(person.get("display_name") or person.get("teacher") or "").strip()
+        for person in people if str(person.get("teacher_id") or "") in matched_ids
+    }
+    source_names |= {str(item.get("teacher") or "").strip() for item in preview["history_only"]}
+    source_names |= {str(item.get("teacher") or "").strip() for item in preview["identity_required"]}
+    preview["counts"] = {
+        "source_teachers": len({name for name in source_names if name}),
+        "current_run_teachers": len(people),
+        "matched": len(preview["matched"]),
+        "month_without_history": len(preview["month_without_history"]),
+        "history_only": len(preview["history_only"]),
+        "identity_required": len(preview["identity_required"]),
+    }
     preview["formula_verified_zero_count"] = sum(len(row["provenance"]["formula_verified_zero_fields"]) for row in preview["rows"])
     for book in (raw_book, cached_book):
         close = getattr(book, "close", None)

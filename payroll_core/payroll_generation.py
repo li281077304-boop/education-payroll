@@ -33,8 +33,21 @@ BASE_SALARY_FIELDS = ("G", "H", "I", "J", "K", "L")
 BASE_SALARY_BLOCKED = "BLOCKED_BY_INPUT"
 
 
-def base_salary_field(teacher: str, base_salary_inputs: Mapping[str, object] | None) -> dict:
-    """Calculate M from a Run-scoped, source-backed G:L snapshot."""
+def base_salary_field(teacher: str, base_salary_inputs: Mapping[str, object] | None, employment_type: str = "FULL_TIME") -> dict:
+    """Calculate M from a Run-scoped, source-backed G:L snapshot.
+
+    A part-time teacher is paid per lesson, so the full-time base salary does
+    not apply to them at all.  Saying "M is missing" would be a false business
+    statement, and writing M = 0 would invent a number, so the field is
+    explicitly NOT_APPLICABLE instead.
+    """
+    if str(employment_type or "").upper() == "PART_TIME":
+        return {
+            "value": None,
+            "state": "NOT_APPLICABLE",
+            "reason": f"{teacher} 为兼职教师，按课时计酬，不适用全职基本工资（G～L）。",
+            "evidence": [{"kind": "EMPLOYMENT_TYPE", "employment_type": "PART_TIME", "field": "M"}],
+        }
     entry = (base_salary_inputs or {}).get(teacher) if isinstance(base_salary_inputs, Mapping) else None
     if not isinstance(entry, Mapping):
         return {"value": None, "state": BASE_SALARY_BLOCKED, "reason": f"{teacher} 的实际基本工资缺少：G、H、I、J、K、L。", "evidence": []}
@@ -216,11 +229,12 @@ def build_legacy_generated_payroll(
     )
 
 
-def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None, renewal_snapshot: Mapping[str, object] | None = None) -> GeneratedPayroll:
+def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mapping[str, object]] = (), default_zero_missing: bool = False, base_salary_inputs: Mapping[str, object] | None = None, renewal_snapshot: Mapping[str, object] | None = None, employment_types: Mapping[str, str] | None = None, support_snapshot: Mapping[str, object] | None = None) -> GeneratedPayroll:
     """Pure presentation adapter. No payroll inputs or second set of formulae."""
     rows = []
     reasons = set()
     inputs = tuple(business_inputs)
+    employment = {str(key): str(value) for key, value in (employment_types or {}).items()}
     for row in result["rows"]:
         fields = row["fields"]
         payable_states = {"DETERMINED", "NOT_APPLICABLE", "ESTIMATED"}
@@ -237,9 +251,10 @@ def generated_from_calculation(result: dict, *, business_inputs: Iterable[Mappin
             except (TypeError, ValueError):
                 return raw
         core_values = {key: fields.get(key, {}) for key in ("AF", "PART_TIME")}
+        declared = employment.get(str(row["teacher"]), str(row.get("employment_type", "FULL_TIME")))
         if base_salary_inputs is not None:
-            core_values["M"] = base_salary_field(row["teacher"], base_salary_inputs)
-        final_fields = resolve_final_fields(teacher=row["teacher"], core_fields=core_values, business_inputs=inputs, employment_type=str(row.get("employment_type", "FULL_TIME")), default_zero_missing=default_zero_missing, renewal_snapshot=renewal_snapshot)
+            core_values["M"] = base_salary_field(row["teacher"], base_salary_inputs, declared)
+        final_fields = resolve_final_fields(teacher=row["teacher"], core_fields=core_values, business_inputs=inputs, employment_type=declared, default_zero_missing=default_zero_missing, renewal_snapshot=renewal_snapshot, support_snapshot=support_snapshot)
         final_blockers = {str(item.get("reason") or item.get("state")) for item in final_fields.values() if item.get("state") not in payable_states}
         reasons.update(final_blockers)
         blockers = tuple(sorted(set(blockers) | final_blockers))

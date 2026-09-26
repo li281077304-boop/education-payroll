@@ -102,6 +102,7 @@ def render_generated_payroll(
     *,
     template_path: str | Path | None = None,
     manual_adjustments: Any = (),
+    support_snapshot: Mapping[str, Any] | None = None,
 ) -> str:
     # Preserve prior exports; collisions receive the next numbered name.
     target = safe_output_path(output)
@@ -111,7 +112,7 @@ def render_generated_payroll(
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if template_path:
-        return _render_with_template(payroll, rows, target, Path(template_path), manual_adjustments=manual_adjustments)
+        return _render_with_template(payroll, rows, target, Path(template_path), manual_adjustments=manual_adjustments, support_snapshot=support_snapshot)
 
     book = Workbook()
     sheet = book.active
@@ -172,6 +173,16 @@ def _template_headers(sheet) -> dict[str, int]:
     return found
 
 
+def _header_column(sheet, labels: tuple[str, ...]) -> int | None:
+    """Find one optional column by its Chinese header without requiring it."""
+    normalized = {str(item).replace("\n", "").strip() for item in labels}
+    for column in range(1, sheet.max_column + 1):
+        values = {str(sheet.cell(row, column).value or "").replace("\n", "").strip() for row in (3, 4)}
+        if values.intersection(normalized):
+            return column
+    return None
+
+
 def is_payroll_template(path: str | Path) -> bool:
     """Return whether a local workbook satisfies the production template contract.
 
@@ -226,6 +237,22 @@ def _refund_comment_for_row(row: Any, inputs: Any) -> str | None:
     return "\n".join(comments) if comments else None
 
 
+def _support_entry(snapshot: Mapping[str, Any] | None, teacher: str) -> Mapping[str, Any] | None:
+    """The 支持部 snapshot row for one teacher, if the source is bound."""
+    if not isinstance(snapshot, Mapping):
+        return None
+    entries = snapshot.get("entries")
+    if not isinstance(entries, Mapping):
+        return None
+    entry = entries.get(teacher)
+    if isinstance(entry, Mapping):
+        return entry
+    return next(
+        (item for item in entries.values() if isinstance(item, Mapping) and str(item.get("display_name", "")) == teacher),
+        None,
+    )
+
+
 def _render_with_template(
     payroll: GeneratedPayroll,
     rows: tuple[Any, ...],
@@ -233,6 +260,7 @@ def _render_with_template(
     template: Path,
     *,
     manual_adjustments: Any = (),
+    support_snapshot: Mapping[str, Any] | None = None,
 ) -> str:
     if not template.is_file():
         raise ValueError("工资模板文件不存在，不能生成模板工资表。")
@@ -279,6 +307,20 @@ def _render_with_template(
         row_number = first_data_row + index - 1
         sheet.cell(row_number, 1).value = index
         sheet.cell(row_number, columns["teacher"]).value = row.teacher
+        # B 科组 / D 邮箱 / E 入职日期 / F 教师级别.  In normal operation the
+        # support department supplies all four, so they are inherited verbatim
+        # from the same reviewed workbook rather than retyped.  Nothing else is
+        # copied from that file: the payroll amounts stay this Run's own result.
+        support = _support_entry(support_snapshot, str(row.teacher))
+        support_level = None
+        if support is not None:
+            identity = support.get("identity") if isinstance(support.get("identity"), Mapping) else {}
+            for key, headers in (("group", ("科组",)), ("email", ("邮箱",)), ("hire_date", ("入职日期",))):
+                header = _header_column(sheet, headers)
+                value = identity.get(key)
+                if header and value not in (None, ""):
+                    sheet.cell(row_number, header).value = value
+            support_level = identity.get("teacher_level")
         base_inputs = {}
         m_field = row.final_fields.get("M", {}) if isinstance(getattr(row, "final_fields", None), Mapping) else {}
         for evidence in m_field.get("evidence", ()) if isinstance(m_field, Mapping) else ():
@@ -300,7 +342,13 @@ def _render_with_template(
         for column in sorted(set(GRADE_COLUMNS.values())):
             sheet.cell(row_number, column).value = column_counts.get(column, 0)
         star_display = _star_display(row)
-        if star_display is not None:
+        # F 教师级别: the support department's own wording wins when that
+        # reviewed workbook is bound (its level text is the source the payroll
+        # office reads).  Otherwise the rating authority's display is used, so
+        # a Run without a support source keeps working exactly as before.
+        if support_level not in (None, ""):
+            sheet.cell(row_number, columns["star"]).value = support_level
+        elif star_display is not None:
             sheet.cell(row_number, columns["star"]).value = star_display
         sheet.cell(row_number, columns["aa"]).value = _formula_for_row(row, "AA", row_number)
         sheet.cell(row_number, columns["ac"]).value = _value(row.class_value)
@@ -451,8 +499,26 @@ def _column_letter(column: int) -> str:
     return letters
 
 
+def _fresh_sheet(book: Workbook, title: str):
+    """Reuse the template's own sheet, or create it when it is absent.
+
+    ``create_sheet`` with an existing title makes openpyxl append a second
+    sheet called ``核验与来源1``.  The company template already ships these
+    two sheets, so blindly creating them silently changed the approved
+    workbook layout.  Reusing the sheet keeps the template's own structure.
+    """
+    if title in book.sheetnames:
+        sheet = book[title]
+        for row in sheet.iter_rows():
+            for cell in row:
+                cell.value = None
+                cell.comment = None
+        return sheet
+    return book.create_sheet(title)
+
+
 def _write_evidence_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple[Any, ...]) -> None:
-    sheet = book.create_sheet("核验与来源")
+    sheet = _fresh_sheet(book, "核验与来源")
     sheet.append(["标准工资表核验与来源"])
     sheet["A1"].font = Font(bold=True)
     sheet.append(["期间", payroll.period])
@@ -490,7 +556,7 @@ def _write_evidence_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple
 
 
 def _write_boundary_sheet(book: Workbook, payroll: GeneratedPayroll, rows: tuple[Any, ...]) -> None:
-    sheet = book.create_sheet("外围字段状态")
+    sheet = _fresh_sheet(book, "外围字段状态")
     sheet.append(["最终工资字段逐项状态"])
     sheet["A1"].font = Font(bold=True)
     sheet.append(["逐字段显示当前来源状态；未形成确定结果的字段保留为人工确认入口。"])
