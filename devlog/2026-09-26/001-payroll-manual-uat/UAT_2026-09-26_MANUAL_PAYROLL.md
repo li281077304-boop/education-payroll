@@ -142,7 +142,7 @@
 | ENV-01 | launcher 健康探针 | PASS | 探针用会读代理变量的 opener；开发 shell / 沙箱导出 `HTTP_PROXY` / `ALL_PROXY` 时，127.0.0.1 的请求被本地代理接走，空闲端口被误判成 `foreign`（`test_launcher.py` 恰好 3 项假失败） | 探针改用显式禁用代理的 opener；新增 2 项回归（带代理时空闲端口仍判 absent、带代理仍能识别本服务） |
 | ENV-02 | pytest 临时根 | PASS | 环境通过 `PYTHONPATH` 注入的 shim 拦截 `mkdir` 且不认 `exist_ok`，导致 `tmp_path` 大面积 `PermissionError` | 项目统一测试入口 `tools/run_tests.sh`：剥离 shim 条目、清代理变量、临时根固定在仓库内并加入 `.gitignore` |
 | ENV-03 | 导出时间戳路径依赖（真实缺陷） | PASS | 导出时间戳在**整条路径**上做正则；本机仓库目录名以 `-20260913` 结尾，目录片段先命中但没有时分 → 函数返回“没有时间戳” → “导出污染/升学升级”规则失效。同一份代码只因临时目录在仓库内就失败 | 改为先取文件名，仅在文件名无可用时间戳时才回退到所在目录；不引入 `pathlib`（该模块刻意不接触文件系统）。新增 2 项确定性回归 |
-| ENV-04 | GitHub CI | PASS | 仓库没有 CI，push 后无法独立显示通过/失败 | 新增 `.github/workflows/tests.yml`（Python 3.12 + 同一个 `tools/run_tests.sh`）。首次 GitHub 运行**成功**（run 36228196989）。注：HTTPS 令牌缺 `workflow` scope，创建 CI 文件被拒，改用 SSH 通道推送成功 |
+| ENV-04 | GitHub CI | PASS | 仓库没有 CI，push 后无法独立显示通过/失败 | 新增 `.github/workflows/tests.yml`（Python 3.12 + 同一个 `tools/run_tests.sh`）。首次 GitHub 运行**成功**（run 36228196989）；人工月资料导入提交（commit 9748214）后 run 36230314936 同样**成功**。注：HTTPS 令牌缺 `workflow` scope，创建 CI 文件被拒，改用 SSH 通道推送成功 |
 | ENV-05 | 测试卫生 | PASS | 为跑测试随意 `git clean` / `stash` 会破坏工作区 | 本轮未执行任何 `git clean`；对照旧行为时使用仓库旁的独立 worktree，用完即删。全量共跑 3 次：①首次发现年级推断的路径缺陷 ②修复后复跑 ③测试改名后复跑；定向测试在每次全量之前先跑 |
 
 ## 本轮回归

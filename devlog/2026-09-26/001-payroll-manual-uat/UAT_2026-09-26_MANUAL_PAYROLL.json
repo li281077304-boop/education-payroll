@@ -124,8 +124,8 @@
       "id": "ENV-04", "area": "github_ci", "status": "PASS",
       "root_cause": "仓库没有 GitHub CI，push 后无法独立显示通过 / 失败。",
       "fix": "新增 .github/workflows/tests.yml：Python 3.12、安装 pyproject 中列出的依赖、调用同一个 tools/run_tests.sh。",
-      "test": "GitHub Actions 首次运行成功（run 36228196989，2026-09-26）。",
-      "evidence": "https://github.com/li281077304-boop/education-payroll/actions/runs/36228196989",
+      "test": "GitHub Actions 运行成功：首次 run 36228196989（2026-09-26），人工月资料导入提交后 run 36230314936（commit 9748214）同样成功。",
+      "evidence": "https://github.com/li281077304-boop/education-payroll/actions/runs/36230314936",
       "note": "推送时 HTTPS 令牌缺少 workflow scope，被拒绝创建 .github/workflows/tests.yml，改用 SSH 通道推送成功。"
     },
     {
