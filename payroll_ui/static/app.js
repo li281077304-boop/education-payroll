@@ -39,6 +39,18 @@ const roleCopy = {
 };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
+const payrollGroups = ["数学组", "理化组", "语文组", "英语组", "其它"];
+function checkedGroups(containerId) {
+  return [...document.querySelectorAll(`#${containerId} input[type="checkbox"]:checked`)].map((item) => item.value);
+}
+function selectedRunGroups(run = current) {
+  if (run?.operator_role !== "SUBJECT_LEADER") return [];
+  const groups = Array.isArray(run.selected_groups) ? run.selected_groups.filter(Boolean) : [];
+  return groups.length ? [...new Set(groups)] : run.selected_group ? [run.selected_group] : [];
+}
+function runGroupsLabel(run = current, fallback = "") {
+  return selectedRunGroups(run).join("、") || fallback;
+}
 const fmtDate = (value) => value ? new Date(value).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
 let lastClickedActionButton = null;
 const busyButtons = new WeakMap();
@@ -201,7 +213,7 @@ async function home() {
     renewalMaterialPreview = null;
     const today = new Date();
     const defaultPeriod = defaultPayrollPeriod(today);
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">先选择你本次承担的范围。DOS 负责全教学部；学科组长只处理确认属于本组的人。</p></div><div class="create-box"><label for="operator-role">本次使用身份</label><select id="operator-role" required onchange="toggleLeaderGroupChoice()"><option value="" selected>请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅本组）</option></select><label id="selected-group-wrap" class="hidden" for="selected-group">负责科组</label><select id="selected-group" class="hidden"><option value="">请选择科组</option><option value="数学组">数学组</option><option value="理化组">理化组</option><option value="语文组">语文组</option><option value="英语组">英语组</option><option value="其它">其他</option></select><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用该工资月份的人工月 authority。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">核对一份已有工资表</option><option value="GENERATE">生成工资表</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建核算</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">先选择你本次承担的范围。DOS 负责全教学部；学科组长只处理确认属于本组的人。</p></div><div class="create-box"><label for="operator-role">本次使用身份</label><select id="operator-role" required onchange="toggleLeaderGroupChoice()"><option value="" selected>请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅负责科组）</option></select><div id="selected-group-wrap" class="hidden"><strong>负责科组（可多选）</strong><div id="selected-group" class="checkbox-list" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px">${payrollGroups.map((group) => `<label style="display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #dfe3e8;border-radius:7px;background:#fff;font-weight:500"><input type="checkbox" value="${group}" data-run-group style="width:auto;margin:0"> ${group}</label>`).join("")}</div></div><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用该工资月份的人工月 authority。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">核对一份已有工资表</option><option value="GENERATE">生成工资表</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建核算</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -503,10 +515,11 @@ async function createRun() {
   try {
     const mode = $("#mode") ? $("#mode").value : "AUDIT";
     const operatorRole = $("#operator-role")?.value || "";
-    const selectedGroup = $("#selected-group")?.value || "";
+    const selectedGroups = checkedGroups("selected-group");
     if (!operatorRole) return showMessage("请选择 DOS / 教学管理者或学科组长后再创建核算。", "error");
-    if (operatorRole === "SUBJECT_LEADER" && !selectedGroup) return showMessage("学科组长模式请先选择负责科组。", "error");
-    current = await api("/api/runs", { method: "POST", body: JSON.stringify({ period: $("#period").value, mode, operator_role: operatorRole, selected_group: selectedGroup, period_start: $("#period-start")?.value || "", period_end: $("#period-end")?.value || "", period_boundary_source: $("#period-start")?.value || $("#period-end")?.value ? "USER_CONFIRMED" : "LEGACY_CALENDAR_DEFAULT" }) });
+    if (operatorRole === "SUBJECT_LEADER" && !selectedGroups.length) return showMessage("学科组长模式请至少选择负责科组（可多选）。", "error");
+    const selectedGroup = selectedGroups.length === 1 ? selectedGroups[0] : "";
+    current = await api("/api/runs", { method: "POST", body: JSON.stringify({ period: $("#period").value, mode, operator_role: operatorRole, selected_groups: operatorRole === "SUBJECT_LEADER" ? selectedGroups : [], selected_group: selectedGroup, period_start: $("#period-start")?.value || "", period_end: $("#period-end")?.value || "", period_boundary_source: $("#period-start")?.value || $("#period-end")?.value ? "USER_CONFIRMED" : "LEGACY_CALENDAR_DEFAULT" }) });
     baseSalaryImportPreview = null;
     renewalMaterialPreview = null;
     pendingHistoryReferenceFile = null;
@@ -519,7 +532,6 @@ async function createRun() {
 function toggleLeaderGroupChoice() {
   const visible = $("#operator-role")?.value === "SUBJECT_LEADER";
   $("#selected-group-wrap")?.classList.toggle("hidden", !visible);
-  $("#selected-group")?.classList.toggle("hidden", !visible);
 }
 
 function defaultPayrollPeriod(now = new Date()) {
@@ -673,7 +685,7 @@ function reconfirmationBanner(run) {
 function renderRun() {
   if (current.operator_selection_required) {
     const heading = '<div class="run-title"><div><p class="eyebrow">历史核算流程升级</p><h1>旧流程记录</h1><div class="small muted">请选择处理角色后继续；此操作只保存流程信息，不会重新核算或改写历史工资结果。</div></div></div>';
-    shell(`${heading}<section class="card"><div class="banner info"><strong>旧流程记录，请选择按 DOS 或学科组长继续。</strong><span>确认角色前不会进入新流程。</span></div><label>继续使用<select id="legacy-run-operator" onchange="toggleLegacyRunGroup()"><option value="">请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅本组）</option></select></label><label id="legacy-run-group-wrap" class="hidden">负责科组<select id="legacy-run-group"><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}">${group}</option>`).join("")}</select></label><label>确认人<input id="legacy-run-confirmed-by" placeholder="填写确认人姓名"></label><div class="action-bar"><button onclick="saveLegacyRunOperator()">保存角色并继续</button><span class="small muted">现有历史结果保留；需由你之后主动点击“开始核算”才会生成新范围结果。</span></div></section>`);
+    shell(`${heading}<section class="card"><div class="banner info"><strong>旧流程记录，请选择按 DOS 或学科组长继续。</strong><span>确认角色前不会进入新流程。</span></div><label>继续使用<select id="legacy-run-operator" onchange="toggleLegacyRunGroup()"><option value="">请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（负责一个或多个科组）</option></select></label><div id="legacy-run-group-wrap" class="hidden"><strong>负责科组（可多选）</strong><div id="legacy-run-group" class="checkbox-list" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px">${payrollGroups.map((group) => `<label style="display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #dfe3e8;border-radius:7px;background:#fff;font-weight:500"><input type="checkbox" value="${group}" data-legacy-run-group style="width:auto;margin:0"> ${group}</label>`).join("")}</div></div><label>确认人<input id="legacy-run-confirmed-by" placeholder="填写确认人姓名"></label><div class="action-bar"><button onclick="saveLegacyRunOperator()">保存角色并继续</button><span class="small muted">现有历史结果保留；需由你之后主动点击“开始核算”才会生成新范围结果。</span></div></section>`);
     return;
   }
   const stale = reconfirmationBanner(current) + (current.status === "STALE" ? '<div class="banner error"><strong>原始文件已发生变化</strong><span>请重新选择标记为“已变化”的材料，再重新核对。旧结果不会继续显示为有效。</span></div>' : "");
@@ -681,7 +693,7 @@ function renderRun() {
   const roleRecheck = current.role_scope_recalculation_required ? '<div class="banner warn"><strong>流程角色已保存，旧结果仅保留为历史记录</strong><span>当前尚未按新处理范围核算；不会自动重算。请在材料确认后主动点击“开始核算”。</span></div>' : "";
     const authority = current.period_authority || {};
     const sourceText = authority.source_file || authority.source?.source_file || authority.source_label || "自然月兜底（尚无人工月资料）";
-    const roleLabel = (current.operator_role || "DOS") === "SUBJECT_LEADER" ? `学科组长 · ${escapeHtml(current.selected_group || "待选科组")}` : "DOS / 教学管理者 · 全教学部";
+    const roleLabel = (current.operator_role || "DOS") === "SUBJECT_LEADER" ? `学科组长 · ${escapeHtml(runGroupsLabel(current, "待选科组"))}` : "DOS / 教学管理者 · 全教学部";
     const periodBanner = `<div class="banner info"><strong>工资月份：${escapeHtml(current.period_label || current.period)}</strong><span>人工月：${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · 来源：${escapeHtml(sourceText)}</span></div>`;
     const monthControl = `<div class="run-period-control"><label class="small muted">更改工资月份<input id="run-period-select" type="month" value="${escapeHtml(current.period)}"></label><button class="secondary" onclick="changeRunPeriod()">更改月份</button></div>`;
     shell(`<div class="run-title"><div><p class="eyebrow">${escapeHtml(roleLabel)} · 工资月份 ${escapeHtml(current.period_label || current.period)}</p><h1>工资核算</h1><div class="small muted">人工月 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · 来源：${escapeHtml(sourceText)} · 记录编号 ${escapeHtml(current.id)}</div></div><div class="run-title-actions">${statusBadge(current)}${monthControl}</div></div>${periodBanner}${runSteps()}${stale}${lastError}${roleRecheck}${authoritySummary()}${navigation()}<section id="view"></section>`);
@@ -695,13 +707,14 @@ function toggleLegacyRunGroup() {
 
 async function saveLegacyRunOperator() {
   const role = $("#legacy-run-operator")?.value || "";
-  const group = $("#legacy-run-group")?.value || "";
+  const selectedGroups = checkedGroups("legacy-run-group");
+  const group = selectedGroups.length === 1 ? selectedGroups[0] : "";
   const actor = $("#legacy-run-confirmed-by")?.value?.trim() || "";
   if (!role) return showMessage("请选择按 DOS 或学科组长继续。", "error");
-  if (role === "SUBJECT_LEADER" && !group) return showMessage("请选择负责科组。", "error");
+  if (role === "SUBJECT_LEADER" && !selectedGroups.length) return showMessage("请至少选择负责科组（可多选）。", "error");
   if (!actor) return showMessage("请填写确认人。", "error");
   try {
-    current = await api(`/api/runs/${current.id}/operator-role`, { method: "POST", body: JSON.stringify({ operator_role: role, selected_group: group, confirmed_by: actor }) });
+    current = await api(`/api/runs/${current.id}/operator-role`, { method: "POST", body: JSON.stringify({ operator_role: role, selected_groups: role === "SUBJECT_LEADER" ? selectedGroups : [], selected_group: group, confirmed_by: actor }) });
     tab = "materials";
     renderRun();
     showMessage("已保存新的流程角色元数据；没有重新核算，也没有改写历史工资结果。", "success");
@@ -800,7 +813,10 @@ function baseSalaryImportMarkup() {
   const secondaryMarkup = (membership.secondary_candidates || []).length ? `<details><summary>待确认的小学科/归属不明教师 ${membership.secondary_candidates.length} 位</summary><p>${(membership.secondary_candidates || []).map((item) => `${escapeHtml(item.teacher)}${item.subjects?.length ? `（${escapeHtml(item.subjects.join("、"))}）` : ""}`).join("、")}</p><p class="small muted">请在“待处理问题”中逐一确认是否属于本组。</p></details>` : "";
   const groupMembershipMarkup = !isSupportPreview && preview ? `${primaryMarkup}${secondaryMarkup}${(membership.other_group_candidates || []).length ? `<details><summary>排课主科属于其他科组 ${membership.other_group_candidates.length} 人</summary><p>${membership.other_group_candidates.map((item) => `${escapeHtml(item.teacher)}：${escapeHtml(item.suggested_group)}`).join("、")}</p></details>` : ""}` : "";
   const review = preview ? `<div class="base-import-review"><p class="small">历史工资参考 ${escapeHtml(preview.source_people?.length || preview.rows?.length || 0)} 人；当前人工月排课仍决定本月工资名单，参考文件不会扩大 roster。</p>${issueMarkup}${groupMembershipMarkup}${matchedRows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>基本工资</th><th>岗位津贴</th><th>工龄/等级</th><th>其他待遇</th><th>应出勤</th><th>实际出勤</th></tr></thead><tbody>${matchedRows}</tbody></table></div>` : ""}<div class="action-bar"><span class="small muted">${isSupportPreview ? "支持部资料确认后才成为本月正式来源。" : "历史工资仅保存为参考；科组成员确认请在待处理问题页完成。"}</span>${preview.can_import ? `<button onclick="setTab('issues')">去待处理问题确认</button>` : '<span class="warn">来源仍有冲突，不能保存。</span>'}</div></div>` : "";
-  return `<section id="base-salary-import" class="base-import-card"><h3>工资资料</h3><p class="muted">本月工资资料是正式权威来源，优先级最高。历史工资参考可提供教师身份、科组与 G～L 参考，但不自动带入上月续费、退费、激励、课时费或最终工资。</p><label for="history-reference-group">历史参考所属科组<select id="history-reference-group"><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${(current.selected_group || "") === group ? "selected" : ""}>${group}</option>`).join("")}</select></label><div class="base-import-actions"><button type="button" onclick="$('#support-salary-file').click()">导入本月工资资料</button><button type="button" class="secondary" onclick="$('#base-salary-history-file').click()">导入历史工资参考</button><span class="small muted">预览后确认；历史组籍选择会保留来源证据。</span><input id="support-salary-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewSupportFile(event)"><input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></div><div id="base-salary-import-status" role="status" aria-live="polite" class="small muted"></div>${review}</section>`;
+  const groups = selectedRunGroups(current);
+  const selectedGroup = groups.length === 1 ? groups[0] : "";
+  const groupOptions = current.operator_role === "SUBJECT_LEADER" ? groups : payrollGroups;
+  return `<section id="base-salary-import" class="base-import-card"><h3>工资资料</h3><p class="muted">本月工资资料是正式权威来源，优先级最高。历史工资参考可提供教师身份、科组与 G～L 参考，但不自动带入上月续费、退费、激励、课时费或最终工资。</p><label for="history-reference-group">历史参考所属科组<select id="history-reference-group"><option value="">请选择科组</option>${groupOptions.map((group) => `<option value="${group}" ${selectedGroup === group ? "selected" : ""}>${group}</option>`).join("")}</select></label><div class="base-import-actions"><button type="button" onclick="$('#support-salary-file').click()">导入本月工资资料</button><button type="button" class="secondary" onclick="$('#base-salary-history-file').click()">导入历史工资参考</button><span class="small muted">预览后确认；历史组籍选择会保留来源证据。</span><input id="support-salary-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewSupportFile(event)"><input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></div><div id="base-salary-import-status" role="status" aria-live="polite" class="small muted"></div>${review}</section>`;
 }
 
 // 用工性质：全职 / 兼职 是人的长期事实，不是每月重填的选项。
@@ -839,7 +855,8 @@ function employmentCard() {
   const unconfirmedGroups = employment.group_needs_confirmation?.length || 0;
   const scope = current.processing_scope || {};
   const basisCounts = employment.salary_basis_counts || {};
-  return `<section id="staff-batch-card" class="card"><div class="section-head"><div><p class="eyebrow">教师名单与归属</p><h2>${scope.operator_role === "SUBJECT_LEADER" ? escapeHtml(scope.selected_group || "本组") : "全教学部"}处理范围</h2><p class="muted">排课事实名单仍保持全人工月 Roster；本页只展示当前角色需要处理的人员。组长范围由历史组籍、历史参考和本组提交资料的确认成员组成。</p></div><span class="status ${(unconfirmedGroups || basisCounts.SOURCE_UNKNOWN) ? "warn" : "ok"}">${unconfirmedGroups || basisCounts.SOURCE_UNKNOWN ? `待确认：归组 ${unconfirmedGroups} 位 · 工资基础 ${basisCounts.SOURCE_UNKNOWN || 0} 位` : "当前范围已确认"}</span></div><div class="metric-grid"><div class="metric"><span>全排课 Roster</span><strong>${escapeHtml(scope.canonical_roster_count ?? current.roster_facts?.member_count ?? counts.total ?? people.length)}</strong><small>不被组长视图改写</small></div><div class="metric"><span>本次处理人数</span><strong>${escapeHtml(scope.scope_count ?? people.length)}</strong><small>${scope.operator_role === "SUBJECT_LEADER" ? escapeHtml(scope.selected_group || "所选组") : "全教学部"}</small></div><div class="metric"><span>按课时人员</span><strong>${escapeHtml(basisCounts.HOURLY_SUBMISSION_ONLY || 0)}</strong><small>金额只读取本组提交结果</small></div></div><div class="staff-group-counts">${Object.entries(groupCounts).map(([name, count]) => `<span>${escapeHtml(name)} <strong>${escapeHtml(count)}</strong></span>`).join("")}</div><div class="staff-bulk-actions"><button type="button" class="secondary" onclick="applySuggestedStaffGroups()">采用所有明确的学科建议</button><button type="button" class="secondary" onclick="markUnknownSalaryBasis()">把未知状态保持待确认</button></div>${(scope.outside_roster || []).length ? `<details><summary>参考/提交资料中有但不在本月排课 Roster 的 ${scope.outside_roster.length} 人（不进入本月工资）</summary><p>${scope.outside_roster.map((item) => `${escapeHtml(item.teacher || "教师")}：${escapeHtml(item.reason || "")}`).join("；")}</p></details>` : ""}<label class="person-field">本次确认人<input id="staff-batch-confirmed-by" value="${escapeHtml(current.support_source?.confirmed_by || current.base_salary_input_snapshot?.confirmed_by || "")}" placeholder="填写确认人姓名"></label><div class="table-wrap staff-roster-wrap"><table class="table staff-roster-table"><thead><tr><th>教师</th><th>长期归属科组</th><th>工资基础</th><th>当前依据</th></tr></thead><tbody>${rows}</tbody></table></div><div class="action-bar"><span class="small muted">“资料未知”不等于兼职；明确无底薪只代表工资金额由组内提交表提供，本系统不计算兼职工资。</span><button onclick="confirmStaffBatch()">保存批量确认</button></div></section>`;
+  const scopeGroupsLabel = (scope.selected_groups || selectedRunGroups(current)).join("、");
+  return `<section id="staff-batch-card" class="card"><div class="section-head"><div><p class="eyebrow">教师名单与归属</p><h2>${scope.operator_role === "SUBJECT_LEADER" ? escapeHtml(scopeGroupsLabel || "本组") : "全教学部"}处理范围</h2><p class="muted">排课事实名单仍保持全人工月 Roster；本页只展示当前角色需要处理的人员。组长范围由历史组籍、历史参考和本组提交资料的确认成员组成。</p></div><span class="status ${(unconfirmedGroups || basisCounts.SOURCE_UNKNOWN) ? "warn" : "ok"}">${unconfirmedGroups || basisCounts.SOURCE_UNKNOWN ? `待确认：归组 ${unconfirmedGroups} 位 · 工资基础 ${basisCounts.SOURCE_UNKNOWN || 0} 位` : "当前范围已确认"}</span></div><div class="metric-grid"><div class="metric"><span>全排课 Roster</span><strong>${escapeHtml(scope.canonical_roster_count ?? current.roster_facts?.member_count ?? counts.total ?? people.length)}</strong><small>不被组长视图改写</small></div><div class="metric"><span>本次处理人数</span><strong>${escapeHtml(scope.scope_count ?? people.length)}</strong><small>${scope.operator_role === "SUBJECT_LEADER" ? escapeHtml(scopeGroupsLabel || "所选组") : "全教学部"}</small></div><div class="metric"><span>按课时人员</span><strong>${escapeHtml(basisCounts.HOURLY_SUBMISSION_ONLY || 0)}</strong><small>金额只读取本组提交结果</small></div></div><div class="staff-group-counts">${Object.entries(groupCounts).map(([name, count]) => `<span>${escapeHtml(name)} <strong>${escapeHtml(count)}</strong></span>`).join("")}</div><div class="staff-bulk-actions"><button type="button" class="secondary" onclick="applySuggestedStaffGroups()">采用所有明确的学科建议</button><button type="button" class="secondary" onclick="markUnknownSalaryBasis()">把未知状态保持待确认</button></div>${(scope.outside_roster || []).length ? `<details><summary>参考/提交资料中有但不在本月排课 Roster 的 ${scope.outside_roster.length} 人（不进入本月工资）</summary><p>${scope.outside_roster.map((item) => `${escapeHtml(item.teacher || "教师")}：${escapeHtml(item.reason || "")}`).join("；")}</p></details>` : ""}<label class="person-field">本次确认人<input id="staff-batch-confirmed-by" value="${escapeHtml(current.support_source?.confirmed_by || current.base_salary_input_snapshot?.confirmed_by || "")}" placeholder="填写确认人姓名"></label><div class="table-wrap staff-roster-wrap"><table class="table staff-roster-table"><thead><tr><th>教师</th><th>长期归属科组</th><th>工资基础</th><th>当前依据</th></tr></thead><tbody>${rows}</tbody></table></div><div class="action-bar"><span class="small muted">“资料未知”不等于兼职；明确无底薪只代表工资金额由组内提交结果提供，本系统不计算兼职工资。</span><button onclick="confirmStaffBatch()">保存批量确认</button></div></section>`;
 }
 
 function applySuggestedStaffGroups() {
@@ -855,7 +872,7 @@ function markUnknownSalaryBasis() {
 
 function teacherScopePage() {
   const scope = current.processing_scope || {};
-  const group = scope.operator_role === "SUBJECT_LEADER" ? (scope.selected_group || "所选科组") : "全教学部";
+  const group = scope.operator_role === "SUBJECT_LEADER" ? ((scope.selected_groups || selectedRunGroups(current)).join("、") || "所选科组") : "全教学部";
   const outside = scope.outside_roster || [];
   const people = current.employment?.teachers || [];
   return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 2 步</p><h2>教师名单与归属 · ${escapeHtml(group)}</h2><p class="muted">${scope.operator_role === "SUBJECT_LEADER" ? "本页只列本组处理范围；其它组教师不会生成缺资料问题。" : "DOS 对当前人工月排课中的全教学部教师负责。"}</p></div><span class="status info">本次处理 ${escapeHtml(scope.scope_count ?? people.length)} 人</span></div><div class="metric-grid"><div class="metric"><span>全排课 Roster</span><strong>${escapeHtml(scope.canonical_roster_count ?? current.roster_facts?.member_count ?? 0)}</strong><small>事实名单保持全教学部</small></div><div class="metric"><span>本次处理范围</span><strong>${escapeHtml(scope.scope_count ?? people.length)}</strong><small>${escapeHtml(group)}</small></div><div class="metric"><span>明确按课时</span><strong>${escapeHtml(current.employment?.salary_basis_counts?.HOURLY_SUBMISSION_ONLY || 0)}</strong><small>系统只读取组表结果</small></div></div>${outside.length ? `<details><summary>资料里有但不在本月排课 Roster 的 ${outside.length} 人（不新增工资行）</summary><p>${outside.map((item) => `${escapeHtml(item.teacher || "教师")}：${escapeHtml(item.reason || "")}`).join("；")}</p></details>` : ""}</section>${employmentCard() || '<section class="card"><div class="empty">请先准备人工月排课表。</div></section>'}`;
@@ -972,7 +989,8 @@ async function openHistoricalImport() {
 function stageHistoricalReferenceFile(file) {
   if (!file) return;
   pendingHistoryReferenceFile = file;
-  pendingHistoryReferenceGroup = current.operator_role === "SUBJECT_LEADER" ? (current.selected_group || "") : "";
+  const groups = selectedRunGroups(current);
+  pendingHistoryReferenceGroup = groups.length === 1 ? groups[0] : "";
   baseSalaryImportPreview = null;
   renderRun();
   showMessage("已选择历史工资文件；请确认所属科组后继续识别。", "info");
@@ -1055,8 +1073,11 @@ function historicalSalaryReferenceCard() {
   const references = savedHistoricalSalaryReferences();
   const people = current.employment?.teachers || [];
   const stagedFile = pendingHistoryReferenceFile;
-  const selectedGroup = pendingHistoryReferenceGroup || (current.operator_role === "SUBJECT_LEADER" ? current.selected_group : "");
-  const stagedMarkup = stagedFile ? `<div class="history-reference-stage"><div class="facts"><strong>已选择文件：</strong><span>${escapeHtml(stagedFile.name)}</span></div><label for="history-reference-group">这份资料属于哪个科组？<select id="history-reference-group" ${current.operator_role === "SUBJECT_LEADER" ? "disabled" : ""} onchange="setPendingHistoricalReferenceGroup(this.value)"><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${selectedGroup === group ? "selected" : ""}>${group}</option>`).join("")}</select></label>${current.operator_role === "SUBJECT_LEADER" ? `<p class="small muted">本次身份：学科组长 · ${escapeHtml(current.selected_group || "待选科组")}（历史资料归属已预填）</p>` : ""}<div id="history-reference-import-status" role="status" aria-live="polite" class="small muted"></div><div class="action-bar"><button onclick="previewStagedHistoricalReference()">继续：识别并预览</button><button class="secondary" onclick="openHistoricalImport()">更换文件</button><button class="quiet" onclick="cancelStagedHistoricalReference()">取消</button></div></div>` : "";
+  const leaderGroups = selectedRunGroups(current);
+  const selectedGroup = pendingHistoryReferenceGroup || (leaderGroups.length === 1 ? leaderGroups[0] : "");
+  const allowedGroups = current.operator_role === "SUBJECT_LEADER" ? leaderGroups : payrollGroups;
+  const lockGroup = current.operator_role === "SUBJECT_LEADER" && leaderGroups.length === 1;
+  const stagedMarkup = stagedFile ? `<div class="history-reference-stage"><div class="facts"><strong>已选择文件：</strong><span>${escapeHtml(stagedFile.name)}</span></div><label for="history-reference-group">这份资料属于哪个科组？<select id="history-reference-group" ${lockGroup ? "disabled" : ""} onchange="setPendingHistoricalReferenceGroup(this.value)"><option value="">请选择科组</option>${allowedGroups.map((group) => `<option value="${group}" ${selectedGroup === group ? "selected" : ""}>${group}</option>`).join("")}</select></label>${current.operator_role === "SUBJECT_LEADER" ? `<p class="small muted">本次负责科组：${escapeHtml(runGroupsLabel(current))}${lockGroup ? "（已自动选择）" : "；请为每份历史参考选择一个所属科组"}</p>` : ""}<div id="history-reference-import-status" role="status" aria-live="polite" class="small muted"></div><div class="action-bar"><button onclick="previewStagedHistoricalReference()">继续：识别并预览</button><button class="secondary" onclick="openHistoricalImport()">更换文件</button><button class="quiet" onclick="cancelStagedHistoricalReference()">取消</button></div></div>` : "";
   const referenceRows = references.map((reference) => {
     const group = reference.selected_group || reference.group_membership?.group || "待确认科组";
     const count = reference.group_membership?.members?.length || reference.teacher_count || reference.entries?.length || Object.keys(reference.entries || {}).length;
@@ -1403,7 +1424,10 @@ function subjectGroupCard(files) {
     const state = item.preview_required ? "待重新预览" : "待确认或暂缓";
     return `<div class="file-name"><strong>${escapeHtml(label)} · ${escapeHtml(item.source_name || "学科组资料")}</strong><span class="small warn">${state}</span> · 教师 ${escapeHtml(item.teacher_count ?? "—")} · 行 ${escapeHtml(item.record_count ?? "—")} · ${escapeHtml(String(item.source_sha256 || "").slice(0, 10))}<button class="secondary" onclick="setTab('issues')">到待处理问题处理</button></div>`;
   }).join("");
-  return `<article class="material-card material-group-card"><div class="material-top"><strong>学科组提交表</strong><span class="muted">资料只在负责人确认后进入本月工资</span></div><p class="small muted">每份资料独立登记。选择本文件所属科组后再添加；确认前不会改变工资结果或教师名单。移除只解除本次绑定，不删除原文件。</p><label for="subject-group-selected-group">本次资料所属科组<select id="subject-group-selected-group" ${current.operator_role === "SUBJECT_LEADER" ? "disabled" : ""}><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${(current.operator_role === "SUBJECT_LEADER" ? current.selected_group : "") === group ? "selected" : ""}>${group}</option>`).join("")}</select></label>${confirmedMarkup}${duplicateMarkup}${sourceConflictMarkup}<div data-drop-role="subject_group" tabindex="0" role="button" aria-label="拖入学科组提交表文件" class="drop-zone" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer">拖入 Excel 文件，或直接粘贴</div>${names || (!confirmedMaterials.length ? '<div class="empty compact">尚未选择已确认的学科组提交表</div>' : "")}<button class="secondary full" onclick="choose('subject_group')">添加学科组提交表并预览</button>${candidateCards}</article>`;
+  const leaderGroups = selectedRunGroups(current);
+  const lockGroup = current.operator_role === "SUBJECT_LEADER" && leaderGroups.length === 1;
+  const groupOptions = current.operator_role === "SUBJECT_LEADER" ? leaderGroups : payrollGroups;
+  return `<article class="material-card material-group-card"><div class="material-top"><strong>学科组提交表</strong><span class="muted">资料只在负责人确认后进入本月工资</span></div><p class="small muted">每份资料独立登记。选择本文件所属科组后再添加；确认前不会改变工资结果或教师名单。移除只解除本次绑定，不删除原文件。</p><label for="subject-group-selected-group">本次资料所属科组<select id="subject-group-selected-group" ${lockGroup ? "disabled" : ""}><option value="">请选择科组</option>${groupOptions.map((group) => `<option value="${group}" ${(lockGroup ? leaderGroups[0] : "") === group ? "selected" : ""}>${group}</option>`).join("")}</select></label>${current.operator_role === "SUBJECT_LEADER" && !lockGroup ? `<p class="small muted">负责科组：${escapeHtml(leaderGroups.join("、"))}。每份提交资料需单独指定所属科组。</p>` : ""}${confirmedMarkup}${duplicateMarkup}${sourceConflictMarkup}<div data-drop-role="subject_group" tabindex="0" role="button" aria-label="拖入学科组提交表文件" class="drop-zone" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer">拖入 Excel 文件，或直接粘贴</div>${names || (!confirmedMaterials.length ? '<div class="empty compact">尚未选择已确认的学科组提交表</div>' : "")}<button class="secondary full" onclick="choose('subject_group')">添加学科组提交表并预览</button>${candidateCards}</article>`;
 }
 
 async function removeSubjectGroupMaterial(materialId, inputId) {
@@ -1984,7 +2008,7 @@ function scopeDecisionCards() {
     }
     const inputId = `todo-group-confirm-${String(key).replace(/[^a-zA-Z0-9_-]/g, "")}`;
     const duplicates = item.cross_file_duplicates || [];
-    cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">科组资料确认</p><h3>${escapeHtml(label)} · ${escapeHtml(item.source_name || "提交资料")}</h3><p class="muted">教师 ${escapeHtml(item.teacher_count || 0)} 人 · 记录 ${escapeHtml(item.record_count || 0)} 条 · 文件标识 ${escapeHtml(String(item.source_sha256 || "").slice(0, 12))}</p>${duplicates.length ? `<p class="small warn">与已确认文件重复 ${duplicates.length} 人；重复不会阻塞其它教师，字段冲突会单独列出。</p>` : ""}</div><span class="status warn">待确认</span></div><label>本次确认人<input id="${escapeHtml(inputId)}" placeholder="填写确认人姓名"></label><div class="action-bar"><button ${item.can_confirm ? "" : "disabled"} onclick="confirmSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}',false,'${escapeHtml(inputId)}')">确认用于本月工资</button><button class="secondary" onclick="cancelSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}')">暂缓</button></div></section>`);
+    cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">科组资料确认</p><h3>${escapeHtml(label)} · ${escapeHtml(item.source_name || "提交资料")}</h3><p class="muted">教师 ${escapeHtml(item.teacher_count || 0)} 人 · 记录 ${escapeHtml(item.record_count || 0)} 条 · 文件标识 ${escapeHtml(String(item.source_sha256 || "").slice(0, 12))}</p>${duplicates.length ? `<p class="small warn">与已确认文件重复 ${duplicates.length} 人；重复不会阻塞其它教师，字段冲突会单独列出。</p>` : ""}</div><span class="status warn">待确认</span></div><label>本次确认人<input id="${escapeHtml(inputId)}" placeholder="填写确认人姓名"></label><div class="action-bar"><button ${item.can_confirm ? "" : "disabled"} onclick="confirmSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}',false,'${escapeHtml(inputId)}','${escapeHtml(item.recognized_group || "")}')">确认用于本月工资</button><button class="secondary" onclick="cancelSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}')">暂缓</button></div></section>`);
   }
   const historyPending = current.historical_salary_reference_pending_preview || {};
   if (historyPending.status === "PENDING_CONFIRMATION") {
@@ -2033,8 +2057,8 @@ async function confirmSalaryBasisBatch() {
   const salary_basis_updates = [...document.querySelectorAll("[data-salary-basis-row]")].map((row) => ({
     teacher_id: row.dataset.teacherId, teacher: row.dataset.teacher,
     state: row.querySelector(".todo-salary-basis")?.value || "SOURCE_UNKNOWN",
-    group: current.selected_group || "",
-    reason: "负责人在待处理问题中确认本组工资基础状态。",
+    group: "",
+    reason: "负责人在待处理问题中确认工资基础状态。",
   })).filter((item) => item.state !== "SOURCE_UNKNOWN");
   if (!salary_basis_updates.length) return showMessage("没有选择新的工资基础状态。", "info");
   try {
@@ -2605,7 +2629,7 @@ async function uploadMaterialFiles(role, files) {
   if (materialBusy.has(role)) return;
   materialBusy.add(role); setMaterialBusy(role, true);
   try {
-    const selectedGroup = role === "subject_group" ? ($("#subject-group-selected-group")?.value || current.selected_group || "") : "";
+    const selectedGroup = role === "subject_group" ? ($("#subject-group-selected-group")?.value || (selectedRunGroups(current).length === 1 ? selectedRunGroups(current)[0] : "")) : "";
     if (role === "subject_group" && !selectedGroup) throw new Error("请先选择这份资料所属的科组。");
     for (const file of files) {
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -2632,7 +2656,7 @@ function materialCard(material) {
 
 async function importMaterialPath(role, path) {
   if (["subject_group", "renewal", "refund", "package"].includes(role)) {
-    const selectedGroup = role === "subject_group" ? ($("#subject-group-selected-group")?.value || current.selected_group || "") : "";
+    const selectedGroup = role === "subject_group" ? ($("#subject-group-selected-group")?.value || (selectedRunGroups(current).length === 1 ? selectedRunGroups(current)[0] : "")) : "";
     if (role === "subject_group" && !selectedGroup) throw new Error("请先选择这份资料所属的科组。");
     const result = await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: role, path, selected_group: selectedGroup }) });
     current = result.run;
@@ -2659,7 +2683,9 @@ async function previewExistingSubjectGroup(role) {
   const path = file?.path || pending?.source_path;
   if (!path) return showMessage("找不到这份学科组资料，请重新选择文件。");
   try {
-    const group = current.operator_role === "SUBJECT_LEADER" ? current.selected_group : (file?.recognized_group || Object.values(current.pending_subject_group_imports || {}).find((item) => item.role === role)?.recognized_group || { math: "数学组", science: "理化组" }[role]);
+    const pendingGroup = Object.values(current.pending_subject_group_imports || {}).find((item) => item.role === role)?.recognized_group;
+    const group = current.operator_role === "SUBJECT_LEADER" ? (pendingGroup || file?.recognized_group || (selectedRunGroups(current).length === 1 ? selectedRunGroups(current)[0] : "")) : (file?.recognized_group || pendingGroup || { math: "数学组", science: "理化组" }[role]);
+    if (!group) return showMessage("联合组长请先明确选择这份资料所属的科组，再重新预览。", "error");
     const result = await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: "subject_group", path, selected_group: group }) });
     current = result.run;
     renderRun();
@@ -2667,13 +2693,13 @@ async function previewExistingSubjectGroup(role) {
   } catch (error) { showMessage(error.message); }
 }
 
-async function confirmSubjectGroup(role, sourceSha256, replaceExisting = false, confirmInputId = "") {
+async function confirmSubjectGroup(role, sourceSha256, replaceExisting = false, confirmInputId = "", selectedGroup = "") {
   const actor = (confirmInputId ? document.getElementById(confirmInputId) : document.querySelector(`#subject-group-confirmed-by-${CSS.escape(role)}`))?.value?.trim() || "";
   if (!actor) return showMessage("请填写本次学科组提交表确认人。");
-  const pending = Object.values(current.pending_subject_group_imports || {}).find((item) => item.role === role && item.source_sha256 === sourceSha256);
+  const pending = Object.values(current.pending_subject_group_imports || {}).find((item) => item.role === role && item.source_sha256 === sourceSha256 && (!selectedGroup || item.recognized_group === selectedGroup));
   if (!pending?.can_confirm || pending.source_sha256 !== sourceSha256) return showMessage("预览已变化或无法安全匹配，请重新预览。");
   try {
-    const result = await api(`/api/runs/${current.id}/subject-group-confirm`, { method: "POST", body: JSON.stringify({ role, source_sha256: sourceSha256, confirmed_by: actor, replace_existing: replaceExisting }) });
+    const result = await api(`/api/runs/${current.id}/subject-group-confirm`, { method: "POST", body: JSON.stringify({ role, source_sha256: sourceSha256, selected_group: pending.recognized_group || selectedGroup, confirmed_by: actor, replace_existing: replaceExisting }) });
     current = result.run;
     renderRun();
     showMessage("学科组提交表已确认并用于本月工资；教师名单仍以人工月排课表为准。", "success");

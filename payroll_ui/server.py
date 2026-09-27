@@ -250,6 +250,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     period_boundary_source=str(payload.get("period_boundary_source", "")),
                     operator_role=operator_role,
                     selected_group=str(payload.get("selected_group", "")),
+                    selected_groups=payload.get("selected_groups"),
                 ), HTTPStatus.CREATED)
             if path == "/api/core-rules":
                 return self._json(self.server.service.save_core_rule_version(payload.get("rules", {}), str(payload.get("source", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)
@@ -320,7 +321,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action == "operator-role":
                     return self._json(self.server.service.select_legacy_run_operator(
                         run_id, str(payload.get("operator_role", "")), str(payload.get("selected_group", "")),
-                        str(payload.get("confirmed_by", "")),
+                        str(payload.get("confirmed_by", "")), selected_groups=payload.get("selected_groups"),
                     ))
                 if action in {"core-rules", "part-time-rates"}:
                     return self._json(self.server.service.rebind_calculation(run_id, "core" if action == "core-rules" else "part_time", str(payload.get("version_id", ""))))
@@ -356,6 +357,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     return self._json(self.server.service.confirm_subject_group_material(
                         run_id, str(payload.get("role", "")), str(payload.get("source_sha256", "")),
                         str(payload.get("confirmed_by", "")), replace_existing=bool(payload.get("replace_existing", False)),
+                        selected_group=str(payload.get("selected_group", "")),
                     ))
                 if action == "subject-group-cancel":
                     return self._json(self.server.service.cancel_subject_group_material(

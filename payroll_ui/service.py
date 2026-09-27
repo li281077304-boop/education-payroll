@@ -592,6 +592,61 @@ class PayrollService(CoreFlow):
         raise ValueError("无法自动判断这份学科组提交表属于哪个学科，请确认文件内容后重试。")
 
     @staticmethod
+    def _selected_groups(run: dict) -> list[str]:
+        """Read canonical group selection, falling back to legacy single-group Runs."""
+        if str(run.get("operator_role") or OPERATOR_DOS) != OPERATOR_SUBJECT_LEADER:
+            return []
+        selected = run.get("selected_groups")
+        values = selected if isinstance(selected, list) else []
+        if not values and run.get("selected_group"):
+            values = [run.get("selected_group")]
+        output = []
+        for value in values:
+            group = str(value or "").strip()
+            if group and group not in output:
+                output.append(group)
+        return output
+
+    @staticmethod
+    def _normalize_selected_groups(operator_role: str, selected_groups: list[str] | None = None,
+                                   selected_group: str = "") -> list[str]:
+        """Validate role-scoped group choices while preserving the single-group API."""
+        if operator_role != OPERATOR_SUBJECT_LEADER:
+            return []
+        values = selected_groups if selected_groups else ([selected_group] if selected_group else [])
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("负责科组必须是科组列表。")
+        groups = []
+        for value in values:
+            group = str(value or "").strip()
+            if group and group not in groups:
+                groups.append(group)
+        if not groups:
+            raise ValueError("学科组长模式请至少选择负责科组（可多选）。")
+        if any(group not in TEACHER_GROUPS for group in groups):
+            raise ValueError("请选择有效的负责科组。")
+        return groups
+
+    @classmethod
+    def _selected_group_for_run(cls, run: dict) -> str:
+        """Only infer a default when the Run has exactly one responsible group."""
+        groups = cls._selected_groups(run)
+        return groups[0] if len(groups) == 1 else ""
+
+    @classmethod
+    def _validate_run_material_group(cls, run: dict, selected_group: str, *, required: bool = True) -> str:
+        group = str(selected_group or "").strip()
+        if not group and run.get("operator_role") == OPERATOR_SUBJECT_LEADER:
+            group = cls._selected_group_for_run(run)
+        if not group and not required:
+            return ""
+        if group not in TEACHER_GROUPS:
+            raise ValueError("请明确选择这份资料所属的有效科组。")
+        if run.get("operator_role") == OPERATOR_SUBJECT_LEADER and group not in cls._selected_groups(run):
+            raise ValueError("这份资料所属科组不在当前学科组长负责范围内。")
+        return group
+
+    @staticmethod
     def _subject_group_role_matches(role: str, subject: str) -> bool:
         value = str(subject or "").strip().lower()
         if role == "math":
@@ -673,15 +728,16 @@ class PayrollService(CoreFlow):
     def _unconfirmed_subject_group_roles(run: dict) -> list[str]:
         pending = run.get("pending_subject_group_imports") or {}
         output: set[str] = set()
-        leader_group = str(run.get("selected_group") or "") if run.get("operator_role") == OPERATOR_SUBJECT_LEADER else ""
+        leader_groups = set(PayrollService._selected_groups(run))
         for role in SCOPE_ROLES:
             source = (run.get("files") or {}).get(role)
             legacy_unconfirmed = bool(source and not PayrollService._subject_group_confirmed(run, role))
             role_group = {"math": "数学组", "science": "理化组"}.get(role, "")
             pending_for_role = [item for key, item in pending.items() if item.get("role", key) == role]
-            if leader_group:
-                legacy_unconfirmed = legacy_unconfirmed and role_group == leader_group
-                pending_for_role = [item for item in pending_for_role if str(item.get("recognized_group") or role_group) == leader_group]
+            if leader_groups:
+                legacy_unconfirmed = legacy_unconfirmed and role_group in leader_groups
+                pending_for_role = [item for item in pending_for_role
+                                    if str(item.get("recognized_group") or role_group) in leader_groups]
             if legacy_unconfirmed or pending_for_role:
                 output.add(role)
         return sorted(output)
@@ -743,7 +799,9 @@ class PayrollService(CoreFlow):
         if len(self._active_subject_group_materials(run)) + len(run.get("pending_subject_group_imports") or {}) >= 64:
             raise ValueError("本次核算最多管理 64 份学科组资料；请先从本次核算移除不再使用的资料。")
         before = version(source)
-        selected_group = str(selected_group or run.get("selected_group") or "").strip()
+        selected_group = self._validate_run_material_group(
+            run, selected_group, required=run.get("operator_role") == OPERATOR_SUBJECT_LEADER,
+        )
         role = self._infer_subject_group_role(source, run, selected_group)
         recognized_group = selected_group or {"math": "数学组", "science": "理化组"}.get(role, "")
         parsed = self._read_csv(role, source, run["period"], period_start=self._period_window(run)[0], period_end=self._period_window(run)[1]) if source.suffix.lower() == ".csv" else self._read_for_run(role, source, run)
@@ -846,7 +904,7 @@ class PayrollService(CoreFlow):
         active_path = str(current_file.get("path") or "")
         candidate_path = str(source)
         candidate = {
-            "candidate_id": hashlib.sha256(f"{run_id}|{role}|{before['sha256']}".encode()).hexdigest()[:16],
+            "candidate_id": hashlib.sha256(f"{run_id}|{role}|{recognized_group}|{before['sha256']}".encode()).hexdigest()[:16],
             "role": role, "source_name": source.name, "source_path": str(source),
             "source_sha256": before["sha256"], "period": run["period"],
             "recognized_role": role, "recognized_group": recognized_group, "source_sheet": source_sheet,
@@ -881,7 +939,7 @@ class PayrollService(CoreFlow):
             "recognized_role": role, "subject_group_preview": candidate,
         }
 
-    def confirm_subject_group_material(self, run_id: str, role: str, source_sha256: str, confirmed_by: str, *, replace_existing: bool = False) -> dict:
+    def confirm_subject_group_material(self, run_id: str, role: str, source_sha256: str, confirmed_by: str, *, replace_existing: bool = False, selected_group: str = "") -> dict:
         """Bind a subject-group workbook only after explicit Run-level confirmation."""
         actor = str(confirmed_by or "").strip()
         if role not in SCOPE_ROLES:
@@ -890,8 +948,12 @@ class PayrollService(CoreFlow):
             raise ValueError("请填写本次学科组提交表确认人。")
         run = self._load(run_id)
         pending_items = run.get("pending_subject_group_imports") or {}
-        pending_key, pending = next(((key, item) for key, item in pending_items.items()
-                                     if item.get("role", key) == role and item.get("source_sha256") == source_sha256), ("", {}))
+        matching_pending = [(key, item) for key, item in pending_items.items()
+                            if item.get("role", key) == role and item.get("source_sha256") == source_sha256
+                            and (not selected_group or str(item.get("recognized_group") or "") == selected_group)]
+        if len(matching_pending) > 1 and not selected_group:
+            raise ValueError("同一来源在多个科组有待确认记录，请明确选择这次确认的科组。")
+        pending_key, pending = matching_pending[0] if matching_pending else ("", {})
         if not pending and any(item.get("source_sha256") == source_sha256 and item.get("period") != run.get("period")
                                and item.get("event") == "PERIOD_CHANGED_BEFORE_CONFIRMATION"
                                for item in run.get("subject_group_pending_history", [])):
@@ -900,6 +962,7 @@ class PayrollService(CoreFlow):
             raise ValueError("学科组预览已变化或仍有重复教师；请重新预览后再确认。")
         if pending.get("period") != run.get("period"):
             raise ValueError("工资月份已变化；请按当前月份重新预览学科组提交表后再确认。")
+        self._validate_run_material_group(run, str(pending.get("recognized_group") or selected_group or ""))
         stale_roles = set(run.get("stale_files") or [])
         allowed_stale = {role}
         if pending.get("replacement_material_id"):
@@ -911,7 +974,9 @@ class PayrollService(CoreFlow):
             raise ValueError("学科组来源文件已变化，请重新预览。")
         current_file = (run.get("files") or {}).get(role) or {}
         active = self._active_subject_group_materials(run)
-        duplicate_source = next((item for item in active if item.get("source_sha256", item.get("sha256")) == source_sha256), None)
+        pending_group = str(pending.get("recognized_group") or "")
+        duplicate_source = next((item for item in active if item.get("source_sha256", item.get("sha256")) == source_sha256
+                                 and str(item.get("recognized_group") or "") == pending_group), None)
         if duplicate_source:
             run.setdefault("pending_subject_group_imports", {}).pop(pending_key, None)
             self.store.save(run)
@@ -960,7 +1025,7 @@ class PayrollService(CoreFlow):
             "teacher_count": pending.get("teacher_count", 0), "record_count": pending.get("record_count", 0),
             "confirmed_by": actor, "confirmed_at": now,
         }
-        material_id = hashlib.sha256(f"{run_id}|{role}|{source_sha256}".encode()).hexdigest()[:20]
+        material_id = hashlib.sha256(f"{run_id}|{role}|{pending_group}|{source_sha256}".encode()).hexdigest()[:20]
         material = {
             "material_id": material_id, "recognized_role": role, "source_name": path.name,
             "recognized_group": pending.get("recognized_group") or {"math": "数学组", "science": "理化组"}.get(role, ""),
@@ -1623,7 +1688,7 @@ class PayrollService(CoreFlow):
         if not any(any(item.sheet == sheet and item.coordinate == cell for item in record.provenance.values()) for record in matching):
             raise ValueError("目标单元格不属于该教师的已识别工资表字段。")
 
-    def create(self, period: str, mode: str = MODE_AUDIT, *, period_start: str = "", period_end: str = "", period_boundary_source: str = "", operator_role: str | None = None, selected_group: str = "") -> dict:
+    def create(self, period: str, mode: str = MODE_AUDIT, *, period_start: str = "", period_end: str = "", period_boundary_source: str = "", operator_role: str | None = None, selected_group: str = "", selected_groups: list[str] | None = None) -> dict:
         if len(period) != 7 or period[4] != "-" or not period.replace("-", "").isdigit() or not 1 <= int(period[5:]) <= 12:
             raise ValueError("请选择有效月份。")
         if mode not in (MODE_AUDIT, MODE_GENERATE):
@@ -1633,10 +1698,8 @@ class PayrollService(CoreFlow):
         selected_group = str(selected_group or "").strip()
         if operator_role not in OPERATOR_ROLES:
             raise ValueError("请选择 DOS / 教学管理者或学科组长角色。")
-        if operator_role == OPERATOR_SUBJECT_LEADER and selected_group not in TEACHER_GROUPS:
-            raise ValueError("学科组长模式请先选择负责科组。")
-        if operator_role == OPERATOR_DOS:
-            selected_group = ""
+        normalized_groups = self._normalize_selected_groups(operator_role, selected_groups, selected_group)
+        selected_group = normalized_groups[0] if len(normalized_groups) == 1 else ""
         versions = [item for item in self.store.list_rating_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         policies = [item for item in self.store.list_policy_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
         class_rules = [item for item in self.class_type_rule_versions() if item.get("status", "ACTIVE") == "ACTIVE" and item["effective_from"] <= period <= item["effective_to"]]
@@ -1658,7 +1721,7 @@ class PayrollService(CoreFlow):
         )
         persisted_salary = self._effective_base_salary_inputs(period)
         persisted_af = self._effective_af_policy(period)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "operator_role": operator_role, "selected_group": selected_group, "part_time_payroll_mode": "GROUP_SUBMISSION_ONLY" if production_role_selection else "LEGACY_COMPATIBILITY", "salary_basis_confirmations": {}, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "subject_group_materials": [], "subject_group_candidates": [], "historical_salary_reference_snapshots": [], "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": persisted_af, "base_salary_inputs": persisted_salary, "base_salary_input_snapshot": self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None, "historical_salary_reference_snapshot": None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([]), "support_department_pending_preview": None, "support_department_snapshot": None, "teacher_group_pending_preview": None}
+        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "operator_role": operator_role, "selected_group": selected_group, "selected_groups": normalized_groups, "part_time_payroll_mode": "GROUP_SUBMISSION_ONLY" if production_role_selection else "LEGACY_COMPATIBILITY", "salary_basis_confirmations": {}, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "subject_group_materials": [], "subject_group_candidates": [], "historical_salary_reference_snapshots": [], "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": persisted_af, "base_salary_inputs": persisted_salary, "base_salary_input_snapshot": self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None, "historical_salary_reference_snapshot": None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([]), "support_department_pending_preview": None, "support_department_snapshot": None, "teacher_group_pending_preview": None}
         self._bind_new_calculation(run)
         if explicit_window:
             # The caller stated the window explicitly; it outranks any stored
@@ -1750,14 +1813,15 @@ class PayrollService(CoreFlow):
         operator_role = str(run.get("operator_role") or OPERATOR_DOS)
         if operator_role != OPERATOR_SUBJECT_LEADER:
             return {
-                "operator_role": OPERATOR_DOS, "selected_group": "", "scope_kind": "FULL_DEPARTMENT",
+                "operator_role": OPERATOR_DOS, "selected_group": "", "selected_groups": [], "scope_kind": "FULL_DEPARTMENT",
                 "teachers": canonical, "teacher_ids": [str(item.get("teacher_id") or item.get("display_name") or "") for item in canonical],
                 "candidate_count": len(canonical), "scope_count": len(canonical),
                 "canonical_roster_count": len(canonical), "outside_roster": [], "sources": ["CURRENT_PERIOD_SCHEDULE"],
             }
-        selected_group = str(run.get("selected_group") or "").strip()
-        if selected_group not in TEACHER_GROUPS:
-            return {"operator_role": OPERATOR_SUBJECT_LEADER, "selected_group": selected_group,
+        selected_groups = self._selected_groups(run)
+        if not selected_groups or any(group not in TEACHER_GROUPS for group in selected_groups):
+            return {"operator_role": OPERATOR_SUBJECT_LEADER, "selected_group": str(run.get("selected_group") or ""),
+                    "selected_groups": selected_groups,
                     "scope_kind": "GROUP_NOT_SELECTED", "teachers": [], "teacher_ids": [],
                     "candidate_count": 0, "scope_count": 0, "canonical_roster_count": len(canonical),
                     "outside_roster": [], "sources": []}
@@ -1773,7 +1837,7 @@ class PayrollService(CoreFlow):
             sources_by_key.setdefault(key, set()).add(source)
 
         for profile in self._teacher_group_authority(run["period"]).values():
-            if str(profile.get("group") or "") == selected_group:
+            if str(profile.get("group") or "") in selected_groups:
                 add(str(profile.get("teacher_id") or ""), str(profile.get("teacher") or ""), "CONFIRMED_TEACHER_GROUP")
         references = list(run.get("historical_salary_reference_snapshots") or [])
         legacy_reference = run.get("historical_salary_reference_snapshot") or {}
@@ -1781,12 +1845,12 @@ class PayrollService(CoreFlow):
             references.append(legacy_reference)
         for reference in references:
             membership = reference.get("group_membership") or {}
-            if str(membership.get("group") or "") == selected_group and membership.get("confirmed"):
+            if str(membership.get("group") or "") in selected_groups and membership.get("confirmed"):
                 for entry in membership.get("members", []):
                     add(str(entry.get("teacher_id") or ""), str(entry.get("teacher") or entry.get("display_name") or ""), f"CONFIRMED_HISTORY_REFERENCE_MEMBERSHIP:{reference.get('source_sha256', '')}")
         for material in self._active_subject_group_materials(run):
             material_group = str(material.get("recognized_group") or {"math": "数学组", "science": "理化组"}.get(str(material.get("recognized_role") or ""), ""))
-            if material_group != selected_group:
+            if material_group not in selected_groups:
                 continue
             for teacher in material.get("teacher_names", []):
                 add("", str(teacher), f"CONFIRMED_GROUP_MATERIAL:{material.get('material_id', '')}")
@@ -1806,7 +1870,9 @@ class PayrollService(CoreFlow):
                                 "reason": "历史/提交资料属于所选组，但该教师不在本人工月排课 Roster；不新增工资行。"})
         teachers = sorted(included.values(), key=lambda item: str(item.get("display_name") or ""))
         return {
-            "operator_role": operator_role, "selected_group": selected_group, "scope_kind": "SUBJECT_GROUP",
+            "operator_role": operator_role,
+            "selected_group": selected_groups[0] if len(selected_groups) == 1 else "",
+            "selected_groups": selected_groups, "scope_kind": "SUBJECT_GROUP",
             "teachers": teachers, "teacher_ids": list(included), "candidate_count": len(candidates),
             "scope_count": len(teachers), "canonical_roster_count": len(canonical),
             "outside_roster": outside,
@@ -2238,7 +2304,7 @@ class PayrollService(CoreFlow):
             key = str(row.get("teacher_id") or row["display_name"])
             salary_basis.append({
                 "id": uuid.uuid4().hex[:16], "teacher_id": key, "teacher": row["display_name"],
-                "group": str(update.get("group") or (self._teacher_group_authority(run["period"]).get(key) or {}).get("group") or run.get("selected_group") or ""),
+                "group": str(update.get("group") or (self._teacher_group_authority(run["period"]).get(key) or {}).get("group") or self._selected_group_for_run(run) or ""),
                 "effective_from": "0000-00", "effective_to": "9999-12", "status": "ACTIVE",
                 "salary_basis": state, "source": "USER_CONFIRMED_SALARY_BASIS",
                 "reason": str(update.get("reason") or "负责人确认本组底薪/按课时来源状态。"),
@@ -2688,9 +2754,7 @@ class PayrollService(CoreFlow):
         self._require_fresh(run)
         source = Path(path).expanduser().resolve()
         facts = self._roster_facts(run)
-        selected_group = str(selected_group or run.get("selected_group") or "").strip()
-        if selected_group not in TEACHER_GROUPS:
-            raise ValueError("导入历史工资参考前，请先选择这份资料所属的科组。")
+        selected_group = self._validate_run_material_group(run, selected_group)
         preview = preview_base_salary(source, run["period"], [], reference_only=True)
         preview["source_name"] = source.name
         roster_by_id = {str(item.get("teacher_id") or ""): item for item in facts["teachers"] if item.get("teacher_id")}
@@ -2880,9 +2944,7 @@ class PayrollService(CoreFlow):
         before = source_fingerprint(source)
         if not expected_sha256 or before["sha256"] != expected_sha256:
             raise ValueError("历史工资数据文件已变化，请重新预览后再确认导入。")
-        selected_group = str(selected_group or "").strip()
-        if selected_group not in TEACHER_GROUPS:
-            raise ValueError("请选择这份历史工资参考所属的科组。")
+        selected_group = self._validate_run_material_group(run, selected_group)
         pending_preview = run.get("historical_salary_reference_pending_preview") or {}
         if (pending_preview.get("status") == "PENDING_CONFIRMATION"
                 and pending_preview.get("source_sha256") == expected_sha256
@@ -2984,6 +3046,13 @@ class PayrollService(CoreFlow):
         legacy_reference = run.get("historical_salary_reference_snapshot") or {}
         if legacy_reference and all(item.get("source_sha256") != legacy_reference.get("source_sha256") for item in references):
             references.append(legacy_reference)
+        if not selected_group and run.get("operator_role") != OPERATOR_SUBJECT_LEADER:
+            selected_group = next((str(item.get("selected_group") or (item.get("group_membership") or {}).get("group") or "")
+                                   for item in references if item.get("source_sha256") == source_sha256), "")
+        if run.get("operator_role") == OPERATOR_SUBJECT_LEADER:
+            selected_group = self._validate_run_material_group(run, selected_group)
+        elif selected_group and selected_group not in TEACHER_GROUPS:
+            raise ValueError("历史工资参考所属科组无效，请重新选择。")
         reference = next((item for item in references if item.get("source_sha256") == source_sha256
                           and (not selected_group or str(item.get("selected_group") or (item.get("group_membership") or {}).get("group") or "") == selected_group)), {})
         if not actor:
@@ -3359,7 +3428,8 @@ class PayrollService(CoreFlow):
     def get(self, run_id: str) -> dict:
         return self.render(self._load(run_id))
 
-    def select_legacy_run_operator(self, run_id: str, operator_role: str, selected_group: str, confirmed_by: str) -> dict:
+    def select_legacy_run_operator(self, run_id: str, operator_role: str, selected_group: str, confirmed_by: str,
+                                   selected_groups: list[str] | None = None) -> dict:
         """Attach new workflow metadata to an old Run without recalculating it."""
         run = self.store.get(run_id)
         role = str(operator_role or "").strip().upper()
@@ -3367,15 +3437,15 @@ class PayrollService(CoreFlow):
         actor = str(confirmed_by or "").strip()
         if role not in OPERATOR_ROLES:
             raise ValueError("请选择按 DOS 或学科组长继续。")
-        if role == OPERATOR_SUBJECT_LEADER and group not in TEACHER_GROUPS:
-            raise ValueError("学科组长模式请先选择负责科组。")
+        groups = self._normalize_selected_groups(role, selected_groups, group)
+        group = groups[0] if len(groups) == 1 else ""
         if not actor:
             raise ValueError("请填写确认人。")
         if run.get("operator_role") and run.get("part_time_payroll_mode") not in (None, "", "LEGACY_COMPATIBILITY"):
             raise ValueError("当前 Run 已有正式流程角色，无需重复选择。")
         now = datetime.now(timezone.utc).isoformat()
         run.update({
-            "operator_role": role, "selected_group": group if role == OPERATOR_SUBJECT_LEADER else "",
+            "operator_role": role, "selected_group": group, "selected_groups": groups,
             "part_time_payroll_mode": "GROUP_SUBMISSION_ONLY",
             "workflow_role_selected_by": actor, "workflow_role_selected_at": now,
             "workflow_role_migration": "LEGACY_RUN_EXPLICIT_SELECTION/v1",
@@ -5403,7 +5473,7 @@ class PayrollService(CoreFlow):
         unconfirmed_group_roles = self._unconfirmed_subject_group_roles(run)
         if unconfirmed_group_roles:
             if run.get("operator_role") == OPERATOR_SUBJECT_LEADER:
-                labels = str(run.get("selected_group") or "所选科组")
+                labels = "、".join(self._selected_groups(run)) or "所选科组"
             else:
                 pending_labels = [str(item.get("recognized_group") or LABELS.get(item.get("role"), "学科组"))
                                   for item in (run.get("pending_subject_group_imports") or {}).values()]
@@ -5451,6 +5521,7 @@ class PayrollService(CoreFlow):
         run["processing_scope_snapshot"] = {
             "operator_role": processing_scope.get("operator_role"),
             "selected_group": processing_scope.get("selected_group"),
+            "selected_groups": list(processing_scope.get("selected_groups") or []),
             "scope_kind": processing_scope.get("scope_kind"),
             "scope_count": processing_scope.get("scope_count", 0),
             "canonical_roster_count": processing_scope.get("canonical_roster_count", len(canonical_teachers)),
@@ -5462,7 +5533,8 @@ class PayrollService(CoreFlow):
         }
         scope_teachers = {str(item.get("display_name") or "") for item in processing_scope.get("teachers", []) if item.get("display_name")}
         if processing_scope.get("operator_role") == OPERATOR_SUBJECT_LEADER and not scope_teachers:
-            raise ValueError(f"当前尚未确认任何属于{processing_scope.get('selected_group') or '所选科组'}的本月教师；请先在教师名单与归属中确认范围。")
+            groups_label = "、".join(processing_scope.get("selected_groups") or []) or "所选科组"
+            raise ValueError(f"当前尚未确认任何属于{groups_label}的本月教师；请先在教师名单与归属中确认范围。")
         payroll, _ = self._payroll_records(reads, schedule_teachers={item["display_name"] for item in canonical_teachers if item.get("display_name")})
         payroll = [item for item in payroll if item.teacher in scope_teachers]
         payroll, group_conflicts = self._merge_subject_group_records(payroll)
@@ -5807,7 +5879,8 @@ class PayrollService(CoreFlow):
         # Generate mode computes the payroll itself, so it must never be forced.
         active_groups = PayrollService._active_subject_group_materials(run)
         if run.get("operator_role") == OPERATOR_SUBJECT_LEADER:
-            active_groups = [item for item in active_groups if str(item.get("recognized_group") or {"math": "数学组", "science": "理化组"}.get(str(item.get("recognized_role") or ""), "")) == str(run.get("selected_group") or "")]
+            selected_groups = set(PayrollService._selected_groups(run))
+            active_groups = [item for item in active_groups if str(item.get("recognized_group") or {"math": "数学组", "science": "理化组"}.get(str(item.get("recognized_role") or ""), "")) in selected_groups]
         if run.get("mode", MODE_AUDIT) == MODE_AUDIT and not active_groups:
             missing.append("至少一张教师提交表")
         return missing
@@ -6972,8 +7045,11 @@ class PayrollService(CoreFlow):
         policy = self._policy_version_for_run(run)
         schedule = run.get("files", {}).get("schedule")
         class_rules, class_rule_version_id = self._class_type_rules_for_run(run)
+        selected_groups = self._selected_groups(run)
         return {
             **run, **window,
+            "selected_groups": selected_groups,
+            "selected_group": selected_groups[0] if len(selected_groups) == 1 else "",
             "operator_selection_required": not bool(run.get("operator_role")) or run.get("part_time_payroll_mode") in (None, ""),
             "workflow_notice": "旧流程记录，请选择按 DOS 或学科组长继续。" if (not run.get("operator_role") or run.get("part_time_payroll_mode") in (None, "")) else "",
             "period_display": {"label": window["period_label"], "start": window["period_start"], "end": window["period_end"], "boundary_source": window["period_boundary_source"]},
