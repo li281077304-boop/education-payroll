@@ -30,6 +30,8 @@ The new bundle starts through an app-relative bootstrap that validates configura
 
 - Focused fifth-round and affected regression tests: 192 passed before the full suite.
 - Full required suite: `sh tools/run_tests.sh` — 583 passed.
+- GitHub Actions run #12 failed because the Ubuntu runner's `plutil` is not the macOS JSON-capable implementation used by the bundle. The test harness now injects an equivalent config reader; production bootstrap behavior is unchanged.
+- GitHub Actions run #13: PASS, run ID `36295434751`, commit `355a10afd41b3fff76da021b608c045ac248b485`.
 - Launcher shell syntax check: PASS.
 - `git diff --check`: PASS.
 

@@ -51,6 +51,15 @@
     "passed": 583,
     "failed": 0
   },
+  "github_actions": {
+    "failed_run_before_test_harness_fix": 12,
+    "failure_reason": "ubuntu-plutil-does-not-parse-json-like-macos",
+    "production_bootstrap_changed_for_ci": false,
+    "passing_run": 13,
+    "run_id": 36295434751,
+    "commit": "355a10afd41b3fff76da021b608c045ac248b485",
+    "conclusion": "success"
+  },
   "frozen_scope": {
     "part_time": "OPEN",
     "AG": "OPEN",
