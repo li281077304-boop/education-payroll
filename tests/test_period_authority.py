@@ -17,6 +17,7 @@ from payroll_core.period import (
     period_authority_summary,
 )
 from payroll_ui.service import PayrollService
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 
 SCHEDULE_HEADERS = ["teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"]
 PAYROLL_HEADERS = ["teacher", "one_to_one", "class_value", "production", "ae", "af", "av"]
@@ -49,7 +50,7 @@ def _august_days() -> list[str]:
 def _import_materials(service: PayrollService, run_id: str, tmp_path, schedule_path, name=None):
     """Import the minimum material set the generate flow needs."""
     service.import_file(run_id, "schedule", str(schedule_path))
-    service.import_file(run_id, "math", str(_payroll(tmp_path, name or "math-2026-08.csv")))
+    import_confirmed_subject_group(service, run_id, "math", _payroll(tmp_path, name or "math-2026-08.csv"))
     return service
 
 

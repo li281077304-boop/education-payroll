@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import csv
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
@@ -10,10 +12,16 @@ from payroll_core.payroll_generation import generated_from_calculation
 from payroll_ui.service import PayrollService
 
 
-def _run_with_roster(service: PayrollService, period: str = "2026-08") -> dict:
+def _run_with_roster(service: PayrollService, period: str = "2026-08", *, teacher: str = "教师甲", teacher_id: str = "teacher-1") -> dict:
     created = service.create(period, "GENERATE")
+    schedule = Path(service.store.path).parent / f"{created['id']}-schedule.csv"
+    with schedule.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["teacher_id", "teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"])
+        writer.writerow([teacher_id, teacher, "九年级", "数学", "1对1", 1, "已上课", f"{period}-05 10:00"])
+    service.import_file(created["id"], "schedule", str(schedule))
     stored = service.store.get(created["id"])
-    stored["core_calculation"] = {"rows": [{"teacher": "教师甲", "teacher_id": "teacher-1"}]}
+    stored["core_calculation"] = {"rows": [{"teacher": teacher, "teacher_id": teacher_id}]}
     service.store.save(stored)
     return stored
 
@@ -118,7 +126,7 @@ def test_monthly_renewal_import_is_visible_but_wage_fields_require_confirmation(
 
 
 def _part_time_run(service: PayrollService, teacher: str = "测试兼职教师") -> dict:
-    run = _run_with_roster(service)
+    run = _run_with_roster(service, teacher=teacher, teacher_id=teacher)
     stored = service.store.get(run["id"])
     stored["core_calculation"] = {"rows": [{"teacher": teacher, "teacher_id": teacher}]}
     service.store.save(stored)

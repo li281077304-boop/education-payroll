@@ -242,6 +242,9 @@ def _service_with_compensation_pair(tmp_path):
         "schedule": {"path": str(schedule), **version(schedule)},
         "math": {"path": str(target), **version(target)},
     }
+    run["subject_group_confirmations"] = {
+        "math": {"status": "CONFIRMED", "period": "2026-08", "source_sha256": version(target)["sha256"], "confirmed_by": "synthetic fixture"},
+    }
     run["status"] = "REVIEW_REQUIRED"
     run["field_records"] = [
         _record("service-rate", "rate", expected=42, actual=32, status="RATE_MISMATCH"),
@@ -338,6 +341,9 @@ def test_grouped_ae_af_service_decision_survives_actual_rerun_and_restart(tmp_pa
     stored["files"] = {
         "schedule": {"path": str(schedule_file), **version(schedule_file)},
         "math": {"path": str(payroll_file), **version(payroll_file)},
+    }
+    stored["subject_group_confirmations"] = {
+        "math": {"status": "CONFIRMED", "period": "2026-08", "source_sha256": version(payroll_file)["sha256"], "confirmed_by": "synthetic fixture"},
     }
     stored["status"] = "FILES_READY"
     service.store.save(stored)

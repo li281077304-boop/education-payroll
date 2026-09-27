@@ -2,6 +2,7 @@ from openpyxl import load_workbook
 from openpyxl.comments import Comment
 
 from tests.test_payroll_ui_service import _prepared_run_with_values
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 
 
 def _class_issue(checked: dict) -> dict:
@@ -13,7 +14,7 @@ def _replace_science_comment(service, run, science, text: str) -> None:
     sheet = workbook.active
     sheet["AC5"].comment = Comment(text, "审核人")
     workbook.save(science)
-    service.import_file(run["id"], "science", str(science))
+    import_confirmed_subject_group(service, run["id"], "science", science)
 
 
 def test_ac_detail_values_sum_exactly_to_existing_system_ac(tmp_path):

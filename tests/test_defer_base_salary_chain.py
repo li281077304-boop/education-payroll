@@ -14,6 +14,7 @@ import csv
 import pytest
 
 from payroll_ui.service import PayrollService
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 
 SCHEDULE_HEADERS = ["teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"]
 PAYROLL_HEADERS = ["teacher", "one_to_one", "class_value", "production", "ae", "af", "av"]
@@ -36,7 +37,7 @@ def _run_with_materials(tmp_path, period: str = "2026-08") -> tuple[PayrollServi
     )
     payroll = _write_csv(tmp_path / "math.csv", PAYROLL_HEADERS, [["教师甲", 40, 0, 40, 30, 300, 0]])
     service.import_file(run["id"], "schedule", str(schedule))
-    service.import_file(run["id"], "math", str(payroll))
+    import_confirmed_subject_group(service, run["id"], "math", payroll)
     return service, service.get(run["id"])
 
 

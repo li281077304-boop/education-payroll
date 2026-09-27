@@ -313,11 +313,21 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action in {"core-rules", "part-time-rates"}:
                     return self._json(self.server.service.rebind_calculation(run_id, "core" if action == "core-rules" else "part_time", str(payload.get("version_id", ""))))
                 if action == "files":
-                    return self._json(self.server.service.import_file(run_id, str(payload.get("role", "")), str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
+                    role = str(payload.get("role", ""))
+                    if role in {"math", "science"}:
+                        return self._error("学科组提交表必须先预览并由负责人确认后，才会用于本月工资。", HTTPStatus.CONFLICT)
+                    return self._json(self.server.service.import_file(run_id, role, str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
                 if action == "package":
                     return self._json(self.server.service.import_package(run_id, str(payload.get("path", ""))))
                 if action == "material":
                     return self._json(self.server.service.import_material_file(run_id, str(payload.get("kind", "auto")), str(payload.get("path", ""))))
+                if action == "subject-group-confirm":
+                    return self._json(self.server.service.confirm_subject_group_material(
+                        run_id, str(payload.get("role", "")), str(payload.get("source_sha256", "")),
+                        str(payload.get("confirmed_by", "")), replace_existing=bool(payload.get("replace_existing", False)),
+                    ))
+                if action == "subject-group-cancel":
+                    return self._json(self.server.service.cancel_subject_group_material(run_id, str(payload.get("role", ""))))
                 if action == "grade-history":
                     return self._json(self.server.service.import_grade_history_for_run(run_id, str(payload.get("path", "")), payload.get("sha256")))
                 if action == "grade-confirmations":

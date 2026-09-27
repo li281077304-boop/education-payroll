@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 
 from payroll_ui.server import PayrollHttpServer
 from payroll_ui.service import PayrollService
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 from payroll_ui.core_flow import CoreFlow
 from payroll_core.models.records import PayrollRecord
 from payroll_core.reconcile.payroll_scope import FieldCheck
@@ -331,8 +332,9 @@ def _prepared_run(tmp_path: Path):
     science = tmp_path / "science.xlsx"; _payroll_with_only(science, 6)
     service = PayrollService(tmp_path / "app-data")
     run = service.create("2026-08")
-    for role, path in (("schedule", schedule), ("math", math), ("science", science)):
-        run = service.import_file(run["id"], role, str(path))
+    run = service.import_file(run["id"], "schedule", str(schedule))
+    for role, path in (("math", math), ("science", science)):
+        run = import_confirmed_subject_group(service, run["id"], role, path)
     return service, run, schedule
 
 
@@ -354,8 +356,9 @@ def _prepared_run_with_values(tmp_path: Path, one_to_one: float = 36, class_valu
     _payroll_with_only_from(source, science, 6)
     service = PayrollService(tmp_path / "app-data")
     run = service.create("2026-08")
-    for role, path in (("schedule", schedule), ("math", math), ("science", science)):
-        run = service.import_file(run["id"], role, str(path))
+    run = service.import_file(run["id"], "schedule", str(schedule))
+    for role, path in (("math", math), ("science", science)):
+        run = import_confirmed_subject_group(service, run["id"], role, path)
     return service, run, schedule, math, science
 
 
@@ -381,7 +384,7 @@ def test_ui_run_never_passes_when_ae_af_av_have_no_independent_authority(tmp_pat
     assert states["av"] == "仅读取 / 待人工确认"
 
 
-def test_ui_does_not_treat_other_subject_teachers_in_a_campus_schedule_export_as_missing_targets(tmp_path):
+def test_roster_includes_other_subject_teachers_in_a_campus_schedule_export(tmp_path):
     service, run, schedule = _prepared_run(tmp_path)
     book = load_workbook(schedule)
     sheet = book.active
@@ -392,7 +395,8 @@ def test_ui_does_not_treat_other_subject_teachers_in_a_campus_schedule_export_as
 
     result = service.check(run["id"])
 
-    assert not any(item["teacher"] == "无关教师" and item["status"] == "MISSING_TARGET" for item in result["issues"])
+    assert "无关教师" in {item["display_name"] for item in result["roster_facts"]["teachers"]}
+    assert any(item["teacher"] == "无关教师" for item in result["issues"])
 
 
 def test_generate_mode_excludes_payroll_reconciliation_issues(tmp_path):
@@ -421,7 +425,7 @@ def test_generate_preview_without_optional_baseline_does_not_use_uninitialized_e
     service = PayrollService(tmp_path / "app-data")
     run = service.create("2026-08", mode="GENERATE")
     service.import_file(run["id"], "schedule", str(schedule))
-    service.import_file(run["id"], "math", str(math))
+    import_confirmed_subject_group(service, run["id"], "math", math)
 
     preview = service.preview_payroll(run["id"])
 
@@ -541,8 +545,11 @@ def test_loopback_fixture_flow_keeps_an_unexplained_difference_visible(tmp_path)
     try:
         token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
         run = _post_json(base, token, "/api/runs", {"period": "2026-08"})
-        for role, file_path in (("schedule", schedule), ("math", math), ("science", science)):
-            run = _post_json(base, token, f"/api/runs/{run['id']}/files", {"role": role, "path": str(file_path)})
+        run = _post_json(base, token, f"/api/runs/{run['id']}/files", {"role": "schedule", "path": str(schedule)})
+        for role, file_path in (("math", math), ("science", science)):
+            preview = _post_json(base, token, f"/api/runs/{run['id']}/material", {"kind": "subject_group", "path": str(file_path)})
+            item = preview["subject_group_preview"]
+            run = _post_json(base, token, f"/api/runs/{run['id']}/subject-group-confirm", {"role": role, "source_sha256": item["source_sha256"], "confirmed_by": "脱敏 UAT 确认人"})["run"]
         checked = _post_json(base, token, f"/api/runs/{run['id']}/check", {})
         issue = next(item for item in checked["issues"] if item["field"] == "one_to_one")
         assert checked["status"] == "REVIEW_REQUIRED"
@@ -647,10 +654,15 @@ def test_stale_file_blocks_old_results_and_reimport_recovers(tmp_path):
 
 
 def test_check_failure_returns_to_a_recoverable_material_state(tmp_path):
-    service, run, *_ = _prepared_run_with_values(tmp_path, one_to_one=36, class_value=2.4)
-    duplicate = tmp_path / "duplicate.xlsx"
+    service, run, schedule, *_ = _prepared_run_with_values(tmp_path, one_to_one=36, class_value=2.4)
+    schedule_book = load_workbook(schedule)
+    schedule_book.active.append(["高一物理课", "集体课程", "集体班", "测试校区", "2026-08-08 10:00~12:00", "2小时", "已上课", "张三", 2, 2, "学生丙", "物理", "线下课", "测试教室", "张三"])
+    schedule_book.save(schedule)
+    service.import_file(run["id"], "schedule", str(schedule))
+    duplicate = tmp_path / "science-duplicate.xlsx"
     _payroll_with_only(duplicate, 5)
-    service.import_file(run["id"], "science", str(duplicate))
+    preview = service.preview_subject_group_material(run["id"], str(duplicate))["subject_group_preview"]
+    service.confirm_subject_group_material(run["id"], "science", preview["source_sha256"], "脱敏 UAT 确认人", replace_existing=True)
 
     try:
         service.check(run["id"])
@@ -710,7 +722,8 @@ def test_user_facing_auto_material_import_classifies_schedule_and_subject_group(
     assert payroll_result["material_kind"] == "subject_group"
     assert payroll_result["recognized_role"] == "math"
     assert saved["files"]["schedule"]["name"] == schedule.name
-    assert saved["files"]["math"]["name"] == payroll.name
+    assert "math" not in saved["files"]
+    assert saved["pending_subject_group_imports"]["math"]["source_name"] == payroll.name
 
 
 def test_subject_group_does_not_become_company_template_implicitly(tmp_path, monkeypatch):
@@ -846,7 +859,9 @@ def test_one_submission_sheet_is_enough_to_start_a_group_run(tmp_path):
     math = tmp_path / "math.xlsx"; _payroll_with_only(math, 5)
     run = service.create("2026-08")
     service.import_file(run["id"], "schedule", str(schedule))
-    ready = service.import_file(run["id"], "math", str(math))
+    preview = service.preview_subject_group_material(run["id"], str(math))["subject_group_preview"]
+    assert "math" not in service.store.get(run["id"])["files"]
+    ready = service.confirm_subject_group_material(run["id"], "math", preview["source_sha256"], "脱敏 UAT 确认人")["run"]
 
     assert ready["status"] == "FILES_READY"
     assert ready["health"]["ready"] is True
@@ -880,7 +895,7 @@ def test_generate_mode_keeps_submitted_sheet_formula_defects_as_advisory(tmp_pat
     math = tmp_path / "math.xlsx"
     copyfile(FIXTURES / "fake_payroll.xlsx", math)
     service.import_file(run["id"], "schedule", str(schedule))
-    service.import_file(run["id"], "math", str(math))
+    import_confirmed_subject_group(service, run["id"], "math", math)
     finding = SimpleNamespace(status="FORMULA_MISSING", field="AF 总课时费", sheet="Sheet1", cell="AF6", evidence="公式缺失")
     monkeypatch.setattr(service, "_formula_audit_for_scope", lambda _path, _rows: [finding])
 
@@ -896,9 +911,9 @@ def test_no_deduction_profile_allows_the_matching_af_formula_exception(tmp_path)
     math = tmp_path / "math.xlsx"; _payroll_with_only(math, 5)
     run = service.create("2026-08")
     service.import_file(run["id"], "schedule", str(schedule))
-    service.import_file(run["id"], "math", str(math))
+    import_confirmed_subject_group(service, run["id"], "math", math)
     baseline = tmp_path / "baseline.xlsx"; copyfile(FIXTURES / "fake_payroll.xlsx", baseline)
-    book = load_workbook(baseline); book.active["AF6"] = "=(AD6-30)*AE6"; book.save(baseline)
+    book = load_workbook(baseline); book.active["AF5"] = "=(AD5-30)*AE5"; book.save(baseline)
     service.import_file(run["id"], "baseline", str(baseline))
     policy = service.save_policy_version(
         "2025-10", "2026-09", "脱敏例外政策", [{

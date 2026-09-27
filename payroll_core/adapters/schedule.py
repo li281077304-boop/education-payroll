@@ -22,6 +22,15 @@ def _lesson_date(value: str) -> str:
     return ""
 
 
+def _teacher_id(row: dict[str, str]) -> str:
+    aliases = {"teacherid", "教师id", "教师编号", "工号", "员工编号"}
+    for header, value in row.items():
+        normalized = "".join(str(header or "").strip().replace("\u3000", " ").split()).replace("_", "").replace("-", "").lower()
+        if normalized in aliases and str(value or "").strip():
+            return str(value).strip()
+    return ""
+
+
 def read_schedule_csv_result(
     path: str | Path,
     period: str,
@@ -68,6 +77,7 @@ def read_schedule_csv_result(
             lesson_time=lesson_time,
             lesson_date=lesson_date,
             source=str(path),
+            teacher_id=_teacher_id(row),
         )
         )
     if unparseable_attended:

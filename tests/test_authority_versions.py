@@ -14,6 +14,9 @@ def _seed_run(service: PayrollService, root: Path) -> dict:
         "schedule": {"path": str(schedule), **version(schedule)},
         "math": {"path": str(target), **version(target)},
     }
+    stored["subject_group_confirmations"] = {
+        "math": {"status": "CONFIRMED", "period": "2026-08", "source_sha256": version(target)["sha256"], "confirmed_by": "synthetic fixture"},
+    }
     stored["status"] = "REVIEW_REQUIRED"
     stored["field_records"] = [
         {"id": "rate", "teacher": "教师甲", "field": "rate", "field_label": "AE", "title": "AE", "expected": 42, "actual": 32, "difference": -10, "status": "RATE_MISMATCH", "status_label": "档位金额不一致", "severity_rank": 1, "severity_label": "重要", "reason": "synthetic"},

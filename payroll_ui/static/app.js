@@ -1011,8 +1011,27 @@ function productionMaterialCards() {
 }
 
 function subjectGroupCard(files) {
-  const names = files.map((item) => `<div class="file-name">✓ ${escapeHtml(item.file.name)} <span class="small muted">已识别</span></div>`).join("");
-  return `<article class="material-card material-group-card"><div class="material-top"><strong>学科组提交表</strong><span class="muted">可提供一份或多份</span></div><p class="small muted">拖入或粘贴工资表后，系统会根据表内教师与排课内容自动识别所属学科组。</p><div data-drop-role="subject_group" tabindex="0" role="button" aria-label="拖入学科组提交表文件" class="drop-zone" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer">拖入 Excel 文件，或直接粘贴</div>${names || '<div class="empty compact">尚未选择文件</div>'}<button class="secondary full" onclick="choose('subject_group')">选择学科组提交表</button></article>`;
+  const names = files.map((item) => {
+    const role = item.role;
+    const label = role === "math" ? "数学组" : "理化组";
+    const status = item.confirmed_for_run ? "已确认用于本月工资" : "待人工确认，不会进入工资";
+    const action = item.confirmed_for_run ? "" : `<button class="secondary" onclick="previewExistingSubjectGroup('${escapeHtml(role)}')">预览并确认当前资料</button>`;
+    return `<div class="file-name">${escapeHtml(label)} · ${escapeHtml(item.file.name)} <span class="small ${item.confirmed_for_run ? "ok" : "warn"}">${status}</span>${action}</div>`;
+  }).join("");
+  const pending = current.pending_subject_group_imports || {};
+  const candidateCards = Object.entries(pending).map(([role, item]) => {
+    const label = role === "math" ? "数学组" : "理化组";
+    if (item.preview_required) {
+      return `<section class="banner warn"><strong>${escapeHtml(label)}资料等待确认</strong><span>${escapeHtml(item.source_name || "已导入的旧版本")}；此资料当前不会参与本月工资。请先查看完整预览。</span><div class="action-bar"><button onclick="previewExistingSubjectGroup('${escapeHtml(role)}')">预览并确认</button><button class="secondary" onclick="cancelSubjectGroup('${escapeHtml(role)}')">取消这份未确认资料</button></div></section>`;
+    }
+    const matched = item.matched || [];
+    const outside = item.outside_roster || [];
+    const missing = item.possible_missing || [];
+    const replacement = item.replacement_required ? "当前已有已确认版本；只有确认替换后新文件才会生效。" : "确认前，这份预览不会改变工资或教师名单。";
+    const lists = `${matched.length ? `<details><summary>匹配排课教师 ${matched.length} 人</summary><p>${matched.map((x) => escapeHtml(x.teacher)).join("、")}</p></details>` : ""}${outside.length ? `<details><summary>表中有但本月排课没有 ${outside.length} 人</summary><p>${outside.map((x) => `${escapeHtml(x.teacher)}：${escapeHtml(x.reason)}`).join("<br>")}</p></details>` : ""}${missing.length ? `<details><summary>该组排课教师但表中没有 ${missing.length} 人</summary><p>${missing.map((x) => `${escapeHtml(x.teacher)}（${escapeHtml((x.subjects || []).join("、"))}）`).join("、")}</p></details>` : ""}${(item.duplicate_teacher_names || []).length ? `<p class="small bad">存在重复教师行：${item.duplicate_teacher_names.map(escapeHtml).join("、")}</p>` : ""}`;
+    return `<section class="card subject-group-preview"><div class="section-head"><div><p class="eyebrow">资料预览</p><h3>${escapeHtml(label)} · ${escapeHtml(item.source_name)}</h3><p class="small muted">识别学科组：${escapeHtml(label)} · 工资月份：${escapeHtml(item.period)} · 工作表：${escapeHtml(item.source_sheet || "—")} · 教师 ${escapeHtml(item.teacher_count)} 人 · 记录 ${escapeHtml(item.record_count)} 条 · 文件标识 ${escapeHtml(String(item.source_sha256 || "").slice(0, 10))}</p></div><span class="status warn">待确认</span></div><p class="small muted">${replacement}</p>${lists}<label>确认人<input id="subject-group-confirmed-by-${escapeHtml(role)}" placeholder="填写本次确认人"></label><div class="action-bar"><button ${item.can_confirm ? "" : "disabled"} onclick="confirmSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}',${item.replacement_required ? "true" : "false"})">${item.replacement_required ? "确认使用新版本替换" : "确认这份学科组表用于本月工资"}</button><button class="secondary" onclick="cancelSubjectGroup('${escapeHtml(role)}')">取消</button></div></section>`;
+  }).join("");
+  return `<article class="material-card material-group-card"><div class="material-top"><strong>学科组提交表</strong><span class="muted">资料只在负责人确认后进入本月工资</span></div><p class="small muted">系统会根据排课表建议识别学科组。确认前不会修改工资结果或教师名单。</p><div data-drop-role="subject_group" tabindex="0" role="button" aria-label="拖入学科组提交表文件" class="drop-zone" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer">拖入 Excel 文件，或直接粘贴</div>${names || '<div class="empty compact">尚未选择已确认的学科组提交表</div>'}<button class="secondary full" onclick="choose('subject_group')">选择学科组提交表并预览</button>${candidateCards}</article>`;
 }
 
 function businessMaterialCard(kind, title, records, description) {
@@ -1374,9 +1393,14 @@ function renewalPreviewMarkup() {
   const preview = renewalMaterialPreview?.run_id === current?.id ? renewalMaterialPreview : null;
   if (!preview) return "";
   const rows = (preview.matched || []).map((item) => `<tr><td>${escapeHtml(item.teacher)}</td><td>${escapeHtml(item.AH)}</td><td>${escapeHtml(item.AI)}</td><td>${escapeHtml(item.AJ)}</td><td>${escapeHtml(item.sheet)} 第 ${escapeHtml(item.source_row)} 行</td></tr>`).join("");
-  const missing = preview.unmatched_run_teachers?.length ? `<p class="small warn">当前核算仍有 ${escapeHtml(preview.unmatched_run_teachers.length)} 位教师未匹配续费来源：${escapeHtml(preview.unmatched_run_teachers.join("、"))}。这些人的续费字段继续待确认。</p>` : "";
-  const conflicts = (preview.conflicts || []).map((item) => `<p class="small bad">${escapeHtml(item.code)} · ${escapeHtml(item.sheet || "")} 第 ${escapeHtml(item.source_row || "?")} 行</p>`).join("");
-  return `<section class="renewal-preview"><h3>本月续费资料</h3><p class="small muted">来源：${escapeHtml(preview.source_name)} · 工资月份：${escapeHtml(preview.period)} · ${escapeHtml(preview.source_rows)} 条来源 · ${escapeHtml(preview.matched.length)} 位当前核算教师匹配 · ${escapeHtml(preview.outside_run_rows)} 条属于其它教师</p>${missing}${conflicts}${rows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>AH｜一对一续费</th><th>AI｜班课续费</th><th>AJ｜领航续费</th><th>来源行</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}${preview.can_confirm ? `<label class="inline-check"><input id="renewal-source-approved" type="checkbox" onchange="$('#renewal-confirm-button').disabled = !this.checked">我确认这张表的 ${escapeHtml(preview.period)} 记录是本次工资核算的最终有效续费来源</label><label>确认人<input id="renewal-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button id="renewal-confirm-button" disabled onclick="confirmRenewalMaterial()">确认并用于本次工资</button></div>` : '<p class="small bad">还有重复或合计缺失，不能绑定工资。</p>'}</section>`;
+  const counts = preview.match_counts || {};
+  const noRows = preview.no_renewal_row || [];
+  const identity = preview.identity_unmatched || [];
+  const outside = preview.outside_roster || [];
+  const sourceConflicts = preview.source_conflicts || [];
+  const categories = `<div class="metric-grid"><div class="metric"><span>已匹配续费资料</span><strong>${escapeHtml(counts.matched ?? preview.matched.length)}</strong></div><div class="metric"><span>本月续费资料没有该教师记录</span><strong>${escapeHtml(counts.no_renewal_row ?? noRows.length)}</strong></div><div class="metric"><span>身份需要确认</span><strong>${escapeHtml(counts.identity_unmatched ?? identity.length)}</strong></div><div class="metric"><span>资料教师不在本月排课名单</span><strong>${escapeHtml(counts.outside_roster ?? outside.length)}</strong></div></div>`;
+  const sections = `${noRows.length ? `<details><summary>本月续费资料没有该教师记录（${noRows.length}）</summary><p>${noRows.map((item) => escapeHtml(item.teacher)).join("、")}</p><p class="small muted">这是“无续费行”，不代表身份匹配失败，也不会自动填 0。</p></details>` : ""}${identity.length ? `<details open><summary>身份需要确认（${identity.length}）</summary>${identity.map((item) => `<p class="small bad">${escapeHtml(item.source_teacher || "来源教师")} · ${escapeHtml(item.sheet || "")} 第 ${escapeHtml(item.source_row || "?")} 行：${escapeHtml(item.reason)}${item.candidate_teachers?.length ? ` 候选：${item.candidate_teachers.map(escapeHtml).join("、")}` : ""}</p>`).join("")}</details>` : ""}${outside.length ? `<details><summary>资料教师不在本月排课名单（${outside.length}）</summary>${outside.map((item) => `<p class="small muted">${escapeHtml(item.source_teacher || "来源教师")} · ${escapeHtml(item.sheet || "")} 第 ${escapeHtml(item.source_row || "?")} 行：${escapeHtml(item.reason)}</p>`).join("")}</details>` : ""}${sourceConflicts.length ? `<details open><summary>续费合计或来源行有问题（${sourceConflicts.length}）</summary>${sourceConflicts.map((item) => `<p class="small bad">${escapeHtml(item.source_teacher || "来源教师")} · ${escapeHtml(item.sheet || "")} 第 ${escapeHtml(item.source_row || "?")} 行：${escapeHtml(item.reason)}</p>`).join("")}</details>` : ""}`;
+  return `<section class="renewal-preview"><h3>本月续费资料</h3><p class="small muted">来源：${escapeHtml(preview.source_name)} · 工资月份：${escapeHtml(preview.period)} · ${escapeHtml(preview.source_rows)} 条来源</p>${categories}${sections}${rows ? `<div class="table-wrap"><table class="table"><thead><tr><th>教师</th><th>AH｜一对一续费</th><th>AI｜班课续费</th><th>AJ｜领航续费</th><th>来源行</th></tr></thead><tbody>${rows}</tbody></table></div>` : ""}${preview.can_confirm ? `<label class="inline-check"><input id="renewal-source-approved" type="checkbox" onchange="$('#renewal-confirm-button').disabled = !this.checked">我确认这张表的 ${escapeHtml(preview.period)} 记录是本次工资核算的最终有效续费来源</label><label>确认人<input id="renewal-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button id="renewal-confirm-button" disabled onclick="confirmRenewalMaterial()">确认并用于本次工资</button></div>` : '<p class="small bad">身份冲突、重复来源或合计缺失尚未处理，不能确认续费来源。</p>'}</section>`;
 }
 
 async function previewRenewalMaterial() {
@@ -1397,7 +1421,8 @@ async function confirmRenewalMaterial() {
     renewalMaterialPreview = null;
     tab = "payroll";
     renderRun();
-    showMessage(`续费来源已确认并用于本次工资；${preview.unmatched_run_teachers.length} 位仍需核实。`, "success");
+    const counts = preview.match_counts || {};
+    showMessage(`续费来源已确认：已匹配 ${counts.matched ?? preview.matched.length} 位；无续费行 ${counts.no_renewal_row ?? preview.no_renewal_row.length} 位；身份待确认 ${counts.identity_unmatched ?? preview.identity_unmatched.length} 位；不在本月排课名单 ${counts.outside_roster ?? preview.outside_roster.length} 条。`, "success");
   } catch (error) { await refreshAfterError(error); }
 }
 
@@ -1450,9 +1475,15 @@ function payrollPreviewPage() {
   const renewal = current.run_renewal_result_snapshot;
   const importedRenewal = current.material_inputs?.renewal;
   const confirmation = current.renewal_source_confirmation || {};
-  const unmatchedRenewal = confirmation.unmatched_run_teachers || [];
+  const renewalCounts = confirmation.match_counts || null;
+  const noRenewalRows = confirmation.no_renewal_row || [];
+  const identityUnmatched = confirmation.identity_unmatched || [];
+  const outsideRoster = confirmation.outside_roster || [];
+  const renewalClassification = renewalCounts
+    ? `已匹配续费资料 ${escapeHtml(renewalCounts.matched || 0)} 位；本月无续费记录 ${escapeHtml(renewalCounts.no_renewal_row || 0)} 位；身份需要确认 ${escapeHtml(renewalCounts.identity_unmatched || 0)} 位；续费资料有记录但本月排课未出现 ${escapeHtml(renewalCounts.outside_roster || 0)} 位。`
+    : "这是旧教师范围下的确认记录；旧“未匹配”数量不再作为身份失败结论，请按本月排课名单重新分类。";
   const renewalNote = renewal
-    ? `<div class="banner info"><strong>本月续费已确认并进入工资</strong><span>来源：${escapeHtml(confirmation.source_name || current.material_inputs?.renewal?.name || "续费结果表")} · 月份：${escapeHtml(renewal.period_label || current.period)} · 已绑定 ${escapeHtml(Object.keys(renewal.entries || {}).length)} 位教师 · 确认人：${escapeHtml(confirmation.actor || "—")}。AH 一对一续费、AI 班课续费、AJ 领航续费已保存；AK 续费绩效由同一快照计算。${unmatchedRenewal.length ? `另有 ${unmatchedRenewal.length} 位教师未匹配来源，仍待核实。` : ""}</span></div>`
+    ? `<div class="banner info"><strong>本月续费已确认并进入工资</strong><span>来源：${escapeHtml(confirmation.source_name || current.material_inputs?.renewal?.name || "续费结果表")} · 月份：${escapeHtml(renewal.period_label || current.period)} · 已绑定 ${escapeHtml(Object.keys(renewal.entries || {}).length)} 位教师 · 确认人：${escapeHtml(confirmation.actor || "—")}。AH 一对一续费、AI 班课续费、AJ 领航续费已保存；AK 续费绩效由同一快照计算。${renewalClassification}</span><button class="secondary" onclick="previewRenewalMaterial()">按本月排课名单查看续费分类</button>${noRenewalRows.length ? `<details><summary>本月无续费记录（${noRenewalRows.length} 位）</summary><p>${noRenewalRows.map((item) => escapeHtml(item.teacher)).join("、")}</p></details>` : ""}${identityUnmatched.length ? `<details open><summary>身份需要确认（${identityUnmatched.length}）</summary>${identityUnmatched.map((item) => `<p class="small bad">${escapeHtml(item.source_teacher || "来源教师")}：${escapeHtml(item.reason)}</p>`).join("")}</details>` : ""}${outsideRoster.length ? `<details><summary>资料有记录但本月排课未出现（${outsideRoster.length} 条来源）</summary>${outsideRoster.map((item) => `<p class="small muted">${escapeHtml(item.source_teacher || "来源教师")} · ${escapeHtml(item.sheet || "")} 第 ${escapeHtml(item.source_row || "?")} 行：${escapeHtml(item.reason)}</p>`).join("")}</details>` : ""}</div>`
     : importedRenewal
       ? `<div class="banner info"><strong>续费资料已导入，工资字段待确认</strong><span>系统会读取当前月份的 1V1、班课和领航合计；确认后才进入 AH、AI、AJ、AK。</span><button class="secondary" onclick="previewRenewalMaterial()">核对本月续费课时</button></div>`
       : "";
@@ -2056,10 +2087,11 @@ async function uploadMaterialFiles(role, files) {
     for (const file of files) {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const uploaded = await api("/api/upload", { method: "POST", body: JSON.stringify({ name: file.name, content_base64: bytesToBase64(bytes) }) });
-      current = (await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: role, path: uploaded.path }) })).run;
+      const result = await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: role, path: uploaded.path }) });
+      current = result.run;
     }
     renderRun();
-    showMessage(files.length > 1 ? `已读取 ${files.length} 份材料并自动归类。` : "文件已识别并放入对应材料。", "success");
+    showMessage(role === "subject_group" ? "学科组资料已解析为预览；确认前不会进入工资。" : files.length > 1 ? `已读取 ${files.length} 份材料并自动归类。` : "文件已识别并放入对应材料。", "success");
   } catch (error) { showMessage(error.message); }
   finally { materialBusy.delete(role); }
 }
@@ -2077,9 +2109,10 @@ function materialCard(material) {
 
 async function importMaterialPath(role, path) {
   if (["subject_group", "renewal", "refund", "package"].includes(role)) {
-    current = (await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: role, path }) })).run;
+    const result = await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: role, path }) });
+    current = result.run;
     renderRun();
-    showMessage("文件已识别并放入对应材料。", "success");
+    showMessage(role === "subject_group" ? "学科组资料已生成预览；负责人确认前不会参与工资。" : "文件已识别并放入对应材料。", "success");
     return;
   }
   const inspected = await api("/api/inspect", { method: "POST", body: JSON.stringify({ path }) });
@@ -2093,6 +2126,39 @@ async function importMaterialPath(role, path) {
   current = await api(`/api/runs/${current.id}/files`, { method: "POST", body: JSON.stringify({ role, path }) });
   showMessage(`已将文件识别为“${roleCopy[role][0]}”。`, "success");
   renderRun();
+}
+
+async function previewExistingSubjectGroup(role) {
+  const file = current.files?.[role];
+  const path = file?.path || current.pending_subject_group_imports?.[role]?.source_path;
+  if (!path) return showMessage("找不到这份学科组资料，请重新选择文件。");
+  try {
+    const result = await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: "subject_group", path }) });
+    current = result.run;
+    renderRun();
+    showMessage("预览已更新；请核对教师名单后确认，当前工资尚未使用该预览。", "success");
+  } catch (error) { showMessage(error.message); }
+}
+
+async function confirmSubjectGroup(role, sourceSha256, replaceExisting = false) {
+  const actor = document.querySelector(`#subject-group-confirmed-by-${CSS.escape(role)}`)?.value?.trim() || "";
+  if (!actor) return showMessage("请填写本次学科组提交表确认人。");
+  const pending = current.pending_subject_group_imports?.[role];
+  if (!pending?.can_confirm || pending.source_sha256 !== sourceSha256) return showMessage("预览已变化或无法安全匹配，请重新预览。");
+  try {
+    const result = await api(`/api/runs/${current.id}/subject-group-confirm`, { method: "POST", body: JSON.stringify({ role, source_sha256: sourceSha256, confirmed_by: actor, replace_existing: replaceExisting }) });
+    current = result.run;
+    renderRun();
+    showMessage("学科组提交表已确认并用于本月工资；教师名单仍以人工月排课表为准。", "success");
+  } catch (error) { await refreshAfterError(error); }
+}
+
+async function cancelSubjectGroup(role) {
+  try {
+    current = await api(`/api/runs/${current.id}/subject-group-cancel`, { method: "POST", body: JSON.stringify({ role }) });
+    renderRun();
+    showMessage("未确认的学科组资料已取消，不会进入本月工资。", "info");
+  } catch (error) { await refreshAfterError(error); }
 }
 
 async function choose(role) {

@@ -1,0 +1,63 @@
+{
+  "schema_version": "payroll-fifth-round-uat/1",
+  "date": "2026-09-27",
+  "run_id": "7f2f44465a86",
+  "period": "2026-08",
+  "period_window": {
+    "start": "2026-08-03",
+    "end": "2026-08-30"
+  },
+  "roster": {
+    "source_type": "SCHEDULE",
+    "valid_schedule_records": 2385,
+    "schedule_teacher_count": 51,
+    "payroll_roster_count": 51,
+    "schedule_only": 0,
+    "roster_only": 0,
+    "teacher_identity_conflicts": 0,
+    "all_source_rows_had_teacher_id": false
+  },
+  "subject_group_confirmation": {
+    "direct_service_import_blocked": true,
+    "direct_http_import_blocked": true,
+    "preview_mutates_payroll": false,
+    "isolated_real_browser_preview_confirm_reload": "PASS",
+    "production_run_confirmation_written": false,
+    "replacement_requires_explicit_confirmation": true
+  },
+  "renewal_classification": {
+    "MATCHED": 45,
+    "NO_RENEWAL_ROW": 6,
+    "IDENTITY_UNMATCHED": 0,
+    "OUTSIDE_ROSTER": 4,
+    "SOURCE_CONFLICT": 0,
+    "previous_two_unmatched_reclassified_as": "NO_RENEWAL_ROW"
+  },
+  "launcher": {
+    "old_installed_bundle_missing_bootstrap": true,
+    "old_launcher_hard_coded_repo_and_python": true,
+    "old_launcher_silent_cd_exit_path": true,
+    "historical_specific_path_failure_proven": false,
+    "UAT_A_start_and_browser": "PASS",
+    "UAT_B_reuse_same_pid": "PASS",
+    "UAT_C_restart_and_browser": "PASS",
+    "UAT_D_invalid_repo_and_python_native_dialog": "PARTIAL",
+    "UAT_E_recovery_with_valid_bundle": "PASS",
+    "production_data_directory_unchanged": true,
+    "original_run_preserved": true
+  },
+  "full_test_suite": {
+    "command": "sh tools/run_tests.sh",
+    "passed": 583,
+    "failed": 0
+  },
+  "frozen_scope": {
+    "part_time": "OPEN",
+    "AG": "OPEN",
+    "AL": "OPEN",
+    "AS": "OPEN",
+    "AV": "OPEN",
+    "annotation_code_modified": false,
+    "standalone_class_performance_comment_open_item": "not_in_current_open_obligations"
+  }
+}

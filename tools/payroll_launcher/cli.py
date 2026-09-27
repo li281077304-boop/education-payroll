@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
+from . import lifecycle
 from .dialogs import (
     DIAGNOSTICS,
     RESTART,
@@ -25,13 +27,21 @@ from .dialogs import (
     write_problem_report,
 )
 from .lifecycle import ensure_running, log_line, restart_service, status, stop_service
-from .paths import LauncherConfig, LauncherConfigError, interpreter_problem, resolve_config
+from .paths import (
+    DEFAULT_PORT,
+    HOST,
+    LauncherConfig,
+    LauncherConfigError,
+    interpreter_problem,
+    resolve_config,
+)
 from .probe import ProbeKind, probe
 
 MAX_ATTEMPTS = 3
 
 MODE_OPEN = "open"
 MODE_RESTART = "restart"
+STATE_BROWSER_OPEN_FAILED = "browser-open-failed"
 
 
 def _python_problem_if_needed(cfg: LauncherConfig) -> str | None:
@@ -49,6 +59,38 @@ def _announce(cfg: LauncherConfig, result) -> None:
     print(result.message)
 
 
+def _open_page(cfg: LauncherConfig, url: str, *, no_open: bool, no_dialog: bool) -> bool:
+    """Open the browser or leave a durable, actionable failure before returning."""
+    if no_open:
+        return True
+    for _attempt in range(MAX_ATTEMPTS):
+        if open_url(url):
+            return True
+        result = lifecycle.LaunchResult(
+            ok=False,
+            state=STATE_BROWSER_OPEN_FAILED,
+            message="工资服务已经启动，但系统未能自动打开浏览器。请重试或查看诊断信息。",
+            url=url,
+            diagnostics="macOS open 命令未能打开本地工资页面。",
+            log_tail=lifecycle.log_tail(cfg),
+        )
+        lifecycle.log_line(cfg, f"fail {result.state}: {result.diagnostics}")
+        write_problem_report(cfg, result)
+        if no_dialog:
+            print(f"{result.message}\n诊断文件：{cfg.state_dir / 'last-problem.md'}")
+            return False
+        choice = choose_after_failure(result.message, allow_restart=False)
+        if choice == DIAGNOSTICS:
+            open_diagnostics(cfg)
+            choice = choose_after_failure(
+                "诊断信息已打开。如需再次打开工资页面，请点击“重试”。",
+                allow_restart=False,
+            )
+        if choice != RETRY:
+            return False
+    return False
+
+
 def run_open(cfg: LauncherConfig, no_open: bool = False, no_dialog: bool = False) -> int:
     attempt = 0
     while attempt < MAX_ATTEMPTS:
@@ -56,9 +98,7 @@ def run_open(cfg: LauncherConfig, no_open: bool = False, no_dialog: bool = False
         result = ensure_running(cfg, python_problem=_python_problem_if_needed(cfg))
         if result.ok:
             _announce(cfg, result)
-            if not no_open:
-                open_url(result.url)
-            return 0
+            return 0 if _open_page(cfg, result.url, no_open=no_open, no_dialog=no_dialog) else 1
 
         write_problem_report(cfg, result)
         log_line(cfg, f"fail {result.state}: {result.diagnostics}")
@@ -73,9 +113,9 @@ def run_open(cfg: LauncherConfig, no_open: bool = False, no_dialog: bool = False
             restarted = restart_service(cfg, python_problem=_python_problem_if_needed(cfg))
             if restarted.ok:
                 _announce(cfg, restarted)
-                if not no_open:
-                    open_url(restarted.url)
-                return 0
+                return 0 if _open_page(
+                    cfg, restarted.url, no_open=no_open, no_dialog=no_dialog
+                ) else 1
             write_problem_report(cfg, restarted)
             log_line(cfg, f"restart fail {restarted.state}: {restarted.diagnostics}")
             if choose_after_failure(restarted.message, allow_restart=False) == DIAGNOSTICS:
@@ -97,9 +137,7 @@ def run_restart(cfg: LauncherConfig, no_open: bool = False, no_dialog: bool = Fa
     result = restart_service(cfg, python_problem=_python_problem_if_needed(cfg))
     if result.ok:
         _announce(cfg, result)
-        if not no_open:
-            open_url(result.url)
-        return 0
+        return 0 if _open_page(cfg, result.url, no_open=no_open, no_dialog=no_dialog) else 1
     write_problem_report(cfg, result)
     log_line(cfg, f"restart-mode fail {result.state}: {result.diagnostics}")
     if no_dialog:
@@ -187,8 +225,24 @@ def main(argv: list[str] | None = None) -> int:
         cfg = resolve_config(args.config)
     except LauncherConfigError as exc:
         message = f"工资核算助手启动失败，请查看诊断信息。\n\n{exc}"
+        fallback = LauncherConfig(
+            repo_root=Path(os.environ.get(paths.ENV_REPO_ROOT, Path.cwd())),
+            python=Path(os.environ.get(paths.ENV_PYTHON, sys.executable)),
+            host=HOST,
+            port=DEFAULT_PORT,
+            data_dir=paths.default_data_dir(),
+        )
+        failure = lifecycle.LaunchResult(
+            ok=False, state="config-invalid", message=message, url=fallback.base_url,
+            diagnostics=str(exc), log_tail=lifecycle.log_tail(fallback),
+        )
+        try:
+            write_problem_report(fallback, failure)
+            lifecycle.log_line(fallback, f"fail {failure.state}: {exc}")
+        except OSError:
+            pass
         if args.no_dialog:
-            print(message)
+            print(f"{message}\n诊断文件：{fallback.state_dir / 'last-problem.md'}")
         else:
             choose_after_failure(message, allow_restart=False)
         return 1
@@ -202,25 +256,43 @@ def main(argv: list[str] | None = None) -> int:
             data_dir=args.data_dir or cfg.data_dir,
         )
 
-    if args.print_config:
-        print(json.dumps({
-            "repo_root": str(cfg.repo_root), "python": str(cfg.python),
-            "host": cfg.host, "port": cfg.port, "data_dir": str(cfg.data_dir),
-            "state_dir": str(cfg.state_dir),
-        }, ensure_ascii=False, indent=2))
-        return 0
-    if args.status:
-        return run_status(cfg)
-    if args.inventory:
-        return run_inventory(cfg)
-    if args.stop:
-        return run_stop(cfg)
-    if args.diagnostics:
-        open_diagnostics(cfg)
-        return 0
-    if args.mode == MODE_RESTART:
-        return run_restart(cfg, no_open=args.no_open, no_dialog=args.no_dialog)
-    return run_open(cfg, no_open=args.no_open, no_dialog=args.no_dialog)
+    try:
+        if args.print_config:
+            print(json.dumps({
+                "repo_root": str(cfg.repo_root), "python": str(cfg.python),
+                "host": cfg.host, "port": cfg.port, "data_dir": str(cfg.data_dir),
+                "state_dir": str(cfg.state_dir),
+            }, ensure_ascii=False, indent=2))
+            return 0
+        if args.status:
+            return run_status(cfg)
+        if args.inventory:
+            return run_inventory(cfg)
+        if args.stop:
+            return run_stop(cfg)
+        if args.diagnostics:
+            open_diagnostics(cfg)
+            return 0
+        if args.mode == MODE_RESTART:
+            return run_restart(cfg, no_open=args.no_open, no_dialog=args.no_dialog)
+        return run_open(cfg, no_open=args.no_open, no_dialog=args.no_dialog)
+    except Exception as exc:  # Finder has no terminal; turn unexpected errors into a durable UI failure.
+        message = "工资助手启动过程中遇到问题，请查看诊断信息后重试。"
+        failure = lifecycle.LaunchResult(
+            ok=False, state="unexpected-launch-error", message=message,
+            url=cfg.base_url, diagnostics=f"{type(exc).__name__}: {exc}",
+            log_tail=lifecycle.log_tail(cfg),
+        )
+        try:
+            write_problem_report(cfg, failure)
+            lifecycle.log_line(cfg, f"fail {failure.state}: {failure.diagnostics}")
+        except OSError:
+            pass
+        if args.no_dialog:
+            print(f"{message}\n诊断文件：{cfg.state_dir / 'last-problem.md'}")
+        else:
+            choose_after_failure(message, allow_restart=False)
+        return 1
 
 
 if __name__ == "__main__":

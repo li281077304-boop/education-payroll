@@ -30,7 +30,8 @@ def test_csv_materials_use_one_adapter_across_check_preview_generate_reopen_and_
     )
 
     imported_schedule = service.import_file(run["id"], "schedule", str(schedule))
-    imported_payroll = service.import_file(run["id"], "math", str(subject_group))
+    preview = service.preview_subject_group_material(run["id"], str(subject_group))["subject_group_preview"]
+    imported_payroll = service.confirm_subject_group_material(run["id"], "math", preview["source_sha256"], "脱敏 UAT 确认人")["run"]
     assert imported_schedule["files"]["schedule"]["sheets"] == ["CSV"]
     assert imported_payroll["files"]["math"]["sheets"] == ["CSV"]
 

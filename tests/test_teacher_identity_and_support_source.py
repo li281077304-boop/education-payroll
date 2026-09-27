@@ -67,8 +67,23 @@ def _teacher(name: str, **overrides) -> dict:
     return item
 
 
+def _schedule_workbook(path: Path, teachers: list[str], period: str = "2026-08") -> Path:
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "人工月排课"
+    headers = ["上课班级", "教学形式", "上课时间", "上课状态", "实到", "上课学员", "上课科目", "任课老师"]
+    sheet.append(headers)
+    for index, teacher in enumerate(teachers):
+        sheet.append([f"七年级数学课{index}", "一对一", f"{period}-03 09:00", "已上课", 1, "测试学员", "数学", teacher])
+    book.save(path)
+    return path
+
+
 def _run(service: PayrollService, teachers: list[str], period: str = "2026-08", tmp_path: Path | None = None) -> dict:
     created = service.create(period, "GENERATE")
+    base = tmp_path or service.store.path.parent
+    schedule = _schedule_workbook(base / "排课.xlsx", teachers, period)
+    service.import_file(created["id"], "schedule", str(schedule))
     stored = service.store.get(created["id"])
     stored["core_calculation"] = {
         "period": period,
@@ -76,22 +91,6 @@ def _run(service: PayrollService, teachers: list[str], period: str = "2026-08", 
             {"teacher": name, "teacher_id": name, "employment_type": "FULL_TIME", "fields": _core_fields()}
             for name in teachers
         ],
-    }
-    base = tmp_path or Path(stored.get("package_root") or ".")
-    schedule = base / "排课.xls"
-    math = base / "数学组提交表.xlsx"
-    for target in (schedule, math):
-        if not target.exists():
-            target.write_bytes(b"placeholder")
-
-    def material(target: Path, **extra) -> dict:
-        stat = target.stat()
-        return {"name": target.name, "path": str(target), "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns, "sha256": _sha256(target), **extra}
-
-    stored["files"] = {
-        "schedule": material(schedule, teachers=51, records=2385),
-        "math": material(math, label="数学组提交表", teachers=len(teachers), records=len(teachers)),
     }
     service.store.save(stored)
     return stored
@@ -112,10 +111,10 @@ def test_the_match_target_states_where_it_comes_from(tmp_path):
 
     facts = service._roster_facts(service.store.get(run["id"]))
     assert facts["member_count"] == 2
-    assert facts["origin"] == "core_calculation.rows"
-    assert "学科组提交表" in facts["origin_label"]
-    assert facts["schedule_teacher_count"] == 51
-    assert "不是排课表全部教师" in facts["note"]
+    assert facts["origin"] == "schedule_roster_snapshot"
+    assert "排课表" in facts["origin_label"]
+    assert facts["schedule_teacher_count"] == 2
+    assert facts["schedule_record_count"] == 2
     # The screen must be able to answer the question without reading code.
     payload = service.get(run["id"])
     assert payload["roster_facts"]["member_count"] == 2
@@ -137,7 +136,6 @@ def test_support_preview_separates_the_four_teacher_sets(tmp_path):
     assert counts["identity_required"] == 0           # D 证据不足
     assert preview["month_without_history"][0]["teacher"] == "教师丙"
     assert preview["history_only"][0]["teacher"] == "只有历史的丁"
-    # C is a scope fact, never reported as an unrecognisable person.
     assert preview["history_only"][0]["reason"] == "NOT_IN_CURRENT_CALCULATION"
 
 
@@ -155,7 +153,7 @@ def test_the_base_salary_preview_reports_the_same_sets(tmp_path):
 
 
 # ------------------------------------------------------------ 3. 重名 fail closed
-def test_duplicate_teacher_names_fail_closed(tmp_path):
+def test_duplicate_legacy_core_rows_do_not_change_schedule_authoritative_roster(tmp_path):
     service = PayrollService(tmp_path / "data")
     run = _run(service, ["教师甲", "教师乙"], tmp_path=tmp_path)
     stored = service.store.get(run["id"])
@@ -164,9 +162,9 @@ def test_duplicate_teacher_names_fail_closed(tmp_path):
 
     source = _support_workbook(tmp_path / "支持部.xlsx", [_teacher("教师甲")])
     preview = service.preview_support_salary_import(run["id"], str(source))
-    assert preview["counts"]["identity_required"] == 1
-    assert preview["identity_required"][0]["reason"] == "AMBIGUOUS_TEACHER_NAME"
-    assert preview["counts"]["matched"] == 0
+    assert preview["counts"]["identity_required"] == 0
+    assert preview["counts"]["matched"] == 1
+    assert preview["roster"]["member_count"] == 2
 
 
 # -------------------------------------------------------------- 4. 兼职语义

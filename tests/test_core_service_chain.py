@@ -13,6 +13,7 @@ from payroll_ui.server import PayrollHttpServer
 from tests.test_payroll_modes_and_class_rules import _schedule
 from tests.test_payroll_ui_service import _payroll_with_only
 from tests.test_standard_payroll_output import _sanitized_template
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 
 
 def prepared(tmp_path, mode="AUDIT"):
@@ -30,7 +31,7 @@ def prepared(tmp_path, mode="AUDIT"):
         for col, value in {"AA": 40, "AC": 2.4, "AD": 999, "AE": 40, "AF": 496}.items():
             sheet[f"{col}5"] = value
         book.save(target)
-        service.import_file(run["id"], "math", str(target))
+        import_confirmed_subject_group(service, run["id"], "math", target)
     else:
         run_record = service.store.get(run["id"])
         run_record["template_path"] = str(_sanitized_template(tmp_path))
@@ -49,7 +50,7 @@ def test_submitted_ad_never_changes_independent_chain(tmp_path):
     book = load_workbook(target)
     book.active["AD5"] = 2
     book.save(target)
-    service.import_file(run["id"], "math", str(target))
+    import_confirmed_subject_group(service, run["id"], "math", target)
     after = service.check(run["id"])
     assert after["core_calculation"]["rows"][0]["fields"] == fields
 

@@ -59,6 +59,8 @@ def read_schedule_excel(
         result.errors.append(AdapterIssue("MISSING_REQUIRED_COLUMN", "Schedule header row is missing required columns", sheet.title))
         return result
     columns = header_map(sheet, [header_row])
+    teacher_id_headers = {"teacherid", "教师id", "教师编号", "工号", "员工编号"}
+    teacher_id_column = next((column for header, column in columns.items() if "".join(str(header).split()).replace("_", "").replace("-", "").lower() in teacher_id_headers), None)
     source_file = str(path)
     snapshot_index = course_export_snapshot_index(course_export_snapshots)
     current_contexts: list[StudentCourseContext] = []
@@ -176,6 +178,7 @@ def read_schedule_excel(
                 grade_reason=grade_reason,
                 source=source_file,
                 provenance=evidence,
+                teacher_id=str(sheet.cell(row, teacher_id_column).value or "").strip() if teacher_id_column else "",
             )
         )
     if unknown_grades:

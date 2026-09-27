@@ -12,6 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.comments import Comment
 
 from payroll_ui.service import PayrollService
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 from payroll_ui.server import PayrollHttpServer
 import payroll_ui.business_inputs as business_inputs_module
 from payroll_core.excel.writeback import write_new_workbook
@@ -260,7 +261,7 @@ def test_existing_comment_is_not_silently_overwritten(tmp_path):
     source = Path(run["files"]["math"]["path"])
     book = load_workbook(source); book["Sheet1"]["AC5"].comment = Comment("原批注", "原作者"); book.save(source)
     # The changed workbook hash forces a new candidate rather than overwriting.
-    refreshed = service.import_file(run["id"], "math", str(source))
+    refreshed = import_confirmed_subject_group(service, run["id"], "math", source)
     candidate = service.create_refund_comment_candidate(refreshed["id"], refund["id"], "math", "Sheet1", "AC5")
     preview = _approve_candidate(service, candidate)
     assert preview["before_comment"] == "原批注"

@@ -31,6 +31,7 @@ class ScheduleRecord:
     grade_reason: str = ""
     source: str = ""
     provenance: Mapping[str, SourceEvidence] = field(default_factory=dict)
+    teacher_id: str = ""
 
 
 @dataclass(frozen=True)

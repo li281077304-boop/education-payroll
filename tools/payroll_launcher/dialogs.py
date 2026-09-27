@@ -119,9 +119,10 @@ def open_diagnostics(cfg: LauncherConfig) -> None:
     open_path(cfg.state_dir if cfg.state_dir.is_dir() else cfg.data_dir)
 
 
-def open_url(url: str) -> None:
-    """Open the local page without ever asking the user to type an address."""
+def open_url(url: str) -> bool:
+    """Open the local page, reporting failure to the caller for visible handling."""
     try:
-        subprocess.run(["/usr/bin/open", url], capture_output=True, timeout=30)
+        completed = subprocess.run(["/usr/bin/open", url], capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        print(f"请打开：{url}")
+        return False
+    return completed.returncode == 0

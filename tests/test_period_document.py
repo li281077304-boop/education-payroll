@@ -13,6 +13,7 @@ import pytest
 
 from payroll_ui.period_document import read_period_document
 from payroll_ui.service import PayrollService
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 
 DOCUMENT = """# 测试规章制度知识库
 
@@ -249,7 +250,7 @@ def test_lessons_outside_the_manual_month_only_report_a_conflict(tmp_path):
     before = service.period_authority_for("2026-08")
     schedule, payroll = _august_materials(tmp_path, [f"2026-08-{day:02d}" for day in range(3, 31)] + ["2026-09-01"])
     service.import_file(run["id"], "schedule", str(schedule))
-    service.import_file(run["id"], "math", str(payroll))
+    import_confirmed_subject_group(service, run["id"], "math", payroll)
 
     checked = service.check(run["id"])
 
@@ -267,7 +268,7 @@ def test_a_hand_written_authority_is_labelled_as_manual_not_as_document(tmp_path
     run = service.create("2026-08", "GENERATE")
     schedule, payroll = _august_materials(tmp_path, [f"2026-08-{day:02d}" for day in range(1, 31)])
     service.import_file(run["id"], "schedule", str(schedule))
-    service.import_file(run["id"], "math", str(payroll))
+    import_confirmed_subject_group(service, run["id"], "math", payroll)
 
     service.confirm_period_window(run["id"], "2026-08-01", "2026-08-30", "核算负责人", "本机确认的周期")
 

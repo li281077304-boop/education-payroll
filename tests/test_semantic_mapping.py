@@ -12,6 +12,7 @@ from payroll_core.mapping import SCHEDULE_AC_REQUIREMENT, analyze_mapping
 from payroll_core.reconcile.payroll_scope import class_value_contribution
 from payroll_ui.service import PayrollService
 from tests.test_payroll_ui_service import FIXTURES, _prepared_run
+from tests.payroll_uat_helpers import import_confirmed_subject_group
 
 
 def _sheet(path: Path, headers: list[str], rows: list[list[object]], title: str = "课程明细") -> Path:
@@ -211,7 +212,7 @@ def test_variant_layout_reaches_reconciliation(tmp_path):
     _import(service, run, variant)
 
     for role, path in (("math", math), ("science", science)):
-        service.import_file(run["id"], role, str(path))
+        import_confirmed_subject_group(service, run["id"], role, path)
     checked = service.check(run["id"])
 
     assert checked["status"] in {"REVIEW_REQUIRED", "PASS", "BLOCKED"}

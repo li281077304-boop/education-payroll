@@ -453,12 +453,34 @@ def test_cli_open_reuses_service_and_opens_browser_without_dialog(monkeypatch, t
             "repo_root": str(REPO_ROOT), "python": sys.executable,
             "data_dir": str(data_dir), "port": fixture.port,
         }), encoding="utf-8")
-        monkeypatch.setattr(cli, "open_url", lambda url: opened.append(url))
+        monkeypatch.setattr(cli, "open_url", lambda url: opened.append(url) or True)
         code = cli.main(["--config", str(config_file), "--no-dialog"])
 
     assert code == 0
     assert opened == [f"http://127.0.0.1:{fixture.port}/"]
     assert "已在运行" in capsys.readouterr().out
+
+
+def test_browser_open_failure_is_durable_and_visible_in_no_dialog_mode(monkeypatch, tmp_path, capsys):
+    cfg = launch_config(tmp_path, 8760)
+    monkeypatch.setattr(cli, "open_url", lambda _url: False)
+
+    assert not cli._open_page(cfg, cfg.base_url, no_open=False, no_dialog=True)
+    assert "未能自动打开浏览器" in capsys.readouterr().out
+    assert "browser-open-failed" in cfg.log_file.read_text(encoding="utf-8")
+    assert "未能自动打开浏览器" in (cfg.state_dir / "last-problem.md").read_text(encoding="utf-8")
+
+
+def test_restart_entry_opens_browser_after_safe_restart(monkeypatch, tmp_path):
+    cfg = launch_config(tmp_path, 8760)
+    opened: list[str] = []
+    monkeypatch.setattr(cli, "restart_service", lambda _cfg, python_problem=None: lifecycle.LaunchResult(
+        ok=True, state=STATE_STARTED, message="已安全重启", url=cfg.base_url,
+    ))
+    monkeypatch.setattr(cli, "open_url", lambda url: opened.append(url) or True)
+
+    assert cli.run_restart(cfg, no_dialog=True) == 0
+    assert opened == [cfg.base_url]
 
 
 def test_cli_inventory_reads_production_database_read_only(tmp_path, monkeypatch):
@@ -507,11 +529,170 @@ def test_build_app_script_produces_both_production_entry_points(tmp_path):
         assert "<string>launcher</string>" in plist
         assert name in plist
         assert (bundle / "Contents" / "Resources" / "launcher.json").is_file()
+        assert (bundle / "Contents" / "Resources" / "bootstrap.sh").is_file()
 
     shim_text = (output_dir / "工资核算助手.app" / "Contents" / "MacOS" / "launcher").read_text(encoding="utf-8")
-    assert str(REPO_ROOT) in shim_text, "启动器必须固化程序绝对路径"
+    assert str(REPO_ROOT) not in shim_text, "bundle shim 不得依赖开发仓库路径"
+    assert "Resources/bootstrap.sh" in shim_text
     assert "$(pwd)" not in shim_text, "启动器不得依赖调用时的 shell cwd"
     assert "/tmp" not in shim_text
+
+
+def _run_bundle_bootstrap(bundle: Path, home: Path, monkeypatch, *, config: dict,
+                          python_script: str | None = None) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    resources = bundle / "Contents" / "Resources"
+    (resources / "launcher.json").write_text(json.dumps(config), encoding="utf-8")
+    bootstrap = resources / "bootstrap.sh"
+    fake_osascript = home / "fake-osascript"
+    fake_dialog_log = home / "dialog.log"
+    python_log = home / "python-invocations.log"
+    fake_osascript.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$DIALOG_LOG\"\necho 'button returned:好'\n",
+        encoding="utf-8",
+    )
+    fake_osascript.chmod(0o755)
+    bootstrap.write_text(
+        bootstrap.read_text(encoding="utf-8").replace("/usr/bin/osascript", f'"{fake_osascript}"'),
+        encoding="utf-8",
+    )
+    if python_script is not None:
+        python = Path(config["python"])
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text(python_script, encoding="utf-8")
+        python.chmod(0o755)
+    env = dict(
+        os.environ,
+        HOME=str(home),
+        DIALOG_LOG=str(fake_dialog_log),
+        PYTHON_LOG=str(python_log),
+    )
+    completed = subprocess.run(
+        ["/bin/sh", str(bootstrap), "--mode", config.get("mode", "open")],
+        cwd=home, env=env, capture_output=True, text=True, timeout=20,
+    )
+    return completed, fake_dialog_log, home / "Library" / "Application Support" / "EducationPayroll" / "launcher"
+
+
+def _bundle_config(home: Path, repo: Path, python: Path) -> dict:
+    return {
+        "contract": "payroll-launcher/1",
+        "mode": "open",
+        "repo_root": str(repo),
+        "python": str(python),
+        "port": 8760,
+        "data_dir": str(home / "Library" / "Application Support" / "EducationPayroll"),
+    }
+
+
+def _test_bundle(tmp_path: Path) -> Path:
+    bundle = tmp_path / "Test.app"
+    resources = bundle / "Contents" / "Resources"
+    resources.mkdir(parents=True)
+    (bundle / "Contents" / "MacOS").mkdir()
+    source = (REPO_ROOT / "macos" / "bootstrap.sh").read_text(encoding="utf-8")
+    (resources / "bootstrap.sh").write_text(source, encoding="utf-8")
+    return bundle
+
+
+def test_bundle_bootstrap_missing_repository_records_error_before_python(tmp_path, monkeypatch):
+    home = tmp_path / "user home"
+    home.mkdir()
+    repo = tmp_path / "moved repository"
+    python = tmp_path / "runtime" / "python"
+    bundle = _test_bundle(tmp_path)
+    completed, dialog_log, state_dir = _run_bundle_bootstrap(
+        bundle, home, monkeypatch, config=_bundle_config(home, repo, python),
+        python_script="#!/bin/sh\necho invoked >> \"$PYTHON_LOG\"\n",
+    )
+
+    assert completed.returncode != 0
+    assert "REPO_PATH_INVALID" in (state_dir / "diagnostics.log").read_text(encoding="utf-8")
+    assert "程序已在运行前停止" in (state_dir / "last-problem.md").read_text(encoding="utf-8")
+    assert "display dialog" in dialog_log.read_text(encoding="utf-8")
+    assert not (home / "python-invocations.log").exists(), "repo 检查失败时不得调用 Python"
+
+
+def test_bundle_bootstrap_invalid_python_records_error_and_shows_dialog(tmp_path, monkeypatch):
+    home = tmp_path / "user home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    (repo / "payroll_ui").mkdir(parents=True)
+    (repo / "tools" / "payroll_launcher").mkdir(parents=True)
+    (repo / "payroll_ui" / "server.py").write_text("", encoding="utf-8")
+    (repo / "tools" / "payroll_launcher" / "__main__.py").write_text("", encoding="utf-8")
+    python = tmp_path / "missing" / "python"
+    completed, dialog_log, state_dir = _run_bundle_bootstrap(
+        _test_bundle(tmp_path), home, monkeypatch,
+        config=_bundle_config(home, repo, python),
+    )
+
+    assert completed.returncode != 0
+    assert "PYTHON_PATH_INVALID" in (state_dir / "diagnostics.log").read_text(encoding="utf-8")
+    assert "display dialog" in dialog_log.read_text(encoding="utf-8")
+
+
+def test_bundle_bootstrap_module_import_failure_is_recorded_before_dialog(tmp_path, monkeypatch):
+    home = tmp_path / "user home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    (repo / "payroll_ui").mkdir(parents=True)
+    (repo / "tools" / "payroll_launcher").mkdir(parents=True)
+    (repo / "payroll_ui" / "server.py").write_text("", encoding="utf-8")
+    (repo / "tools" / "payroll_launcher" / "__main__.py").write_text("", encoding="utf-8")
+    python = tmp_path / "runtime" / "python"
+    completed, dialog_log, state_dir = _run_bundle_bootstrap(
+        _test_bundle(tmp_path), home, monkeypatch,
+        config=_bundle_config(home, repo, python),
+        python_script="#!/bin/sh\nif [ \"$1\" = '-c' ]; then echo 'ModuleNotFoundError: payroll_core' >&2; exit 2; fi\nexit 0\n",
+    )
+
+    assert completed.returncode != 0
+    assert "MODULE_IMPORT_FAILED" in (state_dir / "diagnostics.log").read_text(encoding="utf-8")
+    assert "无法载入" in (state_dir / "last-problem.md").read_text(encoding="utf-8")
+    assert "display dialog" in dialog_log.read_text(encoding="utf-8")
+
+
+def test_bundle_bootstrap_fixed_data_dir_mismatch_fails_closed(tmp_path, monkeypatch):
+    home = tmp_path / "user home"
+    home.mkdir()
+    repo = tmp_path / "missing"
+    python = tmp_path / "missing-python"
+    config = _bundle_config(home, repo, python)
+    config["data_dir"] = str(tmp_path / "wrong-database")
+    completed, _dialog_log, state_dir = _run_bundle_bootstrap(
+        _test_bundle(tmp_path), home, monkeypatch, config=config,
+    )
+
+    assert completed.returncode != 0
+    assert "PRODUCTION_CONFIG_UNSAFE" in (state_dir / "diagnostics.log").read_text(encoding="utf-8")
+
+
+def test_bundle_bootstrap_validates_then_delegates_to_python_without_changing_data_dir(tmp_path, monkeypatch):
+    home = tmp_path / "user home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    (repo / "payroll_ui").mkdir(parents=True)
+    (repo / "tools" / "payroll_launcher").mkdir(parents=True)
+    (repo / "payroll_ui" / "server.py").write_text("", encoding="utf-8")
+    (repo / "tools" / "payroll_launcher" / "__main__.py").write_text("", encoding="utf-8")
+    python = tmp_path / "runtime" / "python"
+    python_script = (
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$PYTHON_LOG\"\n"
+        "exit 0\n"
+    )
+    bundle = _test_bundle(tmp_path)
+    completed, _dialog_log, _state_dir = _run_bundle_bootstrap(
+        bundle, home, monkeypatch,
+        config=_bundle_config(home, repo, python), python_script=python_script,
+    )
+
+    invocations = (home / "python-invocations.log").read_text(encoding="utf-8").splitlines()
+    assert completed.returncode == 0
+    assert len(invocations) == 2  # preflight import, then launcher dispatch
+    assert invocations[-1] == "-m payroll_launcher --mode open"
+    installed_config = json.loads((bundle / "Contents" / "Resources" / "launcher.json").read_text(encoding="utf-8"))
+    assert installed_config["data_dir"] == str(home / "Library" / "Application Support" / "EducationPayroll")
 
 
 def test_app_transport_does_not_require_a_terminal_or_random_port():
