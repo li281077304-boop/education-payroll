@@ -29,7 +29,7 @@ const coreStateLabels = {
 
 const roleCopy = {
   schedule: ["原始排课数据", "选择原始排课表", "用于重新计算一对一和班课"],
-  subject_group: ["学科组提交表", "选择学科组提交表", "系统会自动识别所属学科组"],
+  subject_group: ["学科组提交表", "选择学科组提交表", "请先选择本文件所属科组；每份资料分别确认"],
   math: ["学科组提交表", "选择学科组提交表", "确定本次需要核验的教师"],
   science: ["学科组提交表", "选择学科组提交表", "确定本次需要核验的教师"],
   renewal: ["续费表", "选择续费表", "识别当前月份续费课时；确认后进入工资"],
@@ -50,6 +50,13 @@ function selectedRunGroups(run = current) {
 }
 function runGroupsLabel(run = current, fallback = "") {
   return selectedRunGroups(run).join("、") || fallback;
+}
+function runNeedsRecalculation(run = current) {
+  return Boolean(run?.recalculation_required || run?.role_scope_recalculation_required);
+}
+function subjectGroupCandidateKey(item, fallback = "") {
+  if (item?.candidate_id) return String(item.candidate_id);
+  return `${item?.role || item?.recognized_role || "legacy"}|${item?.recognized_group || ""}|${item?.source_sha256 || item?.sha256 || fallback}`;
 }
 const fmtDate = (value) => value ? new Date(value).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
 let lastClickedActionButton = null;
@@ -612,7 +619,7 @@ function currentTodoSummary() {
   if (current?.period_authority?.is_fallback) pendingKeys.add("period-authority");
   if (current?.support_department_pending_preview?.status === "PENDING_CONFIRMATION") pendingKeys.add("support-source");
   for (const [key, item] of Object.entries(current?.pending_subject_group_imports || {})) {
-    pendingKeys.add(`subject-group:${item.source_sha256 || key}`);
+    pendingKeys.add(`subject-group:${subjectGroupCandidateKey(item, key)}`);
   }
   const historyPending = current?.historical_salary_reference_pending_preview || {};
   if (historyPending.status === "PENDING_CONFIRMATION") pendingKeys.add(`history-membership:${historyPending.source_sha256 || historyPending.source_name || "pending"}`);
@@ -626,7 +633,8 @@ function currentTodoSummary() {
     }
   }
   const unknownBasisCount = Number(current?.employment?.salary_basis_counts?.SOURCE_UNKNOWN || 0);
-  if (unknownBasisCount > 0) pendingKeys.add("salary-basis");
+  const salaryBasisDeferred = Boolean(current?.base_salary_deferred);
+  if (unknownBasisCount > 0 && !salaryBasisDeferred) pendingKeys.add("salary-basis");
   if (baseSalaryTodoCard()) pendingKeys.add("salary-basis");
   if (current?.mode === "GENERATE" && !current.af_policy_confirmation) pendingKeys.add("af-policy");
 
@@ -645,10 +653,10 @@ function currentTodoSummary() {
   }
   if (current?.support_source?.bound) processedKeys.add("support-source");
   for (const material of current?.subject_group_materials || []) {
-    if (material.status === "CONFIRMED" && !material.removed_at) processedKeys.add(`subject-group:${material.source_sha256 || material.material_id}`);
+    if (material.status === "CONFIRMED" && !material.removed_at) processedKeys.add(`subject-group:${subjectGroupCandidateKey(material, material.material_id)}`);
   }
   for (const item of current?.subject_group_pending_history || []) {
-    if (item.event === "CANCELLED" || item.event === "LEGACY_UNCONFIRMED_FILE_CANCELLED") deferredKeys.add(`subject-group:${item.material_id || item.source_sha256 || item.role || "candidate"}`);
+    if (item.event === "CANCELLED" || item.event === "LEGACY_UNCONFIRMED_FILE_CANCELLED") deferredKeys.add(`subject-group:${subjectGroupCandidateKey(item, item.material_id || "candidate")}`);
   }
   if ((current?.support_department_pending_history || []).some((item) => item.event === "CANCELLED")) deferredKeys.add("support-source");
   for (const reference of references) {
@@ -659,14 +667,29 @@ function currentTodoSummary() {
   }
   if (current?.historical_salary_reference_pending_history?.some((item) => item.event === "CANCELLED")) deferredKeys.add("history-membership:deferred");
   if (current?.run_renewal_result_snapshot) processedKeys.add("renewal-source");
-  if (Object.keys(current?.salary_basis_confirmations || {}).length) processedKeys.add("salary-basis");
-  if (current?.base_salary_input_snapshot && !current?.support_source?.bound) processedKeys.add("salary-basis");
-  if (current?.base_salary_deferred) deferredKeys.add("salary-basis");
+  const salaryBasisTeachers = current?.employment?.teachers || [];
+  const hasConfirmedSalaryBasis = salaryBasisTeachers.some((item) =>
+    item.salary_basis && item.salary_basis !== "SOURCE_UNKNOWN" && item.salary_basis_source
+  );
+  if (!unknownBasisCount && !salaryBasisDeferred && (
+    Object.keys(current?.salary_basis_confirmations || {}).length > 0
+    || Boolean(current?.base_salary_input_snapshot)
+    || hasConfirmedSalaryBasis
+  )) processedKeys.add("salary-basis");
+  if (salaryBasisDeferred) deferredKeys.add("salary-basis");
   if (current?.af_policy_confirmation) processedKeys.add("af-policy");
   if (["SWITCHED", "KEPT"].includes(current?.period_check?.decision)) processedKeys.add("period-month");
   if (current?.period_authority && !current.period_authority.is_fallback && (current.period_authority.source_file || current.period_authority.source_label || current.period_authority.boundary_source)) processedKeys.add("period-authority");
   if ((current?.period_window_history || []).length) processedKeys.add("period-coverage");
   for (const key of current?.ui_deferred_todo_keys || []) deferredKeys.add(key);
+
+  // A single user-visible action can have several backend representations.
+  // Keep its current state exclusive even if stale history also mentions it.
+  for (const key of deferredKeys) {
+    pendingKeys.delete(key);
+    processedKeys.delete(key);
+  }
+  for (const key of pendingKeys) processedKeys.delete(key);
 
   return { pending: pendingKeys.size, processed: processedKeys.size, deferred: deferredKeys.size };
 }
@@ -690,7 +713,7 @@ function renderRun() {
   }
   const stale = reconfirmationBanner(current) + (current.status === "STALE" ? '<div class="banner error"><strong>原始文件已发生变化</strong><span>请重新选择标记为“已变化”的材料，再重新核对。旧结果不会继续显示为有效。</span></div>' : "");
   const lastError = current.last_error ? `<div class="banner error"><strong>上次核对未完成</strong><span>${escapeHtml(current.last_error)}</span></div>` : "";
-  const roleRecheck = current.role_scope_recalculation_required ? '<div class="banner warn"><strong>流程角色已保存，旧结果仅保留为历史记录</strong><span>当前尚未按新处理范围核算；不会自动重算。请在材料确认后主动点击“开始核算”。</span></div>' : "";
+  const roleRecheck = runNeedsRecalculation(current) ? `<div class="banner warn"><strong>工资结果需要重新核算</strong><span>${escapeHtml(current.recalculation_required_reason || "人员范围或工资基础已变化")}；旧结果已保留为历史记录，不会自动重算。请确认材料后主动点击“开始核算”。</span></div>` : "";
     const authority = current.period_authority || {};
     const sourceText = authority.source_file || authority.source?.source_file || authority.source_label || "自然月兜底（尚无人工月资料）";
     const roleLabel = (current.operator_role || "DOS") === "SUBJECT_LEADER" ? `学科组长 · ${escapeHtml(runGroupsLabel(current, "待选科组"))}` : "DOS / 教学管理者 · 全教学部";
@@ -843,6 +866,7 @@ function employmentCard() {
   const counts = employment.counts || {};
   if (!counts.total) return "";
   const people = employment.teachers || [];
+  const editableGroups = current.operator_role === "SUBJECT_LEADER" ? selectedRunGroups(current) : payrollGroups;
   const groupCounts = employment.group_counts || {};
   const rows = people.map((item) => {
     const groupStatus = item.teacher_group_status || "NEEDS_CONFIRMATION";
@@ -850,7 +874,7 @@ function employmentCard() {
     const groupLabel = groupStatus === "CONFIRMED" ? "已确认" : groupStatus === "SUGGESTED" ? `候选：${item.teacher_group}` : "待确认";
     const basis = item.salary_basis || "SOURCE_UNKNOWN";
     const basisLabel = basis === "HAS_BASE_SALARY" ? "有底薪" : basis === "HOURLY_SUBMISSION_ONLY" ? "明确无底薪 · 组表提供结果" : "资料未知";
-    return `<tr class="staff-roster-row" data-teacher="${escapeHtml(item.teacher)}" data-teacher-id="${escapeHtml(item.teacher_id || item.teacher)}" data-group-initial="${escapeHtml(initialGroup)}" data-group-status="${escapeHtml(groupStatus)}" data-group-suggestion="${escapeHtml(item.teacher_group || "")}"><td><strong>${escapeHtml(item.teacher)}</strong><div class="small muted">${escapeHtml((item.subjects || []).join("、") || item.detail || "")}</div></td><td><select class="staff-group" aria-label="${escapeHtml(item.teacher)}归属学科组"><option value="">${escapeHtml(groupLabel)}</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${initialGroup === group ? "selected" : ""}>${group}</option>`).join("")}</select><div class="small muted">${escapeHtml(item.teacher_group_source || "")}</div></td><td><span class="status ${basis === "SOURCE_UNKNOWN" ? "warn" : basis === "HAS_BASE_SALARY" ? "ok" : "info"}">${escapeHtml(basisLabel)}</span><div class="small muted">${escapeHtml(item.salary_basis_source || item.teacher_group_source || "")}</div></td><td><span class="small muted">${escapeHtml(item.salary_basis_reason || item.detail || "")}</span></td></tr>`;
+    return `<tr class="staff-roster-row" data-teacher="${escapeHtml(item.teacher)}" data-teacher-id="${escapeHtml(item.teacher_id || item.teacher)}" data-group-initial="${escapeHtml(initialGroup)}" data-group-status="${escapeHtml(groupStatus)}" data-group-suggestion="${escapeHtml(item.teacher_group || "")}"><td><strong>${escapeHtml(item.teacher)}</strong><div class="small muted">${escapeHtml((item.subjects || []).join("、") || item.detail || "")}</div></td><td><select class="staff-group" aria-label="${escapeHtml(item.teacher)}归属学科组"><option value="">${escapeHtml(groupLabel)}</option>${editableGroups.map((group) => `<option value="${group}" ${initialGroup === group ? "selected" : ""}>${group}</option>`).join("")}</select><div class="small muted">${escapeHtml(item.teacher_group_source || "")}</div></td><td><span class="status ${basis === "SOURCE_UNKNOWN" ? "warn" : basis === "HAS_BASE_SALARY" ? "ok" : "info"}">${escapeHtml(basisLabel)}</span><div class="small muted">${escapeHtml(item.salary_basis_source || item.teacher_group_source || "")}</div></td><td><span class="small muted">${escapeHtml(item.salary_basis_reason || item.detail || "")}</span></td></tr>`;
   }).join("");
   const unconfirmedGroups = employment.group_needs_confirmation?.length || 0;
   const scope = current.processing_scope || {};
@@ -1372,7 +1396,7 @@ function formatNumber(value) { return value == null ? "—" : Number(value).toFi
 
 function materialsPage() {
   const warnings = [...new Set(current.health.warnings || [])];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入当前人工月排课表、学科组资料和工资来源。确认、选择与暂缓全部进入待处理问题页；本步不启动完整核算。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="拖入工资资料包" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>整套资料包（可选）</strong><span>可一次拖入多份材料；也可分别添加。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择资料包文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${salaryMaterialsModule()}${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>材料待补：</strong>${current.health.missing.map(escapeHtml).join("、")}` : "材料状态已保存；请继续确认本次教师名单与归属。"}</div><button class="secondary" onclick="refreshRun()">重新检查材料</button></div></section>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入当前人工月排课表、学科组资料和工资来源。确认、选择与暂缓全部进入待处理问题页；本步不启动完整核算。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="批量识别辅助资料" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>批量识别辅助资料（可选）</strong><span>可辅助读取排课、续费、退费、星级等资料；工资资料和学科组提交表仍需在对应区域逐份确认。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择辅助资料文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${salaryMaterialsModule()}${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>材料待补：</strong>${current.health.missing.map(escapeHtml).join("、")}` : "材料状态已保存；请继续确认本次教师名单与归属。"}</div><button class="secondary" onclick="refreshRun()">重新检查材料</button></div></section>`;
 }
 
 function salaryMaterialsModule() {
@@ -1400,7 +1424,9 @@ function subjectGroupCard(files) {
     const role = item.role;
     const label = item.file?.recognized_group || (role === "math" ? "数学组" : "理化组");
     const status = item.confirmed_for_run ? "已确认用于本月工资" : "待人工确认，不会进入工资";
-    const action = item.confirmed_for_run ? "" : `<button class="secondary" onclick="previewExistingSubjectGroup('${escapeHtml(role)}')">预览并确认当前资料</button>`;
+    const pendingEntry = Object.entries(current.pending_subject_group_imports || {}).find(([, candidate]) => candidate.role === role && candidate.source_sha256 === item.file?.sha256);
+    const candidateId = pendingEntry?.[0] || pendingEntry?.[1]?.candidate_id || "";
+    const action = item.confirmed_for_run ? "" : `<button class="secondary" onclick="previewExistingSubjectGroup('${escapeHtml(role)}','${escapeHtml(candidateId)}')">预览并确认当前资料</button>`;
     return `<div class="file-name">${escapeHtml(label)} · ${escapeHtml(item.file.name)} <span class="small ${item.confirmed_for_run ? "ok" : "warn"}">${status}</span>${action}</div>`;
   }).join("");
   const confirmedMarkup = confirmedMaterials.length ? `<div class="subject-group-confirmed-list"><strong>本次已确认资料（${confirmedMaterials.length} 份）</strong>${confirmedMaterials.map((item) => {
@@ -1459,9 +1485,9 @@ async function choosePackage() {
     const result = await api(`/api/runs/${current.id}/package`, { method: "POST", body: JSON.stringify({ path: picked.path }) });
     current = result.run;
     renderRun();
-    showMessage("资料包已自动识别并绑定到本次核算。", "success");
+    showMessage("已完成可识别辅助资料的读取；工资资料和学科组提交表仍需在对应区域分别预览确认。", "success");
   } catch (error) { showMessage(error.message); }
-  finally { if (button) { button.disabled = false; button.textContent = "选择资料包文件夹"; } }
+  finally { if (button) { button.disabled = false; button.textContent = "选择辅助资料文件夹"; } }
 }
 
 function periodMismatchCard() {
@@ -1846,8 +1872,8 @@ function afExceptionsMarkup() {
 }
 
 function payrollPreviewPage() {
-  if (current.role_scope_recalculation_required) {
-    return `<section class="card"><h2>旧范围结果暂不用于新流程</h2><p class="muted">旧工资结果保留为历史记录。角色范围已经保存，但只有你主动开始核算后，系统才会生成新范围结果。</p><div class="action-bar"><button onclick="setTab('issues')">去待处理问题并开始核算</button></div></section>`;
+  if (runNeedsRecalculation(current)) {
+    return `<section class="card"><h2>工资结果需要重新核算</h2><p class="muted">${escapeHtml(current.recalculation_required_reason || "当前处理范围或工资基础已变化")}。旧工资结果已保留为历史记录；只有你主动点击“开始核算”后才会生成新结果。</p><div class="action-bar"><button onclick="setTab('issues')">去待处理问题并开始核算</button></div></section>`;
   }
   const generated = current.generated_payroll || {};
   const rows = generated.rows?.length ? generated.rows : (current.core_calculation?.rows || []);
@@ -2003,12 +2029,12 @@ function scopeDecisionCards() {
     const role = item.role || key;
     const label = item.recognized_group || (role === "science" ? "理化组" : "数学组");
     if (item.preview_required) {
-      cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">科组资料确认</p><h3>${escapeHtml(label)} · ${escapeHtml(item.source_name || "旧版候选")}</h3><p class="muted">该资料尚未以本轮可审阅快照确认，不会进入当前工资。</p></div><span class="status warn">待预览</span></div><button class="secondary" onclick="previewExistingSubjectGroup('${escapeHtml(role)}')">继续预览</button></section>`);
+      cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">科组资料确认</p><h3>${escapeHtml(label)} · ${escapeHtml(item.source_name || "旧版候选")}</h3><p class="muted">该资料尚未以本轮可审阅快照确认，不会进入当前工资。</p></div><span class="status warn">待预览</span></div><button class="secondary" onclick="previewExistingSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.candidate_id || key)}')">继续预览</button></section>`);
       continue;
     }
     const inputId = `todo-group-confirm-${String(key).replace(/[^a-zA-Z0-9_-]/g, "")}`;
     const duplicates = item.cross_file_duplicates || [];
-    cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">科组资料确认</p><h3>${escapeHtml(label)} · ${escapeHtml(item.source_name || "提交资料")}</h3><p class="muted">教师 ${escapeHtml(item.teacher_count || 0)} 人 · 记录 ${escapeHtml(item.record_count || 0)} 条 · 文件标识 ${escapeHtml(String(item.source_sha256 || "").slice(0, 12))}</p>${duplicates.length ? `<p class="small warn">与已确认文件重复 ${duplicates.length} 人；重复不会阻塞其它教师，字段冲突会单独列出。</p>` : ""}</div><span class="status warn">待确认</span></div><label>本次确认人<input id="${escapeHtml(inputId)}" placeholder="填写确认人姓名"></label><div class="action-bar"><button ${item.can_confirm ? "" : "disabled"} onclick="confirmSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}',false,'${escapeHtml(inputId)}','${escapeHtml(item.recognized_group || "")}')">确认用于本月工资</button><button class="secondary" onclick="cancelSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}')">暂缓</button></div></section>`);
+    cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">科组资料确认</p><h3>${escapeHtml(label)} · ${escapeHtml(item.source_name || "提交资料")}</h3><p class="muted">教师 ${escapeHtml(item.teacher_count || 0)} 人 · 记录 ${escapeHtml(item.record_count || 0)} 条 · 文件标识 ${escapeHtml(String(item.source_sha256 || "").slice(0, 12))}</p>${duplicates.length ? `<p class="small warn">与已确认文件重复 ${duplicates.length} 人；重复不会阻塞其它教师，字段冲突会单独列出。</p>` : ""}</div><span class="status warn">待确认</span></div><label>本次确认人<input id="${escapeHtml(inputId)}" placeholder="填写确认人姓名"></label><div class="action-bar"><button ${item.can_confirm ? "" : "disabled"} onclick="confirmSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}',false,'${escapeHtml(inputId)}','${escapeHtml(item.recognized_group || "")}','${escapeHtml(item.candidate_id || key)}')">确认用于本月工资</button><button class="secondary" onclick="cancelSubjectGroup('${escapeHtml(role)}','${escapeHtml(item.source_sha256)}','${escapeHtml(item.candidate_id || key)}','${escapeHtml(item.recognized_group || "")}')">暂缓</button></div></section>`);
   }
   const historyPending = current.historical_salary_reference_pending_preview || {};
   if (historyPending.status === "PENDING_CONFIRMATION") {
@@ -2071,8 +2097,8 @@ async function confirmSalaryBasisBatch() {
 }
 
 function issuesPage() {
-  if (current.role_scope_recalculation_required) {
-    return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">角色范围已更新。旧问题不属于新范围，因此暂不展示；你主动开始核算后会生成当前范围的问题清单。</p></div><button onclick="recheck()">开始核算</button></div><div class="banner info"><strong>不会自动重算</strong><span>点击上方“开始核算”才会按已保存角色与当前 Run 材料重新处理。</span></div></section>`;
+  if (runNeedsRecalculation(current)) {
+    return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">${escapeHtml(current.recalculation_required_reason || "处理范围或工资基础已变化")}。旧问题不会当作当前结果显示。</p></div><button onclick="recheck()">开始核算</button></div><div class="banner info"><strong>不会自动重算</strong><span>点击上方“开始核算”才会按已保存人员与当前 Run 材料重新处理。</span></div></section>`;
   }
   return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">所有需要确认、选择、接受或暂缓的事项都集中在这里；处理后保持当前位置。</p></div><button onclick="recheck()">${current.core_calculation?.rows?.length ? "重新核算" : "开始核算"}</button></div>${scopeDecisionCards()}<div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters(event)" oncompositionend="updateFilters(event)"></label></div>${baseSalaryTodoCard()}<div id="issues-content">${issueResultsMarkup()}</div>${afPolicyBlock()}<div id="issue-detail"></div></section>`;
 }
@@ -2620,7 +2646,7 @@ function setMaterialBusy(role, busy) {
   const zone = document.querySelector(`[data-drop-role="${role}"]`);
   if (!zone) return;
   zone.setAttribute("aria-busy", busy ? "true" : "false");
-  zone.textContent = busy ? "正在读取并识别…" : (role === "package" ? "把整套资料拖到这里，系统自动归类" : "拖入文件，或直接粘贴");
+  zone.textContent = busy ? "正在读取并识别…" : (role === "package" ? "拖入辅助资料；工资资料和学科组提交表仍需分别确认" : "拖入文件，或直接粘贴");
   zone.style.opacity = busy ? "0.65" : "";
   zone.style.pointerEvents = busy ? "none" : "";
 }
@@ -2677,13 +2703,18 @@ async function importMaterialPath(role, path) {
   renderRun();
 }
 
-async function previewExistingSubjectGroup(role) {
-  const file = current.files?.[role];
-  const pending = Object.values(current.pending_subject_group_imports || {}).find((item) => item.role === role && item.preview_required);
-  const path = file?.path || pending?.source_path;
+async function previewExistingSubjectGroup(role, candidateId = "") {
+  const pendingEntries = Object.entries(current.pending_subject_group_imports || {});
+  const pendingEntry = candidateId
+    ? pendingEntries.find(([key, item]) => key === candidateId || item.candidate_id === candidateId)
+    : pendingEntries.find(([, item]) => item.role === role && item.preview_required);
+  if (candidateId && !pendingEntry) return showMessage("这份待处理资料已变化，请刷新后重新选择。", "error");
+  const pending = pendingEntry?.[1];
+  const file = pending ? null : current.files?.[role];
+  const path = pending?.source_path || file?.path;
   if (!path) return showMessage("找不到这份学科组资料，请重新选择文件。");
   try {
-    const pendingGroup = Object.values(current.pending_subject_group_imports || {}).find((item) => item.role === role)?.recognized_group;
+    const pendingGroup = pending?.recognized_group || pendingEntries.find(([, item]) => item.role === role)?.[1]?.recognized_group;
     const group = current.operator_role === "SUBJECT_LEADER" ? (pendingGroup || file?.recognized_group || (selectedRunGroups(current).length === 1 ? selectedRunGroups(current)[0] : "")) : (file?.recognized_group || pendingGroup || { math: "数学组", science: "理化组" }[role]);
     if (!group) return showMessage("联合组长请先明确选择这份资料所属的科组，再重新预览。", "error");
     const result = await api(`/api/runs/${current.id}/material`, { method: "POST", body: JSON.stringify({ kind: "subject_group", path, selected_group: group }) });
@@ -2693,22 +2724,26 @@ async function previewExistingSubjectGroup(role) {
   } catch (error) { showMessage(error.message); }
 }
 
-async function confirmSubjectGroup(role, sourceSha256, replaceExisting = false, confirmInputId = "", selectedGroup = "") {
+async function confirmSubjectGroup(role, sourceSha256, replaceExisting = false, confirmInputId = "", selectedGroup = "", candidateId = "") {
   const actor = (confirmInputId ? document.getElementById(confirmInputId) : document.querySelector(`#subject-group-confirmed-by-${CSS.escape(role)}`))?.value?.trim() || "";
   if (!actor) return showMessage("请填写本次学科组提交表确认人。");
-  const pending = Object.values(current.pending_subject_group_imports || {}).find((item) => item.role === role && item.source_sha256 === sourceSha256 && (!selectedGroup || item.recognized_group === selectedGroup));
+  const pending = Object.entries(current.pending_subject_group_imports || {}).find(([key, item]) =>
+    item.role === role && item.source_sha256 === sourceSha256
+    && (!selectedGroup || item.recognized_group === selectedGroup)
+    && (!candidateId || key === candidateId || item.candidate_id === candidateId)
+  )?.[1];
   if (!pending?.can_confirm || pending.source_sha256 !== sourceSha256) return showMessage("预览已变化或无法安全匹配，请重新预览。");
   try {
-    const result = await api(`/api/runs/${current.id}/subject-group-confirm`, { method: "POST", body: JSON.stringify({ role, source_sha256: sourceSha256, selected_group: pending.recognized_group || selectedGroup, confirmed_by: actor, replace_existing: replaceExisting }) });
+    const result = await api(`/api/runs/${current.id}/subject-group-confirm`, { method: "POST", body: JSON.stringify({ role, source_sha256: sourceSha256, selected_group: pending.recognized_group || selectedGroup, candidate_id: pending.candidate_id || candidateId, confirmed_by: actor, replace_existing: replaceExisting }) });
     current = result.run;
     renderRun();
     showMessage("学科组提交表已确认并用于本月工资；教师名单仍以人工月排课表为准。", "success");
   } catch (error) { await refreshAfterError(error); }
 }
 
-async function cancelSubjectGroup(role, sourceSha256 = "") {
+async function cancelSubjectGroup(role, sourceSha256 = "", candidateId = "", selectedGroup = "") {
   try {
-    current = await api(`/api/runs/${current.id}/subject-group-cancel`, { method: "POST", body: JSON.stringify({ role, source_sha256: sourceSha256 }) });
+    current = await api(`/api/runs/${current.id}/subject-group-cancel`, { method: "POST", body: JSON.stringify({ role, source_sha256: sourceSha256, candidate_id: candidateId, selected_group: selectedGroup }) });
     renderRun();
     showMessage("未确认的学科组资料已取消，不会进入本月工资。", "info");
   } catch (error) { await refreshAfterError(error); }

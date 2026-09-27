@@ -175,7 +175,89 @@ vm.runInContext(`current={
  ], decisions:[], files:{}, support_source:{bound:false}, period_authority:{}, employment:{salary_basis_counts:{SOURCE_UNKNOWN:0},teachers:[]}
 };`, context);
 summary = vm.runInContext('currentTodoSummary()', context);
+    assert.deepEqual(JSON.parse(JSON.stringify(summary)), {pending:0,processed:1,deferred:1});
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_todo_summary_salary_basis_states_and_same_hash_group_candidates_are_exclusive():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;},querySelectorAll(){return []; }}, window:{}, console};
+vm.createContext(context); vm.runInContext(source, context);
+const common = {id:'run-summary',mode:'AUDIT',period:'2026-08',issue_groups:[],user_actions:[],business_decisions:[],decisions:[],
+  files:{},period_authority:{is_fallback:false},period_check:{},support_source:{bound:false},
+  employment:{salary_basis_counts:{SOURCE_UNKNOWN:1},teachers:[{teacher:'教师甲',teacher_id:'t1',salary_basis:'SOURCE_UNKNOWN'}]}};
+context.common = common;
+vm.runInContext('current=common', context);
+let summary = vm.runInContext('currentTodoSummary()', context);
+assert.deepEqual(JSON.parse(JSON.stringify(summary)), {pending:1,processed:0,deferred:0});
+vm.runInContext(`current.employment.salary_basis_counts.SOURCE_UNKNOWN=0;
+current.employment.teachers=[{teacher:'教师甲',teacher_id:'t1',salary_basis:'HOURLY_SUBMISSION_ONLY',salary_basis_source:'USER_CONFIRMED_SALARY_BASIS'}]`, context);
+summary = vm.runInContext('currentTodoSummary()', context);
+assert.deepEqual(JSON.parse(JSON.stringify(summary)), {pending:0,processed:1,deferred:0});
+vm.runInContext(`current.employment.salary_basis_counts.SOURCE_UNKNOWN=1;
+current.employment.teachers=[{teacher:'教师甲',teacher_id:'t1',salary_basis:'SOURCE_UNKNOWN'}];
+current.base_salary_deferred=true`, context);
+summary = vm.runInContext('currentTodoSummary()', context);
+assert.deepEqual(JSON.parse(JSON.stringify(summary)), {pending:0,processed:0,deferred:1});
+vm.runInContext(`current.base_salary_deferred=false;
+ current.employment.salary_basis_counts.SOURCE_UNKNOWN=0; current.employment.teachers=[];
+ current.pending_subject_group_imports={
+ a:{candidate_id:'candidate-a',role:'math',recognized_group:'数学组',source_sha256:'same-hash'},
+ b:{candidate_id:'candidate-b',role:'math',recognized_group:'语文组',source_sha256:'same-hash'}
+}; current.subject_group_materials=[]; current.subject_group_pending_history=[]`, context);
+summary = vm.runInContext('currentTodoSummary()', context);
+assert.equal(summary.pending, 2, JSON.stringify(summary));
+vm.runInContext(`delete current.pending_subject_group_imports.a;
+current.subject_group_materials=[{candidate_id:'candidate-a',recognized_role:'math',recognized_group:'数学组',source_sha256:'same-hash',status:'CONFIRMED'}]`, context);
+summary = vm.runInContext('currentTodoSummary()', context);
+assert.deepEqual(JSON.parse(JSON.stringify(summary)), {pending:1,processed:1,deferred:0});
+vm.runInContext(`delete current.pending_subject_group_imports.b;
+current.subject_group_pending_history=[{candidate_id:'candidate-b',role:'math',recognized_group:'语文组',source_sha256:'same-hash',event:'CANCELLED'}]`, context);
+summary = vm.runInContext('currentTodoSummary()', context);
 assert.deepEqual(JSON.parse(JSON.stringify(summary)), {pending:0,processed:1,deferred:1});
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_pending_group_preview_uses_the_selected_candidate_not_the_first_role_match():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const fullSource = fs.readFileSync(process.argv[1], 'utf8');
+const start = fullSource.indexOf('async function previewExistingSubjectGroup');
+const end = fullSource.indexOf('async function confirmSubjectGroup', start);
+const source = fullSource.slice(start, end);
+const context = {document:{querySelector(){return null;},querySelectorAll(){return []; }}, window:{}, console};
+vm.createContext(context); vm.runInContext(source, context);
+vm.runInContext(`current={id:'run-1',operator_role:'SUBJECT_LEADER',selected_groups:['数学组','语文组'],selected_group:'',
+ files:{math:{path:'/source-A.csv',recognized_group:'数学组'}},pending_subject_group_imports:{
+  'candidate-a':{candidate_id:'candidate-a',role:'math',recognized_group:'数学组',source_path:'/source-A.csv',source_sha256:'sha-a'},
+  'candidate-b':{candidate_id:'candidate-b',role:'math',recognized_group:'语文组',source_path:'/source-B.csv',source_sha256:'sha-b'}
+ }};
+ selectedRunGroups=(run)=>run.selected_groups;
+ escapeHtml=(value)=>String(value||'');
+ sent=null; shown=null;
+ api=async(_path,options)=>{sent=JSON.parse(options.body);return {run:current}};
+ renderRun=()=>{}; showMessage=(message)=>{shown=message};`, context);
+(async()=>{
+ await vm.runInContext("previewExistingSubjectGroup('math','candidate-b')", context);
+ const sent = vm.runInContext('sent', context);
+ if (!sent) throw new Error(`preview request not sent: ${vm.runInContext('shown', context)}`);
+ assert.equal(sent.path,'/source-B.csv');
+ assert.equal(sent.selected_group,'语文组');
+})().catch(error=>{console.error(error);process.exitCode=1});
 '''
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)

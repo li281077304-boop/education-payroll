@@ -358,10 +358,13 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         run_id, str(payload.get("role", "")), str(payload.get("source_sha256", "")),
                         str(payload.get("confirmed_by", "")), replace_existing=bool(payload.get("replace_existing", False)),
                         selected_group=str(payload.get("selected_group", "")),
+                        candidate_id=str(payload.get("candidate_id", "")),
                     ))
                 if action == "subject-group-cancel":
                     return self._json(self.server.service.cancel_subject_group_material(
                         run_id, str(payload.get("role", "")), str(payload.get("source_sha256", "")),
+                        candidate_id=str(payload.get("candidate_id", "")),
+                        selected_group=str(payload.get("selected_group", "")),
                     ))
                 if action == "subject-group-remove":
                     return self._json(self.server.service.remove_subject_group_material(

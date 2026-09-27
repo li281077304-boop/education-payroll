@@ -102,6 +102,185 @@ def test_joint_processing_scope_unions_history_membership_and_confirmed_material
     assert scope["selected_groups"] == ["数学组", "理化组"]
 
 
+def test_confirming_new_group_after_check_archives_and_invalidates_active_results(tmp_path, monkeypatch):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "理化组"])
+    service.confirm_staff_batch(run_id, "负责人", group_updates=[{"teacher_id": "math-id", "group": "数学组"}])
+    service.check(run_id)
+    before = service.store.get(run_id)
+    assert before.get("core_calculation") or before.get("generated_payroll")
+    before["business_decisions"] = [{"group_id": "old-group", "status": "ACTIVE", "action": "ACCEPTED_EXCEPTION"}]
+    before["decisions"] = [{"issue_id": "old-issue", "action": "defer"}]
+    service.store.save(before)
+
+    monkeypatch.setattr(service, "check", lambda _run_id: pytest.fail("确认人员归组不得自动重算"))
+    service.confirm_staff_batch(run_id, "负责人", group_updates=[{"teacher_id": "science-id", "group": "理化组"}])
+
+    after = service.store.get(run_id)
+    history = after["calculation_invalidation_history"][-1]
+    assert "core_calculation" not in after
+    assert "generated_payroll" not in after
+    assert history["previous_core_calculation"] or history["previous_generated_payroll"]
+    assert after["recalculation_required"] is True
+    assert "processing_scope_snapshot" not in after
+    assert history["previous_processing_scope_snapshot"]
+    assert after["summary"]["automatic_required"] == 0
+    assert after["status"] in {"FILES_READY", "DRAFT"}
+    assert after["business_decisions"][0]["status"] == "NEEDS_RECONFIRMATION"
+    assert after["decisions"] == []
+    assert after["calculation_invalidation_history"][-1]["previous_decisions"]
+
+
+def test_confirming_history_membership_invalidates_existing_results_without_recheck(tmp_path, monkeypatch):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "理化组"])
+    service.confirm_staff_batch(run_id, "负责人", group_updates=[{"teacher_id": "math-id", "group": "数学组"}])
+    service.check(run_id)
+    before = service.store.get(run_id)
+    source = _history(tmp_path / "science-history.xlsx", "science-id", 3100)
+    service.stage_historical_salary_reference_preview(run_id, str(source), "理化组")
+    monkeypatch.setattr(service, "check", lambda _run_id: pytest.fail("确认历史组籍不得自动重算"))
+
+    pending = service.store.get(run_id)["historical_salary_reference_pending_preview"]
+    service.import_base_salary_from_history(run_id, str(source), pending["source_sha256"],
+                                            "负责人", selected_group="理化组")
+
+    after = service.store.get(run_id)
+    assert "core_calculation" not in after
+    assert "generated_payroll" not in after
+    assert after["calculation_invalidation_history"][-1]["previous_core_calculation"] or before.get("generated_payroll")
+    assert after["recalculation_required"] is True
+    assert after["historical_salary_reference_snapshots"][-1]["group_membership"]["group"] == "理化组"
+
+
+@pytest.mark.parametrize("next_state", ["HOURLY_SUBMISSION_ONLY", "HAS_BASE_SALARY"])
+def test_salary_basis_change_invalidates_existing_results_without_recheck(tmp_path, monkeypatch, next_state):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "理化组"])
+    service.confirm_staff_batch(run_id, "负责人", group_updates=[{"teacher_id": "math-id", "group": "数学组"}])
+    service.check(run_id)
+    before = service.store.get(run_id)
+    assert service._salary_basis_for(before, "数学教师", "math-id")["state"] == "SOURCE_UNKNOWN"
+    monkeypatch.setattr(service, "check", lambda _run_id: pytest.fail("确认工资基础不得自动重算"))
+
+    service.confirm_staff_batch(run_id, "负责人", salary_basis_updates=[{
+        "teacher_id": "math-id", "state": next_state, "group": "数学组",
+    }])
+
+    after = service.store.get(run_id)
+    assert "core_calculation" not in after
+    assert "generated_payroll" not in after
+    assert after["calculation_invalidation_history"][-1]["previous_core_calculation"] or before.get("generated_payroll")
+    assert after["recalculation_required"] is True
+    assert after["summary"]["automatic_required"] == 0
+
+
+def test_joint_leader_cannot_assign_group_outside_responsibility_but_dos_can(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    joint_id = _run(service, tmp_path, groups=["数学组", "理化组"])
+    with pytest.raises(ValueError, match="不能把教师归入当前学科组长职责范围之外的科组"):
+        service.confirm_staff_batch(joint_id, "负责人", group_updates=[{"teacher_id": "math-id", "group": "语文组"}])
+
+    dos = service.create("2026-08", "GENERATE", operator_role="DOS")
+    service.import_file(dos["id"], "schedule", str(_schedule(tmp_path / "dos-schedule.csv", [
+        ("math-id", "数学教师", "数学"),
+    ])))
+    saved = service.confirm_staff_batch(dos["id"], "负责人", group_updates=[{"teacher_id": "math-id", "group": "语文组"}])
+    assert saved["groups_confirmed"] == 1
+
+
+def test_http_staff_batch_rejects_out_of_scope_group(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "理化组"])
+    static = Path(__file__).parents[1] / "payroll_ui" / "static"
+    server = PayrollHttpServer(("127.0.0.1", 0), service, static)
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+    request = Request(
+        f"{base}/api/runs/{run_id}/staff-batch",
+        data=json.dumps({"confirmed_by": "负责人", "group_updates": [{"teacher_id": "math-id", "group": "语文组"}]}).encode(),
+        headers={"X-Payroll-Token": token, "Content-Type": "application/json"},
+    )
+    try:
+        with pytest.raises(HTTPError) as error:
+            urlopen(request)
+        assert error.value.code == 400
+        assert "不能把教师归入当前学科组长职责范围之外的科组" in json.loads(error.value.read())["error"]
+    finally:
+        server.shutdown()
+
+
+def test_same_sha_candidates_for_two_groups_confirm_and_cancel_by_exact_candidate(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "语文组"])
+    source = _group_file(tmp_path / "same-source.csv", "数学教师")
+    math = service.preview_subject_group_material(run_id, str(source), "数学组")["subject_group_preview"]
+    chinese = service.preview_subject_group_material(run_id, str(source), "语文组")["subject_group_preview"]
+    assert math["source_sha256"] == chinese["source_sha256"]
+    assert math["candidate_id"] != chinese["candidate_id"]
+
+    service.confirm_subject_group_material(run_id, "math", chinese["source_sha256"], "负责人",
+                                           selected_group="语文组", candidate_id=chinese["candidate_id"])
+    pending = service.store.get(run_id)["pending_subject_group_imports"]
+    assert len(pending) == 1
+    assert next(iter(pending.values()))["candidate_id"] == math["candidate_id"]
+
+    service.cancel_subject_group_material(run_id, "math", math["source_sha256"], candidate_id=math["candidate_id"],
+                                          selected_group="数学组")
+    final = service.store.get(run_id)
+    assert final["pending_subject_group_imports"] == {}
+    assert [item["candidate_id"] for item in final["subject_group_materials"]] == [chinese["candidate_id"]]
+
+
+def test_cancel_rejects_ambiguous_role_sha_without_candidate_id(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "语文组"])
+    source = _group_file(tmp_path / "same-source.csv", "数学教师")
+    math = service.preview_subject_group_material(run_id, str(source), "数学组")["subject_group_preview"]
+    service.preview_subject_group_material(run_id, str(source), "语文组")
+
+    with pytest.raises(ValueError, match="candidate_id"):
+        service.cancel_subject_group_material(run_id, "math", math["source_sha256"])
+
+
+def test_http_candidate_id_confirms_and_cancels_only_the_selected_group(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "语文组"])
+    source = _group_file(tmp_path / "same-source.csv", "数学教师")
+    math = service.preview_subject_group_material(run_id, str(source), "数学组")["subject_group_preview"]
+    chinese = service.preview_subject_group_material(run_id, str(source), "语文组")["subject_group_preview"]
+    static = Path(__file__).parents[1] / "payroll_ui" / "static"
+    server = PayrollHttpServer(("127.0.0.1", 0), service, static)
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+
+    def call(action: str, payload: dict):
+        request = Request(f"{base}/api/runs/{run_id}/{action}", data=json.dumps(payload).encode(),
+                          headers={"X-Payroll-Token": token, "Content-Type": "application/json"})
+        return json.loads(urlopen(request).read())
+
+    try:
+        confirmed = call("subject-group-confirm", {
+            "role": "math", "source_sha256": chinese["source_sha256"], "selected_group": "语文组",
+            "candidate_id": chinese["candidate_id"], "confirmed_by": "负责人",
+        })
+        assert confirmed["confirmation"]["candidate_id"] == chinese["candidate_id"]
+        pending = service.store.get(run_id)["pending_subject_group_imports"]
+        assert [item["candidate_id"] for item in pending.values()] == [math["candidate_id"]]
+        removed = call("subject-group-cancel", {
+            "role": "math", "source_sha256": math["source_sha256"], "selected_group": "数学组",
+            "candidate_id": math["candidate_id"],
+        })
+        assert removed["pending_subject_group_imports"] == {}
+        assert [item["candidate_id"] for item in removed["subject_group_materials"]] == [chinese["candidate_id"]]
+    finally:
+        server.shutdown()
+
+
 @pytest.mark.parametrize("groups", [[], ["数学组", "非合法科组"]])
 def test_joint_run_rejects_empty_or_illegal_group_selection(tmp_path, groups):
     service = PayrollService(tmp_path / "data")
@@ -226,3 +405,7 @@ def test_ui_exposes_multi_group_run_and_scoped_per_file_group_choices():
     assert "学科组长 · ${escapeHtml(runGroupsLabel(current, \"待选科组\"))}" in app
     assert "请为每份历史参考选择一个所属科组" in app
     assert "每份提交资料需单独指定所属科组" in app
+    assert 'const editableGroups = current.operator_role === "SUBJECT_LEADER" ? selectedRunGroups(current) : payrollGroups;' in app
+    assert "批量识别辅助资料（可选）" in app
+    assert "工资资料和学科组提交表仍需在对应区域逐份确认" in app
+    assert "资料包已自动识别并绑定到本次核算" not in app
