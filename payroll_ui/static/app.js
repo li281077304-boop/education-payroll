@@ -570,15 +570,41 @@ function reconfirmationBanner(run) {
 }
 
 function renderRun() {
+  if (current.operator_selection_required) {
+    const heading = '<div class="run-title"><div><p class="eyebrow">历史核算流程升级</p><h1>旧流程记录</h1><div class="small muted">请选择处理角色后继续；此操作只保存流程信息，不会重新核算或改写历史工资结果。</div></div></div>';
+    shell(`${heading}<section class="card"><div class="banner info"><strong>旧流程记录，请选择按 DOS 或学科组长继续。</strong><span>确认角色前不会进入新流程。</span></div><label>继续使用<select id="legacy-run-operator" onchange="toggleLegacyRunGroup()"><option value="">请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅本组）</option></select></label><label id="legacy-run-group-wrap" class="hidden">负责科组<select id="legacy-run-group"><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}">${group}</option>`).join("")}</select></label><label>确认人<input id="legacy-run-confirmed-by" placeholder="填写确认人姓名"></label><div class="action-bar"><button onclick="saveLegacyRunOperator()">保存角色并继续</button><span class="small muted">现有历史结果保留；需由你之后主动点击“开始核算”才会生成新范围结果。</span></div></section>`);
+    return;
+  }
   const stale = reconfirmationBanner(current) + (current.status === "STALE" ? '<div class="banner error"><strong>原始文件已发生变化</strong><span>请重新选择标记为“已变化”的材料，再重新核对。旧结果不会继续显示为有效。</span></div>' : "");
   const lastError = current.last_error ? `<div class="banner error"><strong>上次核对未完成</strong><span>${escapeHtml(current.last_error)}</span></div>` : "";
+  const roleRecheck = current.role_scope_recalculation_required ? '<div class="banner warn"><strong>流程角色已保存，旧结果仅保留为历史记录</strong><span>当前尚未按新处理范围核算；不会自动重算。请在材料确认后主动点击“开始核算”。</span></div>' : "";
     const authority = current.period_authority || {};
     const sourceText = authority.source_file || authority.source?.source_file || authority.source_label || "自然月兜底（尚无人工月资料）";
     const roleLabel = (current.operator_role || "DOS") === "SUBJECT_LEADER" ? `学科组长 · ${escapeHtml(current.selected_group || "待选科组")}` : "DOS / 教学管理者 · 全教学部";
     const periodBanner = `<div class="banner info"><strong>工资月份：${escapeHtml(current.period_label || current.period)}</strong><span>人工月：${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · 来源：${escapeHtml(sourceText)}</span></div>`;
     const monthControl = `<div class="run-period-control"><label class="small muted">更改工资月份<input id="run-period-select" type="month" value="${escapeHtml(current.period)}"></label><button class="secondary" onclick="changeRunPeriod()">更改月份</button></div>`;
-    shell(`<div class="run-title"><div><p class="eyebrow">${escapeHtml(roleLabel)} · 工资月份 ${escapeHtml(current.period_label || current.period)}</p><h1>工资核算</h1><div class="small muted">人工月 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · 来源：${escapeHtml(sourceText)} · 记录编号 ${escapeHtml(current.id)}</div></div><div class="run-title-actions">${statusBadge(current)}${monthControl}</div></div>${periodBanner}${runSteps()}${stale}${lastError}${authoritySummary()}${navigation()}<section id="view"></section>`);
+    shell(`<div class="run-title"><div><p class="eyebrow">${escapeHtml(roleLabel)} · 工资月份 ${escapeHtml(current.period_label || current.period)}</p><h1>工资核算</h1><div class="small muted">人工月 ${escapeHtml(current.period_start || "—")} ～ ${escapeHtml(current.period_end || "—")} · 来源：${escapeHtml(sourceText)} · 记录编号 ${escapeHtml(current.id)}</div></div><div class="run-title-actions">${statusBadge(current)}${monthControl}</div></div>${periodBanner}${runSteps()}${stale}${lastError}${roleRecheck}${authoritySummary()}${navigation()}<section id="view"></section>`);
   renderTab();
+}
+
+function toggleLegacyRunGroup() {
+  const visible = $("#legacy-run-operator")?.value === "SUBJECT_LEADER";
+  $("#legacy-run-group-wrap")?.classList.toggle("hidden", !visible);
+}
+
+async function saveLegacyRunOperator() {
+  const role = $("#legacy-run-operator")?.value || "";
+  const group = $("#legacy-run-group")?.value || "";
+  const actor = $("#legacy-run-confirmed-by")?.value?.trim() || "";
+  if (!role) return showMessage("请选择按 DOS 或学科组长继续。", "error");
+  if (role === "SUBJECT_LEADER" && !group) return showMessage("请选择负责科组。", "error");
+  if (!actor) return showMessage("请填写确认人。", "error");
+  try {
+    current = await api(`/api/runs/${current.id}/operator-role`, { method: "POST", body: JSON.stringify({ operator_role: role, selected_group: group, confirmed_by: actor }) });
+    tab = "materials";
+    renderRun();
+    showMessage("已保存新的流程角色元数据；没有重新核算，也没有改写历史工资结果。", "success");
+  } catch (error) { showMessage(error.message); }
 }
 
 async function changeRunPeriod() {
@@ -894,42 +920,37 @@ function baseSalaryPage() {
 }
 
 function historicalSalaryReferenceCard() {
-  const reference = current.historical_salary_reference_snapshot || null;
-  const rawEntries = reference?.entries || {};
-  const referenceEntries = Array.isArray(rawEntries)
-    ? rawEntries
-    : Object.entries(rawEntries).map(([name, value]) => ({ ...(value || {}), teacher: (value || {}).display_name || (value || {}).teacher || name }));
-  const entryNames = new Set(referenceEntries.flatMap((entry) => [entry.teacher, entry.display_name, entry.teacher_id].filter(Boolean).map(normalizeUiTeacher)));
+  const references = savedHistoricalSalaryReferences();
   const people = current.employment?.teachers || [];
-  const matched = people.filter((item) => entryNames.has(normalizeUiTeacher(item.teacher)) || entryNames.has(normalizeUiTeacher(item.teacher_id)));
-  const byGroup = {};
-  people.forEach((item) => {
-    const group = item.teacher_group || "待归组";
-    byGroup[group] ||= { total: 0, reference: 0 };
-    byGroup[group].total += 1;
-    if (entryNames.has(normalizeUiTeacher(item.teacher)) || entryNames.has(normalizeUiTeacher(item.teacher_id))) byGroup[group].reference += 1;
-  });
-  const appliedSource = String(current.base_salary_input_snapshot?.source || "");
-  const applied = Boolean(current.base_salary_input_snapshot && /历史工资|历史参考/.test(appliedSource));
-  const supportBound = Boolean(current.support_source?.bound);
-  const groupStats = Object.entries(byGroup).map(([group, value]) => `<span>${escapeHtml(group)} ${value.reference}/${value.total}</span>`).join("");
-  const emptyReference = !reference ? `<div class="banner info"><strong>尚未提供历史工资参考资料</strong><span>这不是教师工资异常。可以导入支持部工资资料、导入历史工资参考，或暂不录入；系统不会为每位教师重复弹出相同问题。</span></div>` : "";
-  const file = reference?.source_name || reference?.source || "";
-  return `<section id="historical-salary-reference-card" class="card historical-reference-card"><div class="section-head"><div><p class="eyebrow">资料覆盖概览</p><h2>历史工资参考</h2><p class="muted">历史数据只作为 G～L 候选参考；本月支持部资料优先，历史工资结果不会自动沿用。</p></div><span class="status ${reference ? "info" : "muted"}">${reference ? "参考资料已保存" : "未提供"}</span></div>${emptyReference}${reference ? `<div class="facts"><span>参考文件：${escapeHtml(file)}</span><span>参考教师：${escapeHtml(matched.length)}/${escapeHtml(people.length)}</span><span>来源状态：仅参考，不自动进入本月工资</span></div><div class="staff-group-counts">${groupStats}</div><div class="action-bar"><span class="small muted">${supportBound ? "本月支持部正式资料已确认，优先使用支持部来源。" : applied ? "历史参考已在本月明确采用。" : "是否采用本月 G～L，请到待处理问题页确认。"}</span>${!applied && !supportBound ? `<button class="secondary" onclick="setTab('issues')">去待处理问题</button>` : ""}</div>` : `<div class="facts">${groupStats || `<span>本月教师 ${escapeHtml(people.length)} 人</span>`}</div><div class="action-bar"><button class="secondary" onclick="openBaseSalaryPage('${escapeHtml(current.id)}')">导入支持部工资资料</button><button class="secondary" onclick="openHistoricalImport()">导入历史工资参考</button><button class="quiet" onclick="openBaseSalaryPage('${escapeHtml(current.id)}')">本次暂不录入</button></div>`}</section>`;
+  const referenceRows = references.map((reference) => {
+    const group = reference.selected_group || reference.group_membership?.group || "待确认科组";
+    const count = reference.group_membership?.members?.length || reference.teacher_count || reference.entries?.length || Object.keys(reference.entries || {}).length;
+    const applied = (reference.use_confirmations || []).length > 0;
+    return `<div class="file-name"><strong>${escapeHtml(group)} · ${escapeHtml(reference.source_name || reference.source || "历史工资参考")}</strong><span class="small ${applied ? "ok" : "info"}">${applied ? "已明确采用到本月" : "已确认，仅作参考"}</span><span class="small muted">教师 ${escapeHtml(count)} 人 · ${escapeHtml(String(reference.source_sha256 || "").slice(0, 10))}</span></div>`;
+  }).join("");
+  const status = references.length ? `已保存 ${references.length} 份历史参考` : "未提供历史工资参考";
+  return `<section id="historical-salary-reference-card" class="card historical-reference-card"><div class="section-head"><div><p class="eyebrow">资料覆盖概览</p><h2>历史工资参考</h2><p class="muted">历史数据只作为 G～L 候选参考；不会自动成为本月工资，也不会带入上月其它工资项目。</p></div><span class="status ${references.length ? "info" : "muted"}">${escapeHtml(status)}</span></div>${references.length ? `<div class="subject-group-confirmed-list">${referenceRows}</div>` : `<div class="banner info"><strong>尚未提供历史工资参考资料</strong><span>这不是教师工资异常；可继续添加历史参考，或稍后再处理。</span></div>`}<div class="facts"><span>本月处理教师 ${escapeHtml(people.length)} 人</span></div><div class="action-bar"><span class="small muted">历史参考只用于已确认成员的 G～L；需要采用时，请到待处理问题页逐份确认。</span><button class="secondary" onclick="openHistoricalImport()">${references.length ? "继续添加历史工资参考" : "导入历史工资参考"}</button></div></section>`;
+}
+
+function savedHistoricalSalaryReferences() {
+  const references = [...(current.historical_salary_reference_snapshots || [])];
+  const legacy = current.historical_salary_reference_snapshot;
+  if (legacy && !references.some((item) => (item.reference_id || `${item.source_sha256}|${item.selected_group || item.group_membership?.group || ""}`) === (legacy.reference_id || `${legacy.source_sha256}|${legacy.selected_group || legacy.group_membership?.group || ""}`))) references.push(legacy);
+  return references;
 }
 
 function normalizeUiTeacher(value) {
   return String(value || "").replace(/[\s　]+/g, "").trim();
 }
 
-async function useHistoricalSalaryReference() {
-  const reference = current.historical_salary_reference_snapshot || {};
+async function useHistoricalSalaryReference(sourceSha256, selectedGroup) {
+  const reference = savedHistoricalSalaryReferences().find((item) => item.source_sha256 === sourceSha256 && (item.selected_group || item.group_membership?.group || "") === selectedGroup) || {};
   const confirmedBy = $("#todo-historical-reference-confirmed-by")?.value?.trim() || "";
   if (!reference.source_sha256) return showMessage("当前没有可使用的历史工资参考快照，请先导入并保存参考资料。");
   if (!confirmedBy) return showMessage("请填写本月确认人。");
-  if (!window.confirm("确认仅在本月暂按这份历史工资参考值使用？其它历史工资字段、上月计算结果和最终工资不会因此沿用。")) return;
+  if (!window.confirm(`确认仅在本月暂按 ${reference.source_name || "这份历史工资参考"}（${selectedGroup}）的 G～L 使用？其它历史工资字段、上月计算结果和最终工资不会因此沿用。`)) return;
   try {
-    current = await api(`/api/runs/${current.id}/base-salary-reference/use`, { method: "POST", body: JSON.stringify({ confirmed_by: confirmedBy, source_sha256: reference.source_sha256 }) });
+    current = await api(`/api/runs/${current.id}/base-salary-reference/use`, { method: "POST", body: JSON.stringify({ confirmed_by: confirmedBy, source_sha256: reference.source_sha256, selected_group: selectedGroup }) });
     renderRun();
     showMessage("已确认本月暂按历史 G～L 参考值使用；其它历史月份工资项目不会带入。", "success");
   } catch (error) { await refreshAfterError(error); }
@@ -1199,9 +1220,9 @@ function materialsPage() {
 
 function salaryMaterialsModule() {
   const source = current.support_source || {};
-  const reference = current.historical_salary_reference_snapshot || null;
-  const stateText = source.bound ? "已导入本月权威工资资料" : reference ? "暂无本月权威资料，已有历史工资参考" : "暂无本月权威工资资料或历史工资参考";
-  return `<section id="salary-material-module" class="salary-material-module card"><div class="section-head"><div><p class="eyebrow">工资资料</p><h2>工资资料</h2><p class="muted">${escapeHtml(stateText)}</p></div><span class="status ${source.bound ? "ok" : reference ? "info" : "warn"}">${source.bound ? "本月权威" : reference ? "历史参考" : "未提供"}</span></div><div class="salary-material-options">${supportMaterialCard()}${historicalSalaryReferenceCard()}</div><label for="history-reference-group">历史参考所属科组<select id="history-reference-group" ${current.operator_role === "SUBJECT_LEADER" ? "disabled" : ""}><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${(current.operator_role === "SUBJECT_LEADER" ? current.selected_group : "") === group ? "selected" : ""}>${group}</option>`).join("")}</select></label><input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></section>`;
+  const references = savedHistoricalSalaryReferences();
+  const stateText = source.bound ? "已导入本月权威工资资料" : references.length ? `暂无本月权威资料，已有 ${references.length} 份历史工资参考` : "暂无本月权威工资资料或历史工资参考";
+  return `<section id="salary-material-module" class="salary-material-module card"><div class="section-head"><div><p class="eyebrow">工资资料</p><h2>工资资料</h2><p class="muted">${escapeHtml(stateText)}</p></div><span class="status ${source.bound ? "ok" : references.length ? "info" : "warn"}">${source.bound ? "本月权威" : references.length ? "历史参考" : "未提供"}</span></div><div class="salary-material-options">${supportMaterialCard()}${historicalSalaryReferenceCard()}</div><label for="history-reference-group">历史参考所属科组<select id="history-reference-group" ${current.operator_role === "SUBJECT_LEADER" ? "disabled" : ""}><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${(current.operator_role === "SUBJECT_LEADER" ? current.selected_group : "") === group ? "selected" : ""}>${group}</option>`).join("")}</select></label><input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></section>`;
 }
 
 function productionMaterialCards() {
@@ -1665,6 +1686,9 @@ function afExceptionsMarkup() {
 }
 
 function payrollPreviewPage() {
+  if (current.role_scope_recalculation_required) {
+    return `<section class="card"><h2>旧范围结果暂不用于新流程</h2><p class="muted">旧工资结果保留为历史记录。角色范围已经保存，但只有你主动开始核算后，系统才会生成新范围结果。</p><div class="action-bar"><button onclick="setTab('issues')">去待处理问题并开始核算</button></div></section>`;
+  }
   const generated = current.generated_payroll || {};
   const rows = generated.rows?.length ? generated.rows : (current.core_calculation?.rows || []);
   if (!rows.length) {
@@ -1835,11 +1859,14 @@ function scopeDecisionCards() {
   if (renewalMaterialPreview?.run_id === current?.id) {
     cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">续费来源确认</p><h3>核对并确认本月续费资料</h3><p class="muted">确认前不会写入 AH / AI / AJ / AK。</p></div><span class="status warn">待确认</span></div>${renewalPreviewMarkup()}<button class="secondary" onclick="deferRenewalPreview()">暂缓这份来源</button></section>`);
   }
-  const reference = current.historical_salary_reference_snapshot || {};
+  const references = savedHistoricalSalaryReferences();
   const supportBound = Boolean(current.support_source?.bound);
-  const applied = Boolean(current.base_salary_input_snapshot && /历史工资|历史参考/.test(String(current.base_salary_input_snapshot.source || "")));
-  if (reference.source_sha256 && !applied && !supportBound && historyPending.status !== "PENDING_CONFIRMATION") {
-    cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">本月采用来源</p><h3>历史 G～L 是否暂用于本月</h3><p class="muted">所选组：${escapeHtml(reference.selected_group || reference.group_membership?.group || "—")} · 历史参考仍不是本月权威工资资料。</p></div><span class="status warn">待确认</span></div><label>本月确认人<input id="todo-historical-reference-confirmed-by" placeholder="填写确认人姓名"></label><div class="action-bar"><button onclick="useHistoricalSalaryReference()">本月暂按这份参考值使用</button><button class="secondary" onclick="showMessage('已暂缓采用。历史数值仍只作为参考，后续可回到这里确认。', 'info')">暂缓</button></div></section>`);
+  const pendingUse = references.filter((reference) => !(reference.use_confirmations || []).length);
+  if (pendingUse.length && !supportBound && historyPending.status !== "PENDING_CONFIRMATION") {
+    cards.push(`<section class="card todo-decision"><div class="section-head"><div><p class="eyebrow">本月采用来源</p><h3>历史 G～L 是否暂用于本月</h3><p class="muted">每份资料可分别确认；历史参考仍不是本月权威工资资料。</p></div><span class="status warn">待确认 ${pendingUse.length} 份</span></div><label>本月确认人<input id="todo-historical-reference-confirmed-by" placeholder="填写确认人姓名"></label>${pendingUse.map((reference) => {
+      const group = reference.selected_group || reference.group_membership?.group || "待确认科组";
+      return `<div class="file-name"><strong>${escapeHtml(group)} · ${escapeHtml(reference.source_name || "历史工资参考")}</strong><span class="small muted">${escapeHtml(String(reference.source_sha256 || "").slice(0, 10))}</span><button onclick="useHistoricalSalaryReference('${escapeHtml(reference.source_sha256 || "")}','${escapeHtml(group)}')">仅采用本月 G～L</button></div>`;
+    }).join("")}<p class="small muted">教师重合且同字段数值冲突时，系统会停止本次采用，不会覆盖已确认值。</p></section>`);
   }
   const unknownBasis = (current.employment?.teachers || []).filter((item) => item.salary_basis === "SOURCE_UNKNOWN");
   if (unknownBasis.length) {
@@ -1883,6 +1910,9 @@ async function confirmSalaryBasisBatch() {
 }
 
 function issuesPage() {
+  if (current.role_scope_recalculation_required) {
+    return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">角色范围已更新。旧问题不属于新范围，因此暂不展示；你主动开始核算后会生成当前范围的问题清单。</p></div><button onclick="recheck()">开始核算</button></div><div class="banner info"><strong>不会自动重算</strong><span>点击上方“开始核算”才会按已保存角色与当前 Run 材料重新处理。</span></div></section>`;
+  }
   const baseSalaryBlock = current.mode === "GENERATE" && !current.base_salary_input_snapshot && !current.base_salary_deferred && (current.employment?.salary_basis_counts?.SOURCE_UNKNOWN || 0) > 0
     ? `<section class="action-first base-salary-action"><h3>导入基本工资</h3><p class="muted">本月支持部资料优先；历史工资先作为参考。暂不录入时，M 和总工资保持待补充，核算稍后由你统一启动。</p><div class="action-bar"><button onclick="setTab('base-salary')">查看工资来源选项</button><button class="secondary" onclick="showMessage('可以稍后从材料准备页补充；当前不会按 0 计算。', 'success')">稍后补充</button></div><label class="person-field">暂不录入确认人<input id="defer-base-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()">暂不录入</button></div></section>`
     : "";

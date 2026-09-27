@@ -1775,10 +1775,6 @@ class PayrollService(CoreFlow):
         for profile in self._teacher_group_authority(run["period"]).values():
             if str(profile.get("group") or "") == selected_group:
                 add(str(profile.get("teacher_id") or ""), str(profile.get("teacher") or ""), "CONFIRMED_TEACHER_GROUP")
-        for teacher in canonical:
-            suggestion, _reason = self._suggest_teacher_group(teacher.get("subjects") or [])
-            if suggestion == selected_group:
-                add(str(teacher.get("teacher_id") or ""), str(teacher.get("display_name") or ""), "CURRENT_SCHEDULE_SUBJECT_CANDIDATE")
         references = list(run.get("historical_salary_reference_snapshots") or [])
         legacy_reference = run.get("historical_salary_reference_snapshot") or {}
         if legacy_reference and all(item.get("source_sha256") != legacy_reference.get("source_sha256") for item in references):
@@ -2081,17 +2077,74 @@ class PayrollService(CoreFlow):
         return authority
 
     def _salary_basis_for(self, run: dict, teacher: str, teacher_id: str = "", *, profiles: list[dict] | None = None) -> dict:
+        """Resolve salary basis from actual G:J evidence, never row presence alone."""
         name_key = normalize_teacher(teacher)
+        if str(run.get("operator_role") or OPERATOR_DOS) == OPERATOR_SUBJECT_LEADER:
+            scope = self._processing_scope(run)
+            scoped_ids = {str(item.get("teacher_id") or "") for item in scope.get("teachers", [])}
+            scoped_names = {normalize_teacher(item.get("display_name") or item.get("teacher") or "") for item in scope.get("teachers", [])}
+            if str(teacher_id or "") not in scoped_ids and name_key not in scoped_names:
+                return {"state": SALARY_BASIS_UNKNOWN, "source": "", "reason": "该教师不在当前学科组处理范围内。"}
+
+        def evidence(fields: dict | None, source: str, *, blank_means_hourly: bool) -> dict | None:
+            if not isinstance(fields, dict):
+                return None
+            def value_of(raw):
+                return raw.get("value") if isinstance(raw, dict) else raw
+            salary_values = [value_of(fields.get(code)) for code in ("G", "H", "I", "J")]
+            has_salary = any(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+                for value in salary_values
+            )
+            if has_salary:
+                return {"state": SALARY_BASIS_PRESENT, "source": source, "reason": "来源资料的 G～J 存在有效工资数值。"}
+            if blank_means_hourly and all(code in fields for code in ("G", "H", "I", "J", "K", "L")) and all(value in (None, "") for value in salary_values):
+                return {"state": SALARY_BASIS_HOURLY_SUBMISSION, "source": source, "reason": "来源资料存在该教师记录，且 G～J 明确为空；工资结果由学科组提交表提供。"}
+            return None
+
         support = run.get("support_department_snapshot") or {}
         support_entries = support.get("entries") if isinstance(support.get("entries"), dict) else {}
-        if any(normalize_teacher(str(item.get("display_name") or item.get("teacher") or key)) == name_key
-               for key, item in support_entries.items() if isinstance(item, dict)):
-            return {"state": SALARY_BASIS_PRESENT, "source": str(support.get("source_name") or "本月支持部工资资料")}
-        if teacher in (run.get("base_salary_inputs") or {}):
-            return {"state": SALARY_BASIS_PRESENT, "source": str((run.get("base_salary_inputs") or {}).get(teacher, {}).get("source") or "已确认本月 G～L")}
+        support_source = str(support.get("source_name") or "本月支持部工资资料")
+        for key, item in support_entries.items():
+            if not isinstance(item, dict) or normalize_teacher(str(item.get("display_name") or item.get("teacher") or key)) != name_key:
+                continue
+            result = evidence(item.get("base_salary"), support_source, blank_means_hourly=True)
+            if result:
+                return result
+            break
+        inputs = run.get("base_salary_inputs") or {}
+        input_entry = next((item for key, item in inputs.items() if normalize_teacher(str((item or {}).get("display_name") or key)) == name_key), None)
+        if isinstance(input_entry, dict):
+            result = evidence(input_entry.get("fields"), str(input_entry.get("source") or "已确认本月 G～L"), blank_means_hourly=False)
+            if result:
+                return result
         direct = (run.get("salary_basis_confirmations") or {}).get(str(teacher_id or teacher))
         if isinstance(direct, dict) and direct.get("state") in {SALARY_BASIS_PRESENT, SALARY_BASIS_HOURLY_SUBMISSION}:
             return {"state": direct["state"], "source": direct.get("source") or "本次核算明确确认", "reason": direct.get("reason", "")}
+
+        references = list(run.get("historical_salary_reference_snapshots") or [])
+        legacy_reference = run.get("historical_salary_reference_snapshot") or {}
+        if legacy_reference and all(item.get("source_sha256") != legacy_reference.get("source_sha256") for item in references):
+            references.append(legacy_reference)
+        for reference in references:
+            membership = reference.get("group_membership") or {}
+            members = membership.get("members") or []
+            member_ids = {str(item.get("teacher_id") or "") for item in members}
+            member_names = {normalize_teacher(item.get("teacher") or item.get("display_name") or "") for item in members}
+            if membership and str(teacher_id or "") not in member_ids and name_key not in member_names:
+                continue
+            reference_entries = reference.get("entries") or []
+            if isinstance(reference_entries, dict):
+                reference_entries = [{**(value or {}), "teacher": (value or {}).get("teacher") or (value or {}).get("display_name") or key}
+                                     for key, value in reference_entries.items() if isinstance(value, dict)]
+            entry = next((item for item in reference_entries
+                          if normalize_teacher(str(item.get("teacher") or item.get("display_name") or item.get("teacher_id") or "")) == name_key
+                          or (teacher_id and str(item.get("teacher_id") or "") == str(teacher_id))), None)
+            if not isinstance(entry, dict):
+                continue
+            result = evidence(entry.get("fields"), str(reference.get("source_name") or reference.get("source") or "历史工资参考"), blank_means_hourly=True)
+            if result:
+                return result
         candidates = [item for item in (profiles if profiles is not None else self.store.list_teacher_group_profiles())
                       if item.get("status", "ACTIVE") == "ACTIVE"
                       and (str(item.get("teacher_id") or "") == str(teacher_id or "") or normalize_teacher(item.get("teacher")) == name_key)
@@ -2254,13 +2307,15 @@ class PayrollService(CoreFlow):
                 if not isinstance(entry, dict):
                     continue
                 name = normalise_employment_name(entry.get("display_name") or "")
-                if name:
+                basis = self._salary_basis_for(run, str(entry.get("display_name") or name), str(entry.get("teacher_id") or name))
+                if name and basis.get("state") == SALARY_BASIS_PRESENT:
                     document_types[name] = (FULL_TIME, str(snapshot.get("source_name") or "支持部工资资料"))
         confirmed_inputs = run.get("base_salary_inputs") or {}
         for teacher, entry in confirmed_inputs.items():
             source = str((entry or {}).get("source") or "") if isinstance(entry, dict) else ""
             name = normalise_employment_name(teacher)
-            if name and name not in document_types:
+            basis = self._salary_basis_for(run, str((entry or {}).get("display_name") or teacher), str((entry or {}).get("teacher_id") or teacher)) if isinstance(entry, dict) else {}
+            if name and name not in document_types and basis.get("state") == SALARY_BASIS_PRESENT:
                 document_types[name] = (FULL_TIME, source or "已确认的基本工资来源")
         for role, item in (run.get("files") or {}).items():
             for teacher, value in ((item or {}).get("employment_types") or {}).items():
@@ -2889,6 +2944,7 @@ class PayrollService(CoreFlow):
             "version": "HISTORICAL_SALARY_REFERENCE/v1", "run_id": run_id,
             "period": run["period"], "source": source_label, "source_name": display_name,
             "source_path": str(source), "source_sha256": expected_sha256,
+            "reference_id": hashlib.sha256(f"{expected_sha256}|{selected_group}".encode("utf-8")).hexdigest(),
             "source_sheet": preview.get("sheet", ""), "status": "REFERENCE_ONLY",
             "confirmed_by": actor, "confirmed_at": now, "teacher_count": len(entries),
             "selected_group": selected_group, "group_membership": group_membership,
@@ -2897,7 +2953,7 @@ class PayrollService(CoreFlow):
         reference["sha256"] = hashlib.sha256(json.dumps(reference, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         run.setdefault("historical_salary_reference_history", []).append(copy.deepcopy(reference))
         references = run.setdefault("historical_salary_reference_snapshots", [])
-        if all(item.get("source_sha256") != expected_sha256 for item in references):
+        if all((item.get("reference_id") or hashlib.sha256(f"{item.get('source_sha256', '')}|{item.get('selected_group') or (item.get('group_membership') or {}).get('group', '')}".encode("utf-8")).hexdigest()) != reference["reference_id"] for item in references):
             references.append(copy.deepcopy(reference))
         run["historical_salary_reference_snapshot"] = reference
         run.pop("historical_salary_reference_pending_preview", None)
@@ -2919,7 +2975,7 @@ class PayrollService(CoreFlow):
         return {"run": self.render(run), "imported": len(entries), "status": "REFERENCE_ONLY",
                 "group_membership": group_membership, "source_sha256": expected_sha256}
 
-    def use_historical_salary_reference(self, run_id: str, confirmed_by: str, source_sha256: str) -> dict:
+    def use_historical_salary_reference(self, run_id: str, confirmed_by: str, source_sha256: str, selected_group: str = "") -> dict:
         """Apply the saved historical reference to this Run after explicit confirmation."""
         run = self._load(run_id)
         self._require_fresh(run)
@@ -2928,7 +2984,8 @@ class PayrollService(CoreFlow):
         legacy_reference = run.get("historical_salary_reference_snapshot") or {}
         if legacy_reference and all(item.get("source_sha256") != legacy_reference.get("source_sha256") for item in references):
             references.append(legacy_reference)
-        reference = next((item for item in references if item.get("source_sha256") == source_sha256), {})
+        reference = next((item for item in references if item.get("source_sha256") == source_sha256
+                          and (not selected_group or str(item.get("selected_group") or (item.get("group_membership") or {}).get("group") or "") == selected_group)), {})
         if not actor:
             raise ValueError("请填写确认人，才能将历史参考值用于本月。")
         if not reference or reference.get("status") != "REFERENCE_ONLY" or reference.get("source_sha256") != source_sha256:
@@ -2970,16 +3027,41 @@ class PayrollService(CoreFlow):
                            "effective_from": run["period"], "effective_to": run["period"]})
         if not inputs:
             raise ValueError("历史参考资料没有与本人工月排课名单相匹配的教师，不能应用。")
-        reference["use_confirmations"] = list(reference.get("use_confirmations") or []) + [{
-            "confirmed_by": actor, "confirmed_at": now, "run_id": run_id, "period": run["period"],
-        }]
-        run["historical_salary_reference_snapshots"] = references
-        if run.get("historical_salary_reference_snapshot", {}).get("source_sha256") == source_sha256:
-            run["historical_salary_reference_snapshot"] = reference
-        self.store.save(run)
-        return self.save_base_salary_inputs(run_id, inputs, actor, source=f"本月明确采用历史参考：{reference.get('source_name', '')}")
+        self.save_base_salary_inputs(
+            run_id, inputs, actor,
+            source=f"本月明确采用历史参考：{reference.get('source_name', '')}",
+            merge_existing=True,
+        )
+        updated = self.store.get(run_id)
+        updated_references = list(updated.get("historical_salary_reference_snapshots") or [])
+        reference_id = reference.get("reference_id") or hashlib.sha256(
+            f"{source_sha256}|{reference.get('selected_group') or (reference.get('group_membership') or {}).get('group', '')}".encode("utf-8")
+        ).hexdigest()
+        for index, item in enumerate(updated_references):
+            item_id = item.get("reference_id") or hashlib.sha256(
+                f"{item.get('source_sha256', '')}|{item.get('selected_group') or (item.get('group_membership') or {}).get('group', '')}".encode("utf-8")
+            ).hexdigest()
+            if item_id == reference_id:
+                item["use_confirmations"] = list(item.get("use_confirmations") or []) + [{
+                    "confirmed_by": actor, "confirmed_at": now, "run_id": run_id, "period": updated["period"],
+                }]
+                updated_references[index] = item
+                break
+        updated["historical_salary_reference_snapshots"] = updated_references
+        if updated.get("historical_salary_reference_snapshot"):
+            latest = updated["historical_salary_reference_snapshot"]
+            latest_id = latest.get("reference_id") or hashlib.sha256(
+                f"{latest.get('source_sha256', '')}|{latest.get('selected_group') or (latest.get('group_membership') or {}).get('group', '')}".encode("utf-8")
+            ).hexdigest()
+            if latest_id == reference_id:
+                latest["use_confirmations"] = list(reference.get("use_confirmations") or []) + [{
+                    "confirmed_by": actor, "confirmed_at": now, "run_id": run_id, "period": updated["period"],
+                }]
+                updated["historical_salary_reference_snapshot"] = latest
+        self.store.save(updated)
+        return self.render(updated)
 
-    def save_base_salary_inputs(self, run_id: str, inputs: list[dict], confirmed_by: str, source: str = "本次 Run 基本工资确认") -> dict:
+    def save_base_salary_inputs(self, run_id: str, inputs: list[dict], confirmed_by: str, source: str = "本次 Run 基本工资确认", *, merge_existing: bool = False) -> dict:
         """Persist and freeze the source-backed G:L inputs used to calculate M."""
         run = self._load(run_id)
         self._require_fresh(run)
@@ -2991,6 +3073,7 @@ class PayrollService(CoreFlow):
         from payroll_core.payroll_generation import BASE_SALARY_FIELDS, base_salary_field
         now = datetime.now(timezone.utc).isoformat()
         normalized: dict[str, dict] = {}
+        existing_inputs = copy.deepcopy(run.get("base_salary_inputs") or {}) if merge_existing else {}
         # Stage every profile mutation in memory first.  A batch is one user
         # decision: saving teacher A and then rejecting teacher B must never
         # make A quietly available to next month's Run.
@@ -3024,8 +3107,52 @@ class PayrollService(CoreFlow):
                     or (fields["L"]["value"] is not None and fields["L"]["value"] < 0)):
                 raise ValueError(f"{teacher} 的出勤输入无效：K 必须大于 0，L 不能为负数。")
             entry = {"teacher_id": str(item.get("teacher_id") or teacher), "display_name": teacher, "fields": fields, "source": source, "provenance": {"kind": "RUN_BASE_SALARY_INPUT", "confirmed_by": actor, "confirmed_at": now}}
-            entry["m"] = base_salary_field(teacher, {teacher: entry})
-            normalized[teacher] = entry
+            profile_entry = entry
+            if merge_existing:
+                prior_key = next((key for key, value in existing_inputs.items()
+                                  if str((value or {}).get("teacher_id") or "") == entry["teacher_id"]
+                                  or normalize_teacher(str((value or {}).get("display_name") or key)) == normalize_teacher(teacher)), None)
+                prior = existing_inputs.get(prior_key, {}) if prior_key is not None else {}
+                prior_fields = prior.get("fields") if isinstance(prior, dict) and isinstance(prior.get("fields"), dict) else {}
+                merged_fields = copy.deepcopy(prior_fields)
+                conflicts = []
+                for code in BASE_SALARY_FIELDS:
+                    old_field = merged_fields.get(code)
+                    new_field = fields.get(code)
+                    old_value = old_field.get("value") if isinstance(old_field, dict) else old_field
+                    new_value = new_field.get("value") if isinstance(new_field, dict) else new_field
+                    if old_value not in (None, "") and new_value not in (None, ""):
+                        try:
+                            equal = math.isclose(float(old_value), float(new_value), rel_tol=0.0, abs_tol=1e-9)
+                        except (TypeError, ValueError):
+                            equal = old_value == new_value
+                        if not equal:
+                            conflicts.append(f"{code}（已有 {old_value}；新来源 {new_value}）")
+                            continue
+                        if isinstance(old_field, dict):
+                            old_field = copy.deepcopy(old_field)
+                            supports = list(old_field.get("additional_sources") or [])
+                            support_record = {"source": new_field.get("source", source), "provenance": copy.deepcopy(new_field.get("provenance") or {})}
+                            if support_record not in supports:
+                                supports.append(support_record)
+                            old_field["additional_sources"] = supports
+                            merged_fields[code] = old_field
+                    elif old_value in (None, "") and new_value not in (None, ""):
+                        merged_fields[code] = copy.deepcopy(new_field)
+                    elif code not in merged_fields:
+                        merged_fields[code] = copy.deepcopy(new_field)
+                if conflicts:
+                    raise ValueError(f"历史工资参考与已采用来源存在字段冲突，未写入：{teacher}：{'；'.join(conflicts)}。请先核对来源后再处理。")
+                profile_entry = {
+                    **copy.deepcopy(prior), **entry, "fields": merged_fields,
+                    "source": f"{prior.get('source', source)}；另有本月明确参考 {source}",
+                    "provenance": {**copy.deepcopy(prior.get("provenance") or {}), **entry["provenance"]},
+                }
+                profile_entry["m"] = base_salary_field(teacher, {teacher: profile_entry})
+                normalized[teacher] = profile_entry
+            else:
+                entry["m"] = base_salary_field(teacher, {teacher: entry})
+                normalized[teacher] = entry
             effective_from = str(item.get("effective_from") or run["period"])
             effective_to = str(item.get("effective_to") or "9999-12")
             if not valid_period(effective_from) or not valid_period(effective_to) or effective_to < effective_from:
@@ -3051,19 +3178,21 @@ class PayrollService(CoreFlow):
                 "id": uuid.uuid4().hex[:16], "teacher": teacher,
                 "effective_from": effective_from, "effective_to": effective_to,
                 "source": source, "confirmed_by": actor, "version": "TEACHER_BASE_SALARY/v1",
-                "status": "ACTIVE", "entry": entry, "created_at": now,
+                "status": "ACTIVE", "entry": profile_entry, "created_at": now,
             }
             profile_writes[profile["id"]] = profile
-        snapshot = {"version": "BASE_SALARY_INPUT_SNAPSHOT/v1", "run_id": run_id, "period": run["period"], "confirmed_by": actor, "confirmed_at": now, "source": source, "inputs": normalized}
+        merged_inputs = {**existing_inputs, **normalized} if merge_existing else normalized
+        snapshot_source = "多份已确认历史参考合并" if merge_existing else source
+        snapshot = {"version": "BASE_SALARY_INPUT_SNAPSHOT/v1", "run_id": run_id, "period": run["period"], "confirmed_by": actor, "confirmed_at": now, "source": snapshot_source, "inputs": merged_inputs}
         snapshot["sha256"] = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-        run["base_salary_inputs"] = normalized
+        run["base_salary_inputs"] = merged_inputs
         run["base_salary_input_snapshot"] = snapshot
         self._clear_superseded_base_salary_defer(run, source_label=source)
         run["business_context_stale"] = True
         # Validate the complete snapshot before saving it, including the
         # derived M value for every submitted teacher.
         for teacher in normalized:
-            base_salary_field(teacher, normalized)
+            base_salary_field(teacher, merged_inputs)
         self.store.save_base_salary_profiles_and_run(list(profile_writes.values()), run)
         return self.render(run)
 
@@ -3213,6 +3342,7 @@ class PayrollService(CoreFlow):
                 "created_at": stored.get("created_at"),
                 "updated_at": stored.get("updated_at", stored.get("created_at")),
                 "mode": mode,
+                "operator_selection_required": not bool(stored.get("operator_role")) or stored.get("part_time_payroll_mode") in (None, ""),
                 "status": status,
                 "status_label": STATUS.get(status, status),
                 "summary": summary,
@@ -3228,6 +3358,32 @@ class PayrollService(CoreFlow):
 
     def get(self, run_id: str) -> dict:
         return self.render(self._load(run_id))
+
+    def select_legacy_run_operator(self, run_id: str, operator_role: str, selected_group: str, confirmed_by: str) -> dict:
+        """Attach new workflow metadata to an old Run without recalculating it."""
+        run = self.store.get(run_id)
+        role = str(operator_role or "").strip().upper()
+        group = str(selected_group or "").strip()
+        actor = str(confirmed_by or "").strip()
+        if role not in OPERATOR_ROLES:
+            raise ValueError("请选择按 DOS 或学科组长继续。")
+        if role == OPERATOR_SUBJECT_LEADER and group not in TEACHER_GROUPS:
+            raise ValueError("学科组长模式请先选择负责科组。")
+        if not actor:
+            raise ValueError("请填写确认人。")
+        if run.get("operator_role") and run.get("part_time_payroll_mode") not in (None, "", "LEGACY_COMPATIBILITY"):
+            raise ValueError("当前 Run 已有正式流程角色，无需重复选择。")
+        now = datetime.now(timezone.utc).isoformat()
+        run.update({
+            "operator_role": role, "selected_group": group if role == OPERATOR_SUBJECT_LEADER else "",
+            "part_time_payroll_mode": "GROUP_SUBMISSION_ONLY",
+            "workflow_role_selected_by": actor, "workflow_role_selected_at": now,
+            "workflow_role_migration": "LEGACY_RUN_EXPLICIT_SELECTION/v1",
+        })
+        if run.get("core_calculation") or run.get("generated_payroll"):
+            run["role_scope_recalculation_required"] = True
+        self.store.save(run)
+        return self.render(run, persist_roster=False)
 
     @staticmethod
     def _is_legacy_history_salary_snapshot(run: dict) -> bool:
@@ -5510,6 +5666,7 @@ class PayrollService(CoreFlow):
             run["summary"]["scope_note"] = "AA/AC/AD 来自独立排课；AE/AF 按版本规则与个人政策逐层计算。估算不算已核对；总工资外围项目不在本轮计算范围。"
         run["status"] = "PASS" if run["summary"]["full_scope_complete"] else "REVIEW_REQUIRED"
         run.pop("last_error", None)
+        run.pop("role_scope_recalculation_required", None)
         self.store.save(run)
         return self.render(run)
 
@@ -5886,6 +6043,19 @@ class PayrollService(CoreFlow):
 
     def _load(self, run_id: str) -> dict:
         run = self.store.get(run_id)
+        # Keep legacy payroll facts untouched until the user explicitly opts
+        # into the new role-scoped workflow.  Source staleness and the already-
+        # approved period authority remain safe, metadata-only checks.
+        gated_legacy = not run.get("operator_role") or run.get("part_time_payroll_mode") in (None, "")
+        if run.get("role_scope_recalculation_required") or gated_legacy:
+            if not self._fresh(run, verify_hash=False):
+                return run
+        if run.get("role_scope_recalculation_required"):
+            return run
+        if gated_legacy:
+            if self._ensure_run_period_authority(run):
+                self.store.save(run)
+            return run
         # A stale source is terminal for this read: never downgrade STALE to
         # FILES_READY merely because a separately bound authority changed too.
         if not self._fresh(run, verify_hash=False):
@@ -6753,7 +6923,10 @@ class PayrollService(CoreFlow):
                 if source_name not in entry["sources"]:
                     entry["sources"].append(source_name)
         duplicate_teachers = [value for value in seen_teachers.values() if len(value["sources"]) > 1]
-        roster_facts = self._roster_facts(run, persist=persist_roster)
+        legacy_workflow_gate = (not bool(run.get("operator_role"))
+                                or run.get("part_time_payroll_mode") in (None, "")
+                                or bool(run.get("role_scope_recalculation_required")))
+        roster_facts = self._roster_facts(run, persist=persist_roster and not legacy_workflow_gate)
         processing_scope = self._processing_scope(run, roster_facts.get("teachers") or [])
         employment_view = self.employment_overview(run, processing_scope=processing_scope, roster_facts=roster_facts)
         references = list(run.get("historical_salary_reference_snapshots") or [])
@@ -6801,6 +6974,8 @@ class PayrollService(CoreFlow):
         class_rules, class_rule_version_id = self._class_type_rules_for_run(run)
         return {
             **run, **window,
+            "operator_selection_required": not bool(run.get("operator_role")) or run.get("part_time_payroll_mode") in (None, ""),
+            "workflow_notice": "旧流程记录，请选择按 DOS 或学科组长继续。" if (not run.get("operator_role") or run.get("part_time_payroll_mode") in (None, "")) else "",
             "period_display": {"label": window["period_label"], "start": window["period_start"], "end": window["period_end"], "boundary_source": window["period_boundary_source"]},
             # 界面必须能说出"这个月的周期是谁定的"。A Run created before the
             # authority existed still reports its real window instead of

@@ -314,6 +314,11 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             bits = path.strip("/").split("/")
             if len(bits) >= 4 and bits[:2] == ["api", "runs"]:
                 run_id, action = bits[2], bits[3]
+                if action == "operator-role":
+                    return self._json(self.server.service.select_legacy_run_operator(
+                        run_id, str(payload.get("operator_role", "")), str(payload.get("selected_group", "")),
+                        str(payload.get("confirmed_by", "")),
+                    ))
                 if action in {"core-rules", "part-time-rates"}:
                     return self._json(self.server.service.rebind_calculation(run_id, "core" if action == "core-rules" else "part_time", str(payload.get("version_id", ""))))
                 if action == "files":
@@ -336,6 +341,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action == "base-salary-reference" and len(bits) == 5 and bits[4] == "use":
                     return self._json(self.server.service.use_historical_salary_reference(
                         run_id, str(payload.get("confirmed_by", "")), str(payload.get("source_sha256", "")),
+                        str(payload.get("selected_group", "")),
                     ))
                 if action == "base-salary-reference-preview":
                     return self._json(self.server.service.stage_historical_salary_reference_preview(
