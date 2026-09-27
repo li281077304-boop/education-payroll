@@ -544,6 +544,7 @@ def _run_bundle_bootstrap(bundle: Path, home: Path, monkeypatch, *, config: dict
     (resources / "launcher.json").write_text(json.dumps(config), encoding="utf-8")
     bootstrap = resources / "bootstrap.sh"
     fake_osascript = home / "fake-osascript"
+    fake_plutil = home / "fake-plutil"
     fake_dialog_log = home / "dialog.log"
     python_log = home / "python-invocations.log"
     fake_osascript.write_text(
@@ -551,8 +552,27 @@ def _run_bundle_bootstrap(bundle: Path, home: Path, monkeypatch, *, config: dict
         encoding="utf-8",
     )
     fake_osascript.chmod(0o755)
+    fake_plutil.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "config = json.loads(Path(args[-1]).read_text(encoding='utf-8'))\n"
+        "if args and args[0] == '-extract':\n"
+        "    value = config.get(args[1])\n"
+        "    if value is None: sys.exit(1)\n"
+        "    print(value)\n"
+        "elif args[:2] == ['-convert', 'xml1']:\n"
+        "    sys.exit(0)\n"
+        "else:\n"
+        "    sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    fake_plutil.chmod(0o755)
     bootstrap.write_text(
-        bootstrap.read_text(encoding="utf-8").replace("/usr/bin/osascript", f'"{fake_osascript}"'),
+        bootstrap.read_text(encoding="utf-8")
+        .replace("/usr/bin/osascript", f'"{fake_osascript}"')
+        .replace("/usr/bin/plutil", f'"{fake_plutil}"'),
         encoding="utf-8",
     )
     if python_script is not None:
