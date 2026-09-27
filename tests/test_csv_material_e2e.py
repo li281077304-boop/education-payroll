@@ -47,7 +47,8 @@ def test_csv_materials_use_one_adapter_across_check_preview_generate_reopen_and_
     assert reopened.check(run["id"])["core_calculation"]["rows"]
     changed = reopened.change_period(run["id"], "2026-09")
     assert changed["files"]["schedule"]["records"] == 0
-    assert changed["files"]["math"]["records"] == 1
+    assert "math" not in changed["files"], "上月学科组提交不能自动带入新工资月份"
+    assert not changed["subject_group_materials"], "新月份只应看到本月已确认的组表"
 
 
 def test_csv_schedule_filters_each_salary_month_without_relabeling_dates(tmp_path):

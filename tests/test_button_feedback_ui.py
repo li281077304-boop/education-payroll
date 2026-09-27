@@ -142,7 +142,7 @@ def test_the_defer_button_says_what_it_is_actually_doing(tmp_path):
     script = _BUTTON_SETUP + """
 (async () => {
   const call = api('/api/runs/run-1/base-salary-defer', {method: 'POST', body: '{}'});
-  assert.strictEqual(button.textContent, '正在保存并核算…', button.textContent);
+  assert.strictEqual(button.textContent, '正在保存暂不录入状态…', button.textContent);
   pending.shift()({payload: {id: 'run-1', defer_outcome: {status: 'NEEDS_ATTENTION'}}});
   await call;
   __flush();
@@ -151,7 +151,8 @@ def test_the_defer_button_says_what_it_is_actually_doing(tmp_path):
 """
     assert _run_ui(tmp_path, script).strip() == "ok"
     source = APP_JS.read_text(encoding="utf-8")
-    assert "暂不录入，先生成工资预览" in source, "按钮文字必须与实际动作一致"
+    assert "暂不录入" in source, "按钮应清楚说明只暂存该项"
+    assert "暂不录入，先生成工资预览" not in source
     assert "暂不录入，先生成工资表" not in source
 
 

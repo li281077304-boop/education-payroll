@@ -187,8 +187,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.grade_help(parsed.path.split("/")[3]))
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/base-salary/import-preview"):
                 run_id = parsed.path.split("/")[3]
-                source_path = parse_qs(parsed.query).get("path", [""])[0]
-                return self._json(self.server.service.preview_base_salary_import(run_id, source_path))
+                query = parse_qs(parsed.query)
+                source_path = query.get("path", [""])[0]
+                selected_group = query.get("group", [""])[0]
+                return self._json(self.server.service.preview_base_salary_import(run_id, source_path, selected_group))
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/support-preview"):
                 run_id = parsed.path.split("/")[3]
                 source_path = parse_qs(parsed.query).get("path", [""])[0]
@@ -243,6 +245,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     str(payload.get("period", "")), str(payload.get("mode", "AUDIT")),
                     period_start=str(payload.get("period_start", "")), period_end=str(payload.get("period_end", "")),
                     period_boundary_source=str(payload.get("period_boundary_source", "")),
+                    operator_role=str(payload.get("operator_role", "DOS")),
+                    selected_group=str(payload.get("selected_group", "")),
                 ), HTTPStatus.CREATED)
             if path == "/api/core-rules":
                 return self._json(self.server.service.save_core_rule_version(payload.get("rules", {}), str(payload.get("source", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)
@@ -320,14 +324,38 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action == "package":
                     return self._json(self.server.service.import_package(run_id, str(payload.get("path", ""))))
                 if action == "material":
-                    return self._json(self.server.service.import_material_file(run_id, str(payload.get("kind", "auto")), str(payload.get("path", ""))))
+                    return self._json(self.server.service.import_material_file(run_id, str(payload.get("kind", "auto")), str(payload.get("path", "")), str(payload.get("selected_group", ""))))
+                if action == "support-preview":
+                    return self._json(self.server.service.stage_support_department_preview(run_id, str(payload.get("path", ""))))
+                if action == "support-cancel":
+                    return self._json(self.server.service.cancel_support_department_preview(run_id))
+                if action == "support-remove":
+                    return self._json(self.server.service.remove_support_department_from_run(
+                        run_id, str(payload.get("confirmed_by", "")), str(payload.get("reason", "从本次工资核算移除")),
+                    ))
+                if action == "base-salary-reference" and len(bits) == 5 and bits[4] == "use":
+                    return self._json(self.server.service.use_historical_salary_reference(
+                        run_id, str(payload.get("confirmed_by", "")), str(payload.get("source_sha256", "")),
+                    ))
+                if action == "base-salary-reference-preview":
+                    return self._json(self.server.service.stage_historical_salary_reference_preview(
+                        run_id, str(payload.get("path", "")), str(payload.get("selected_group", "")),
+                    ))
+                if action == "base-salary-reference-cancel":
+                    return self._json(self.server.service.cancel_historical_salary_reference_preview(run_id))
                 if action == "subject-group-confirm":
                     return self._json(self.server.service.confirm_subject_group_material(
                         run_id, str(payload.get("role", "")), str(payload.get("source_sha256", "")),
                         str(payload.get("confirmed_by", "")), replace_existing=bool(payload.get("replace_existing", False)),
                     ))
                 if action == "subject-group-cancel":
-                    return self._json(self.server.service.cancel_subject_group_material(run_id, str(payload.get("role", ""))))
+                    return self._json(self.server.service.cancel_subject_group_material(
+                        run_id, str(payload.get("role", "")), str(payload.get("source_sha256", "")),
+                    ))
+                if action == "subject-group-remove":
+                    return self._json(self.server.service.remove_subject_group_material(
+                        run_id, str(payload.get("material_id", "")), str(payload.get("removed_by", "")),
+                    ))
                 if action == "grade-history":
                     return self._json(self.server.service.import_grade_history_for_run(run_id, str(payload.get("path", "")), payload.get("sha256")))
                 if action == "grade-confirmations":
@@ -352,6 +380,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                             str(payload.get("source_sha256", "")),
                             str(payload.get("confirmed_by", "")),
                             str(payload.get("source_name", "")),
+                            str(payload.get("selected_group", "")),
+                            list(payload.get("secondary_teacher_ids") or []),
                         ))
                     return self._json(self.server.service.save_base_salary_inputs(
                         run_id,
@@ -367,6 +397,9 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     ))
                 if action == "support":
                     # 支持部工资资料：一次确认，同时供基本工资与支持部字段使用。
+                    staged = self.server.service.get(run_id).get("support_department_pending_preview") or {}
+                    if staged.get("source_sha256") != str(payload.get("source_sha256", "")):
+                        return self._error("请先在材料准备页预览这份支持部资料，再确认用于本月。", HTTPStatus.CONFLICT)
                     return self._json(self.server.service.import_support_department(
                         run_id,
                         str(payload.get("path", "")),
@@ -384,6 +417,14 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         effective_from=str(payload.get("effective_from", "")),
                         effective_to=str(payload.get("effective_to", "9999-12")),
                     ), HTTPStatus.CREATED)
+                if action == "staff-batch":
+                    return self._json(self.server.service.confirm_staff_batch(
+                        run_id,
+                        str(payload.get("confirmed_by", "")),
+                        list(payload.get("employment_updates") or []),
+                        list(payload.get("group_updates") or []),
+                        list(payload.get("salary_basis_updates") or []),
+                    ))
                 if action == "part-time-pay-decision":
                     return self._json(self.server.service.save_part_time_pay_decision(
                         run_id,

@@ -653,26 +653,21 @@ def test_stale_file_blocks_old_results_and_reimport_recovers(tmp_path):
     assert service.check(run["id"])["status"] == "REVIEW_REQUIRED"
 
 
-def test_check_failure_returns_to_a_recoverable_material_state(tmp_path):
+def test_duplicate_teachers_across_group_materials_do_not_abort_whole_check(tmp_path):
     service, run, schedule, *_ = _prepared_run_with_values(tmp_path, one_to_one=36, class_value=2.4)
     schedule_book = load_workbook(schedule)
     schedule_book.active.append(["高一物理课", "集体课程", "集体班", "测试校区", "2026-08-08 10:00~12:00", "2小时", "已上课", "张三", 2, 2, "学生丙", "物理", "线下课", "测试教室", "张三"])
     schedule_book.save(schedule)
     service.import_file(run["id"], "schedule", str(schedule))
-    duplicate = tmp_path / "science-duplicate.xlsx"
-    _payroll_with_only(duplicate, 5)
+    existing_teacher = service._read_for_run("math", Path(run["files"]["math"]["path"]), service.store.get(run["id"])).records[0].teacher
+    duplicate = tmp_path / "science-duplicate.csv"
+    duplicate.write_text(f"teacher,one_to_one,class_value,production,ae,af,av\n{existing_teacher},5,0,5,30,40,0\n", encoding="utf-8-sig")
     preview = service.preview_subject_group_material(run["id"], str(duplicate))["subject_group_preview"]
     service.confirm_subject_group_material(run["id"], "science", preview["source_sha256"], "脱敏 UAT 确认人", replace_existing=True)
 
-    try:
-        service.check(run["id"])
-    except ValueError as exc:
-        assert "重复教师" in str(exc)
-    else:
-        raise AssertionError("duplicate teachers must fail visibly")
-    recovered = service.get(run["id"])
-    assert recovered["status"] == "FILES_READY"
-    assert "重复教师" in recovered["last_error"]
+    result = service.check(run["id"])
+    assert result["status"] in {"REVIEW_REQUIRED", "FILES_READY"}
+    assert any(item["teacher"] == "张三" and item["field"] == "one_to_one" for item in result["subject_group_source_conflicts"])
 
 
 def test_browser_shell_uses_plain_language_for_core_workflow():
@@ -723,7 +718,9 @@ def test_user_facing_auto_material_import_classifies_schedule_and_subject_group(
     assert payroll_result["recognized_role"] == "math"
     assert saved["files"]["schedule"]["name"] == schedule.name
     assert "math" not in saved["files"]
-    assert saved["pending_subject_group_imports"]["math"]["source_name"] == payroll.name
+    pending = next(iter(saved["pending_subject_group_imports"].values()))
+    assert pending["role"] == "math"
+    assert pending["source_name"] == payroll.name
 
 
 def test_subject_group_does_not_become_company_template_implicitly(tmp_path, monkeypatch):
@@ -809,8 +806,9 @@ def test_missing_base_salary_can_be_explicitly_deferred_without_zero_snapshot(tm
     deferred = service.defer_base_salary(run["id"], "测试确认人")
 
     assert deferred["base_salary_deferred"] is True
-    assert deferred["base_salary_input_snapshot"] is None
-    assert deferred["base_salary_inputs"] == {}
+    stored = service.store.get(run["id"])
+    assert stored.get("base_salary_input_snapshot") is None
+    assert stored["base_salary_inputs"] == {}
 
 
 def test_run_binds_effective_rating_version_and_reports_a_rating_mismatch(tmp_path):

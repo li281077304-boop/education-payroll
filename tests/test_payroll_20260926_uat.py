@@ -12,8 +12,8 @@ from payroll_core.payroll_generation import generated_from_calculation
 from payroll_ui.service import PayrollService
 
 
-def _run_with_roster(service: PayrollService, period: str = "2026-08", *, teacher: str = "教师甲", teacher_id: str = "teacher-1") -> dict:
-    created = service.create(period, "GENERATE")
+def _run_with_roster(service: PayrollService, period: str = "2026-08", *, teacher: str = "教师甲", teacher_id: str = "teacher-1", operator_role: str | None = None, selected_group: str = "") -> dict:
+    created = service.create(period, "GENERATE", operator_role=operator_role, selected_group=selected_group)
     schedule = Path(service.store.path).parent / f"{created['id']}-schedule.csv"
     with schedule.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
@@ -58,37 +58,62 @@ def _monthly_renewal(path):
     return path
 
 
-def test_history_salary_preview_then_confirm_uses_existing_atomic_run_path(tmp_path):
+def test_history_salary_import_is_reference_only_until_explicit_run_decision(tmp_path):
     service = PayrollService(tmp_path / "data")
     run = _run_with_roster(service)
     source = _history_salary(tmp_path / "薪资表.xlsx")
     original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
 
-    preview = service.preview_base_salary_import(run["id"], str(source))
+    preview = service.stage_historical_salary_reference_preview(run["id"], str(source), "数学组")
     assert preview["can_import"] is True
     assert len(preview["matched"]) == 1
     assert service.store.get(run["id"]).get("base_salary_input_snapshot") is None
+    assert PayrollService(tmp_path / "data").get(run["id"])["historical_salary_reference_pending_preview"]["status"] == "PENDING_CONFIRMATION"
 
-    saved = service.import_base_salary_from_history(run["id"], str(source), preview["source"]["sha256"], "核算负责人")
-    entry = saved["run"]["base_salary_inputs"]["教师甲"]
+    saved = service.import_base_salary_from_history(run["id"], str(source), preview["source"]["sha256"], "核算负责人", selected_group="数学组")
     assert saved["imported"] == 1
+    assert saved["status"] == "REFERENCE_ONLY"
+    assert saved["run"]["historical_salary_reference_snapshot"]["entries"][0]["fields"]["G"]["value"] == 20
+    assert saved["run"].get("base_salary_inputs") == {}
+    assert saved["run"]["historical_salary_reference_summary"]["reference_count"] == 1
+    assert saved["run"]["historical_salary_reference_summary"]["missing_count"] == 0
+    assert saved["run"]["historical_salary_reference_snapshot"]["group_membership"]["group"] == "数学组"
+    assert saved["run"]["processing_scope"]["scope_count"] == 1
+    assert service.create("2026-09", "GENERATE").get("base_salary_inputs") == {}
+
+    used = service.use_historical_salary_reference(run["id"], "核算负责人", original_hash)
+    entry = used["base_salary_inputs"]["教师甲"]
     assert entry["fields"]["G"]["value"] == 20
-    assert entry["fields"]["G"]["provenance"]["source_sha256"] == original_hash
+    assert entry["fields"]["G"]["provenance"]["kind"] == "EXPLICIT_HISTORICAL_REFERENCE_FOR_CURRENT_RUN"
     assert entry["m"]["state"] == "DETERMINED"
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
-    assert service.create("2026-09", "GENERATE")["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 20
+    assert service.create("2026-09", "GENERATE").get("base_salary_inputs") == {}
 
 
 def test_history_salary_confirmation_rejects_source_changed_after_preview(tmp_path):
     service = PayrollService(tmp_path / "data")
     run = _run_with_roster(service)
     source = _history_salary(tmp_path / "薪资表.xlsx")
-    preview = service.preview_base_salary_import(run["id"], str(source))
+    preview = service.preview_base_salary_import(run["id"], str(source), "数学组")
     _history_salary(source, 21)
 
     with pytest.raises(ValueError, match="已变化"):
-        service.import_base_salary_from_history(run["id"], str(source), preview["source"]["sha256"], "核算负责人")
+        service.import_base_salary_from_history(run["id"], str(source), preview["source"]["sha256"], "核算负责人", selected_group="数学组")
     assert service.store.get(run["id"]).get("base_salary_input_snapshot") is None
+
+
+def test_history_reference_membership_is_saved_and_controls_subject_leader_scope(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = _run_with_roster(service, operator_role="SUBJECT_LEADER", selected_group="数学组")
+    source = _history_salary(tmp_path / "数学组历史工资.xlsx")
+    preview = service.stage_historical_salary_reference_preview(run["id"], str(source), "数学组")
+    imported = service.import_base_salary_from_history(
+        run["id"], str(source), preview["source"]["sha256"], "组长", selected_group="数学组",
+    )
+
+    assert imported["group_membership"]["confirmed"] is True
+    assert imported["run"]["processing_scope"]["scope_count"] == 1
+    assert imported["run"]["processing_scope"]["teachers"][0]["display_name"] == "教师甲"
 
 
 def test_monthly_renewal_import_is_visible_but_wage_fields_require_confirmation(tmp_path):

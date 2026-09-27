@@ -71,6 +71,136 @@ def test_schedule_authority_filters_period_and_survives_missing_group_data(tmp_p
     assert {item["display_name"] for item in confirmed["roster_facts"]["teachers"]} == {"教师甲", "教师乙"}
 
 
+def test_staff_roster_batch_confirmation_persists_group_and_employment(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [
+        ("教师甲", "数学", "2026-08-05"), ("教师乙", "物理", "2026-08-06"),
+    ])))
+    teachers = service._roster_facts(service.store.get(run["id"]))["teachers"]
+    ids = {item["display_name"]: item["teacher_id"] for item in teachers}
+    result = service.confirm_staff_batch(
+        run["id"], "负责人",
+        employment_updates=[{"teacher_id": value, "employment_type": "FULL_TIME"} for value in ids.values()],
+        group_updates=[{"teacher_id": ids["教师甲"], "group": "数学组"}, {"teacher_id": ids["教师乙"], "group": "理化组"}],
+        salary_basis_updates=[
+            {"teacher_id": ids["教师甲"], "state": "HOURLY_SUBMISSION_ONLY", "group": "数学组"},
+            {"teacher_id": ids["教师乙"], "state": "HAS_BASE_SALARY", "group": "理化组"},
+        ],
+    )
+    assert result["employment_confirmed"] == 2
+    assert result["groups_confirmed"] == 2
+    reopened = PayrollService(tmp_path / "data").get(run["id"])
+    by_name = {item["teacher"]: item for item in reopened["employment"]["teachers"]}
+    assert by_name["教师甲"]["teacher_group"] == "数学组"
+    assert by_name["教师乙"]["teacher_group"] == "理化组"
+    assert all(item["employment_type"] == "FULL_TIME" for item in by_name.values())
+    assert by_name["教师甲"]["salary_basis"] == "HOURLY_SUBMISSION_ONLY"
+    assert by_name["教师乙"]["salary_basis"] == "HAS_BASE_SALARY"
+
+
+def test_group_processing_scope_is_a_projection_and_never_rewrites_canonical_roster(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE", operator_role="SUBJECT_LEADER", selected_group="数学组")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [
+        ("数学老师", "数学", "2026-08-05"), ("理化老师", "物理", "2026-08-06"),
+    ])))
+
+    view = service.get(run["id"])
+    result = service.check(run["id"])
+
+    assert {item["display_name"] for item in view["roster_facts"]["teachers"]} == {"数学老师", "理化老师"}
+    assert view["processing_scope"]["scope_count"] == 1
+    assert view["processing_scope"]["teachers"][0]["display_name"] == "数学老师"
+    assert result["processing_scope_snapshot"]["teachers"] == ["数学老师"]
+    assert all(item.get("teacher") != "理化老师" for item in result["issue_groups"])
+
+
+def test_dos_processing_scope_remains_the_full_schedule_roster(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE", operator_role="DOS")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [
+        ("数学老师", "数学", "2026-08-05"), ("理化老师", "物理", "2026-08-06"),
+    ])))
+
+    result = service.check(run["id"])
+
+    assert result["processing_scope_snapshot"]["operator_role"] == "DOS"
+    assert set(result["processing_scope_snapshot"]["teachers"]) == {"数学老师", "理化老师"}
+
+
+def test_non_math_group_submission_is_scoped_by_declared_group(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE", operator_role="SUBJECT_LEADER", selected_group="语文组")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [
+        ("语文老师", "语文", "2026-08-05"), ("数学老师", "数学", "2026-08-06"),
+    ])))
+    source = _group(tmp_path / "chinese-group.csv", ["语文老师"])
+    preview = service.preview_subject_group_material(run["id"], str(source), "语文组")["subject_group_preview"]
+    assert preview["recognized_group"] == "语文组"
+    service.confirm_subject_group_material(run["id"], preview["role"], preview["source_sha256"], "组长")
+
+    reopened = service.get(run["id"])
+    assert reopened["processing_scope"]["teachers"][0]["display_name"] == "语文老师"
+    assert reopened["processing_scope"]["scope_count"] == 1
+
+
+def test_hourly_submission_row_reads_group_final_total_without_part_time_amount_calculation():
+    row = PayrollService._build_hourly_submission_row("按课时教师", {
+        "source": "脱敏组表.xlsx", "value": 1280.5,
+        "fields": {"AA": 20, "AC": 3, "AD": 23, "AE": None, "AF": None, "AV": 1280.5},
+        "field_provenance": {},
+    })
+
+    assert row.part_time_amount is None
+    assert row.fields["PART_TIME"]["state"] == "NOT_APPLICABLE"
+    assert row.final_fields["AV"]["value"] == 1280.5
+    assert row.final_fields["AV"]["state"] == "DETERMINED"
+    assert "不由系统重新计算" in row.final_fields["AV"]["reason"]
+    assert row.final is True
+
+
+def test_hourly_submission_only_run_reads_group_total_without_calculating_part_time(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE", operator_role="DOS")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [("教师甲", "数学", "2026-08-05")])))
+    source = _group(tmp_path / "math.csv", ["教师甲"], amount=8)
+    preview = service.preview_subject_group_material(run["id"], str(source), "数学组")["subject_group_preview"]
+    service.confirm_subject_group_material(run["id"], preview["role"], preview["source_sha256"], "组长")
+    roster = service._roster_facts(service.store.get(run["id"]))["teachers"]
+    service.confirm_staff_batch(run["id"], "负责人", salary_basis_updates=[{
+        "teacher_id": roster[0]["teacher_id"], "state": "HOURLY_SUBMISSION_ONLY", "group": "数学组",
+    }])
+
+    checked = service.check(run["id"])
+    generated = service._generated_from_checked(checked)
+
+    assert checked["hourly_submission_results"]["教师甲"]["value"] == 0
+    hourly_row = next(row for row in generated.rows if row.teacher == "教师甲")
+    assert hourly_row.part_time_amount is None
+    assert hourly_row.final_fields["AV"]["value"] == 0
+    assert not any("兼职" in blocker and "单价" in blocker for blocker in hourly_row.blockers)
+
+
+def test_new_run_does_not_infer_missing_salary_basis_as_part_time(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE", operator_role="DOS")
+    schedule = _schedule(tmp_path / "schedule.csv", [("教师甲", "数学", "2026-08-05")])
+    service.import_file(run["id"], "schedule", str(schedule))
+    service.save_employment_profile("教师甲", "PART_TIME", "旧历史事实确认人", effective_from="2026-08")
+    stored = service.store.get(run["id"])
+
+    basis = service._salary_basis_for(stored, "教师甲", "教师甲")
+    fact = service._employment_types_for(stored, for_calculation=True)["教师甲"]
+
+    assert basis["state"] == "SOURCE_UNKNOWN"
+    assert fact["employment_type"] == "PART_TIME"  # person fact is retained, but it is not a salary-basis inference
+    assert stored["part_time_payroll_mode"] == "GROUP_SUBMISSION_ONLY"
+    checked = service.check(run["id"])
+    assert not (checked.get("core_calculation") or {}).get("rows")
+    assert any(issue.get("field") == "salary_basis" for issue in checked.get("issues", []))
+
+
 def test_subject_group_preview_does_not_change_active_payroll_or_roster(tmp_path):
     service = PayrollService(tmp_path / "data")
     run = service.create("2026-08", "GENERATE")
@@ -166,7 +296,7 @@ def test_schedule_same_name_with_distinct_teacher_ids_fails_closed(tmp_path):
         service.check(run["id"])
 
 
-def test_group_confirmation_persists_and_replacement_needs_explicit_confirmation(tmp_path):
+def test_group_confirmation_persists_and_multiple_files_are_independent(tmp_path):
     service = PayrollService(tmp_path / "data")
     run = service.create("2026-08", "GENERATE")
     service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [("教师甲", "数学", "2026-08-05")])))
@@ -183,13 +313,69 @@ def test_group_confirmation_persists_and_replacement_needs_explicit_confirmation
 
     second = _group(tmp_path / "math-second.csv", ["教师甲"], amount=2)
     second_preview = service.preview_subject_group_material(run["id"], str(second))["subject_group_preview"]
-    assert second_preview["replacement_required"] is True
+    assert second_preview["replacement_required"] is False
+    assert second_preview["cross_file_duplicates"][0]["teacher"] == "教师甲"
     assert service.store.get(run["id"])["files"]["math"]["sha256"] == first_preview["source_sha256"]
-    with pytest.raises(ValueError, match="明确选择"):
-        service.confirm_subject_group_material(run["id"], "math", second_preview["source_sha256"], "UAT 确认人")
-    replaced = service.confirm_subject_group_material(run["id"], "math", second_preview["source_sha256"], "UAT 确认人", replace_existing=True)["run"]
-    assert replaced["files"]["math"]["sha256"] == second_preview["source_sha256"]
-    assert service.store.get(run["id"])["subject_group_confirmation_history"]["math"]
+    added = service.confirm_subject_group_material(run["id"], "math", second_preview["source_sha256"], "UAT 确认人")["run"]
+    assert len([item for item in added["subject_group_materials"] if item["status"] == "CONFIRMED"]) == 2
+    assert added["files"]["math"]["sha256"] == first_preview["source_sha256"]
+
+
+def test_multiple_same_group_candidates_can_wait_independently(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [("教师甲", "数学", "2026-08-05")])))
+    candidates = []
+    for name, amount in (("math-one.csv", 1), ("math-two.csv", 2)):
+        source = _group(tmp_path / name, ["教师甲"], amount=amount)
+        candidates.append(service.preview_subject_group_material(run["id"], str(source))["subject_group_preview"])
+    stored = service.store.get(run["id"])["pending_subject_group_imports"]
+    assert len(stored) == 2
+    assert {item["source_sha256"] for item in stored.values()} == {item["source_sha256"] for item in candidates}
+
+    for candidate in candidates:
+        service.confirm_subject_group_material(run["id"], "math", candidate["source_sha256"], "负责人")
+    assert not service.store.get(run["id"])["pending_subject_group_imports"]
+    assert len([item for item in service.store.get(run["id"])["subject_group_materials"] if item["status"] == "CONFIRMED"]) == 2
+
+
+def test_group_confirmation_reuses_reviewed_record_snapshot_instead_of_reparsing(tmp_path, monkeypatch):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [("教师甲", "数学", "2026-08-05")])))
+    source = _group(tmp_path / "math.csv", ["教师甲"], amount=3)
+    preview = service.preview_subject_group_material(run["id"], str(source))["subject_group_preview"]
+    original_read = service._read_for_run
+
+    def no_group_reparse(role, path, bound_run):
+        if role in {"math", "science"}:
+            raise AssertionError("confirmation/check should use the reviewed group snapshot")
+        return original_read(role, path, bound_run)
+
+    monkeypatch.setattr(service, "_read_for_run", no_group_reparse)
+    confirmed = service.confirm_subject_group_material(run["id"], "math", preview["source_sha256"], "负责人")["run"]
+    assert confirmed["subject_group_materials"][0]["record_snapshot"]
+    checked = service.check(run["id"])
+    assert checked["processing_scope_snapshot"]["teachers"] == ["教师甲"]
+
+
+def test_group_file_duplicate_conflict_is_field_scoped_and_removal_is_audited(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = service.create("2026-08", "GENERATE")
+    service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [("教师甲", "数学", "2026-08-05")])))
+    files = []
+    for name, amount in (("math-a.csv", 1), ("math-b.csv", 2)):
+        source = _group(tmp_path / name, ["教师甲"], amount=amount)
+        preview = service.preview_subject_group_material(run["id"], str(source))["subject_group_preview"]
+        confirmed = service.confirm_subject_group_material(run["id"], "math", preview["source_sha256"], "负责人")
+        files.append((source, confirmed["confirmation"]))
+
+    result = service.check(run["id"])
+    assert any(item["teacher"] == "教师甲" for item in result["subject_group_source_conflicts"])
+    material_id = next(item["material_id"] for item in result["subject_group_materials"] if item["source_sha256"] == files[1][1]["source_sha256"])
+    removed = service.remove_subject_group_material(run["id"], material_id, "负责人")
+    assert len([item for item in removed["subject_group_materials"] if item["status"] == "CONFIRMED"]) == 1
+    assert any(item["material_id"] == material_id and item["status"] == "REMOVED_FROM_RUN" for item in service.store.get(run["id"])["subject_group_materials"])
 
 
 def test_old_group_preview_cannot_be_confirmed_after_period_change(tmp_path):

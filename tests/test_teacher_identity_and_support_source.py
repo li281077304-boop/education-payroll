@@ -144,11 +144,12 @@ def test_the_base_salary_preview_reports_the_same_sets(tmp_path):
     run = _run(service, ["教师甲", "教师乙"], tmp_path=tmp_path)
     source = _support_workbook(tmp_path / "支持部.xlsx", [_teacher("教师甲"), _teacher("历史教师")])
 
-    preview = service.preview_base_salary_import(run["id"], str(source))
+    preview = service.preview_base_salary_import(run["id"], str(source), "数学组")
     assert preview["counts"] == {
-        "source_teachers": 2, "current_run_teachers": 2, "matched": 1,
-        "month_without_history": 1, "history_only": 1, "identity_required": 0,
+        "source_teachers": 2, "current_run_teachers": 0, "matched": 2,
+        "month_without_history": 0, "history_only": 0, "identity_required": 0,
     }
+    assert len(preview["group_membership_preview"]["primary_members"]) == 2
     assert preview["roster"]["member_count"] == 2
 
 
@@ -208,6 +209,22 @@ def test_a_support_entry_is_document_evidence_of_full_time(tmp_path):
     assert item["employment_type"] == FULL_TIME
     assert item["source"] == "EMPLOYMENT_FROM_DOCUMENT"
     assert item["needs_confirmation"] is False
+
+
+def test_support_department_preview_is_durable_but_does_not_bind_or_recalculate(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run = _run(service, ["教师甲"], tmp_path=tmp_path)
+    original_core = service.store.get(run["id"])["core_calculation"]
+    source = _support_workbook(tmp_path / "支持部.xlsx", [_teacher("教师甲")])
+
+    staged = service.stage_support_department_preview(run["id"], str(source))
+
+    assert staged["pending"]["status"] == "PENDING_CONFIRMATION"
+    assert staged["pending"]["source_sha256"] == _sha256(source)
+    reopened = PayrollService(tmp_path / "data").get(run["id"])
+    assert reopened["support_source"]["status"] == "PENDING_CONFIRMATION"
+    assert reopened["support_department_snapshot"] is None
+    assert reopened["core_calculation"] == original_core
 
 
 def _sha256(path: Path) -> str:

@@ -152,42 +152,65 @@ def test_the_preview_shows_the_period_and_star_authority_evidence(tmp_path):
         assert label in page, label
 
 
-def test_defer_enters_the_payroll_preview_in_a_single_click(tmp_path):
+def test_defer_only_saves_choice_and_keeps_current_flow(tmp_path):
     payload = {
         "id": "run-1", "status": "REVIEW_REQUIRED",
-        "defer_outcome": {"status": "PREVIEW_READY", "message": "已按暂不录入完成核算并生成工资预览。",
+        "defer_outcome": {"status": "DEFERRED", "message": "已记下：基本工资暂不录入。本次没有开始核算。",
                           "blockers": [], "base_salary_state": "MISSING_SOURCE"},
     }
     script = """
 (async () => {
   current = {id: 'run-1', af_policy_confirmation: {}};
+  const startingTab = tab;
   await deferBaseSalaryQuick();
-  assert.strictEqual(tab, 'payroll', '无阻塞时必须直接进入工资预览');
-  assert.strictEqual(fetchCalls.length, 1, '一次点击只应发一个业务流程请求');
+  assert.strictEqual(tab, startingTab, '暂不录入不得自动跳页或开始核算');
+  assert.strictEqual(fetchCalls.length, 1, '只保存一次 defer 状态');
   assert.ok(fetchCalls[0].url.endsWith('/base-salary-defer'), fetchCalls[0].url);
-  assert.ok(messages.some(([text, kind]) => kind === 'success' && text.includes('工资预览')), JSON.stringify(messages));
+  assert.ok(messages.some(([text, kind]) => kind === 'success' && text.includes('没有开始核算')), JSON.stringify(messages));
   __result = 'ok';
 })();
 """
     assert _run_ui(tmp_path, script, payload).strip() == "ok"
 
 
-def test_defer_enters_the_exception_flow_when_something_still_blocks(tmp_path):
+def test_defer_does_not_navigate_into_exception_flow_or_recalculate(tmp_path):
     payload = {
         "id": "run-1", "status": "REVIEW_REQUIRED",
-        "defer_outcome": {"status": "NEEDS_ATTENTION", "message": "核算已完成，但还有其它阻塞需要处理。",
+        "defer_outcome": {"status": "DEFERRED", "message": "已记下：基本工资暂不录入。",
                           "blockers": ["PERIOD_OUTSIDE_AUTHORITY"], "base_salary_state": "MISSING_SOURCE"},
     }
     script = """
 (async () => {
   current = {id: 'run-1', af_policy_confirmation: {}};
+  const startingTab = tab;
   await deferBaseSalaryQuick();
-  assert.strictEqual(tab, 'issues', '有阻塞时必须进入异常处理，而不是假装预览已就绪');
-  assert.ok(messages.some(([text]) => text.includes('阻塞')), JSON.stringify(messages));
+  assert.strictEqual(tab, startingTab, '暂不录入应留在当前流程');
+  assert.ok(messages.some(([text]) => text.includes('暂不录入')), JSON.stringify(messages));
   __result = 'ok';
 })();
 """
     assert _run_ui(tmp_path, script, payload).strip() == "ok"
+
+
+def test_new_run_requires_operator_role_and_exposes_group_selector_contract():
+    source = APP_JS.read_text(encoding="utf-8")
+    assert 'id="operator-role"' in source
+    assert 'value="DOS"' in source
+    assert 'value="SUBJECT_LEADER"' in source
+    assert 'id="selected-group"' in source
+    assert "operator_role: operatorRole" in source
+    assert "selected_group: selectedGroup" in source
+
+
+def test_main_run_navigation_has_four_user_steps_and_one_export_destination():
+    source = APP_JS.read_text(encoding="utf-8")
+    block = source.split("function runSteps()", 1)[1].split("function reconfirmationBanner", 1)[0]
+    for label in ("准备核算材料", "教师名单与归属", "待处理问题", "工资预览与导出"):
+        assert label in block
+    assert "核对结果" not in block
+    assert "function teacherScopePage()" in source
+    render_block = source.split("function renderTab()", 1)[1].split("function baseSalaryImportMarkup()", 1)[0]
+    assert "partTimePayCard(partTime)" not in render_block
 
 
 def test_the_daily_flow_keeps_engineering_configuration_in_advanced_settings():

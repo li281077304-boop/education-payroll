@@ -58,6 +58,93 @@ def test_period_authority_round_trip_over_http(tmp_path):
         server.shutdown()
 
 
+def test_real_ui_empty_date_legacy_marker_does_not_bypass_active_authority(tmp_path):
+    service, server, call = _client(tmp_path)
+    try:
+        call("/api/period-authorities", {
+            "payroll_period": "2026-08", "period_start": "2026-08-03", "period_end": "2026-08-30",
+            "boundary_source": "MANUAL_PERIOD_DOCUMENT", "confirmed_by": "负责人", "reason": "制度资料范围",
+        })
+        created = call("/api/runs", {
+            "period": "2026-08", "mode": "GENERATE", "period_start": "", "period_end": "",
+            "period_boundary_source": "LEGACY_CALENDAR_DEFAULT",
+        })
+        assert (created["period_start"], created["period_end"]) == ("2026-08-03", "2026-08-30")
+        assert created["period_authority"]["source_label"] == "人工月资料（制度文件导入）"
+    finally:
+        server.shutdown()
+
+
+def test_opening_a_legacy_natural_month_run_heals_to_new_authority(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    legacy = service.create("2026-08", "GENERATE")
+    service.record_period_authority(
+        "2026-08", "2026-08-03", "2026-08-30", "MANUAL_PERIOD_DOCUMENT",
+        confirmed_by="负责人", reason="制度资料范围",
+    )
+
+    reopened = service.get(legacy["id"])
+
+    assert (reopened["period_start"], reopened["period_end"]) == ("2026-08-03", "2026-08-30")
+    assert reopened["period_authority"]["source_label"] == "人工月资料（制度文件导入）"
+    assert reopened["period_window_history"][-1]["history_event"] == "AUTHORITY_AUTO_HEALED"
+
+
+def test_explicit_per_run_user_window_is_not_overwritten_by_month_authority(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    service.record_period_authority(
+        "2026-08", "2026-08-03", "2026-08-30", "MANUAL_PERIOD_DOCUMENT",
+        confirmed_by="负责人", reason="制度资料范围",
+    )
+    created = service.create(
+        "2026-08", "GENERATE", period_start="2026-08-04", period_end="2026-08-29",
+        period_boundary_source="USER_CONFIRMED",
+    )
+
+    reopened = service.get(created["id"])
+
+    assert (reopened["period_start"], reopened["period_end"]) == ("2026-08-04", "2026-08-29")
+    assert reopened["period_boundary_source"] == "USER_CONFIRMED"
+
+
+def test_run_level_period_entry_exposes_authority_and_change_control_contract():
+    source = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "function changeRunPeriod()" in source
+    assert "run-period-select" in source
+    assert "authority.source_label" in source
+    assert "更改月份" in source
+
+
+def test_run_creation_persists_operator_role_separately_from_audit_generate_mode(tmp_path):
+    service, server, call = _client(tmp_path)
+    try:
+        created = call("/api/runs", {"period": "2026-08", "mode": "GENERATE",
+                                     "operator_role": "SUBJECT_LEADER", "selected_group": "数学组"})
+        assert created["operator_role"] == "SUBJECT_LEADER"
+        assert created["selected_group"] == "数学组"
+        assert created["mode"] == "GENERATE"
+        assert created["processing_scope"]["scope_kind"] == "SUBJECT_GROUP"
+        dos = call("/api/runs", {"period": "2026-08", "mode": "AUDIT"})
+        assert dos["operator_role"] == "DOS"
+        assert dos["processing_scope"]["scope_kind"] == "FULL_DEPARTMENT"
+    finally:
+        server.shutdown()
+
+
+def test_group_leader_run_requires_an_explicit_group(tmp_path):
+    service, server, call = _client(tmp_path)
+    try:
+        try:
+            call("/api/runs", {"period": "2026-08", "mode": "GENERATE", "operator_role": "SUBJECT_LEADER"})
+        except HTTPError as exc:
+            body = json.loads(exc.read())
+            assert exc.code == 400 and "选择负责科组" in body["error"]
+        else:  # pragma: no cover
+            raise AssertionError("组长模式必须先选择负责科组")
+    finally:
+        server.shutdown()
+
+
 def test_an_existing_run_can_be_rebound_to_the_authority_over_http(tmp_path):
     service, server, call = _client(tmp_path)
     try:

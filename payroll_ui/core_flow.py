@@ -93,7 +93,7 @@ class CoreFlow:
         teachers = {r.teacher for r in schedule} | {r.teacher for r in payroll}
         if run.get("mode") == "GENERATE":
             teachers.update(p["teacher"] for p in (policy or {}).get("profiles", []))
-        employment_facts = self._employment_types_for(run, teachers=sorted(teachers))
+        employment_facts = self._employment_types_for(run, teachers=sorted(teachers), for_calculation=True)
         profiles, contexts = [], []
         af_confirmation = run.get("af_policy_confirmation") or {}
         af_exceptions = af_confirmation.get("exceptions") or {}
@@ -110,7 +110,7 @@ class CoreFlow:
         # existing policy/profile path authoritative when present, but do not
         # silently treat a teacher with an approved per-lesson policy as a
         # full-time teacher (which would skip the part-time calculation).
-        part_time_profiles = (part_time or {}).get("profiles", [])
+        part_time_profiles = [] if run.get("part_time_payroll_mode") == "GROUP_SUBMISSION_ONLY" else (part_time or {}).get("profiles", [])
         personnel_contexts = {
             str(item.get("teacher", "")): item
             for item in (run.get("personnel_contexts") or [])

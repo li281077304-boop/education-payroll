@@ -24,6 +24,7 @@ REQUIRED_FIELDS = ("G", "H", "I", "J", "K", "L")
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "teacher_id": ("教师id", "教师编号", "工号", "员工编号", "teacherid", "employeeid"),
     "teacher_name": ("姓名", "教师", "老师", "任课老师", "教师姓名"),
+    "subject_group": ("科组", "学科组", "所属科组", "教师科组", "教学组"),
     "G": ("基本工资", "基本工资元", "底薪"),
     "H": ("岗位津贴", "岗位工资", "岗位补贴"),
     "I": ("工龄工资/教师等级", "工龄工资", "教师等级", "教师等级工资"),
@@ -247,7 +248,7 @@ def _redacted_issue(code: str, *, sheet: str = "", row: int | None = None, field
     return result
 
 
-def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, Any]] | list[str]) -> dict[str, Any]:
+def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, Any]] | list[str] | None, *, reference_only: bool = False) -> dict[str, Any]:
     """Preview a historical G--L table without persisting any payroll data.
 
     ``period`` is validated here so this read-only output cannot be mistaken
@@ -275,6 +276,7 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         "conflicts": [],
         "errors": [],
         "rows": [],
+        "source_people": [],
         "history_only": [],
         "month_without_history": [],
         "identity_required": [],
@@ -331,7 +333,7 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         )
     ]
     m_column = m_columns[0] if len(m_columns) == 1 else None
-    by_id, by_name = _roster_indexes(roster)
+    by_id, by_name = _roster_indexes(roster or [])
     source_seen: dict[tuple[str, str], int] = {}
 
     for row_number in range(selected["data_start_row"], raw_sheet.max_row + 1):
@@ -343,7 +345,10 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         source_name_key = normalize_teacher(source_name_value)
         target: dict[str, Any] | None = None
         match_kind = ""
-        if source_id:
+        if reference_only and (source_id or source_name_key):
+            target = {"teacher_id": source_id or source_name_key, "display_name": source_name_value}
+            match_kind = "SOURCE_STABLE_ID" if source_id else "SOURCE_EXACT_NAME"
+        elif source_id:
             found = by_id.get(source_id)
             if found and not found.get("_ambiguous"):
                 target, match_kind = found, "STABLE_ID"
@@ -401,6 +406,8 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
             continue
         record = {
             "teacher_id": target_id,
+            "teacher": str(target.get("display_name") or source_name_value or "").strip(),
+            "source_group": str(raw_values.get("subject_group") or "").strip(),
             "fields": fields,
             "match_kind": match_kind,
             "provenance": {
@@ -414,13 +421,18 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         }
         preview["rows"].append(record)
         preview["matched"].append({"teacher_id": target_id, "match_kind": match_kind, "source_row": row_number})
+        preview["source_people"].append({
+            "teacher_id": target_id, "teacher": record["teacher"],
+            "source_group": record["source_group"], "source_row": row_number,
+            "source_subject": str(raw_values.get("subject") or raw_values.get("学科") or "").strip(),
+        })
 
     # A broken row stays out of the import. Valid teachers may still be
     # confirmed as one batch, while the affected teachers remain visibly
     # unmatched for later correction. Structural ambiguity or duplicate
     # identity blocks the whole batch.
     preview["can_import"] = bool(preview["rows"]) and not preview["conflicts"]
-    people = [{"display_name": item} if isinstance(item, str) else dict(item) for item in roster]
+    people = [{"display_name": item} if isinstance(item, str) else dict(item) for item in (roster or [])]
     matched_ids = {str(item["teacher_id"]) for item in preview["matched"]}
     preview["month_without_history"] = [
         {"teacher": str(person.get("display_name") or person.get("teacher") or ""), "teacher_id": str(person.get("teacher_id") or "")}
@@ -434,6 +446,7 @@ def preview_base_salary(path: str | Path, period: str, roster: list[dict[str, An
         str(person.get("display_name") or person.get("teacher") or "").strip()
         for person in people if str(person.get("teacher_id") or "") in matched_ids
     }
+    source_names |= {str(item.get("teacher") or "").strip() for item in preview["source_people"]}
     source_names |= {str(item.get("teacher") or "").strip() for item in preview["history_only"]}
     source_names |= {str(item.get("teacher") or "").strip() for item in preview["identity_required"]}
     preview["counts"] = {
