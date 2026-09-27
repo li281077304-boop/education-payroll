@@ -67,6 +67,6 @@
     "AS": "OPEN",
     "AV": "OPEN",
     "annotation_code_modified": false,
-    "standalone_class_performance_comment_open_item": "not_in_current_open_obligations"
+    "standalone_class_performance_comment_open_item_removed": true
   }
 }
