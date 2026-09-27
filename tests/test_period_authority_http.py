@@ -50,7 +50,7 @@ def test_period_authority_round_trip_over_http(tmp_path):
         listed = call("/api/period-authorities")
         assert [item["payroll_period"] for item in listed["authorities"]] == ["2026-08"]
 
-        created = call("/api/runs", {"period": "2026-08", "mode": "GENERATE"})
+        created = call("/api/runs", {"period": "2026-08", "mode": "GENERATE", "operator_role": "DOS"})
         assert created["period_end"] == "2026-08-30"
         assert created["period_authority"]["is_fallback"] is False
         assert created["period_authority"]["confirmed_by"] == "核算负责人"
@@ -68,6 +68,7 @@ def test_real_ui_empty_date_legacy_marker_does_not_bypass_active_authority(tmp_p
         created = call("/api/runs", {
             "period": "2026-08", "mode": "GENERATE", "period_start": "", "period_end": "",
             "period_boundary_source": "LEGACY_CALENDAR_DEFAULT",
+            "operator_role": "DOS",
         })
         assert (created["period_start"], created["period_end"]) == ("2026-08-03", "2026-08-30")
         assert created["period_authority"]["source_label"] == "人工月资料（制度文件导入）"
@@ -124,9 +125,25 @@ def test_run_creation_persists_operator_role_separately_from_audit_generate_mode
         assert created["selected_group"] == "数学组"
         assert created["mode"] == "GENERATE"
         assert created["processing_scope"]["scope_kind"] == "SUBJECT_GROUP"
-        dos = call("/api/runs", {"period": "2026-08", "mode": "AUDIT"})
+        dos = call("/api/runs", {"period": "2026-08", "mode": "AUDIT", "operator_role": "DOS"})
         assert dos["operator_role"] == "DOS"
         assert dos["processing_scope"]["scope_kind"] == "FULL_DEPARTMENT"
+    finally:
+        server.shutdown()
+
+
+def test_http_run_creation_rejects_missing_operator_role(tmp_path):
+    service, server, call = _client(tmp_path)
+    try:
+        try:
+            call("/api/runs", {"period": "2026-08", "mode": "GENERATE"})
+        except HTTPError as exc:
+            body = json.loads(exc.read())
+            assert exc.code == 400
+            assert "请选择 DOS / 教学管理者或学科组长" in body["error"]
+        else:  # pragma: no cover
+            raise AssertionError("未选择角色不得创建正式工资 Run")
+        assert service.list_index() == []
     finally:
         server.shutdown()
 
@@ -149,6 +166,7 @@ def test_an_existing_run_can_be_rebound_to_the_authority_over_http(tmp_path):
     service, server, call = _client(tmp_path)
     try:
         created = call("/api/runs", {"period": "2026-08", "mode": "GENERATE",
+                                     "operator_role": "DOS",
                                      "period_start": "2026-08-03", "period_end": "2026-08-29",
                                      "period_boundary_source": "USER_CONFIRMED"})
         assert created["period_end"] == "2026-08-29"
@@ -209,7 +227,7 @@ def test_the_document_import_writes_every_month_over_http(tmp_path):
         assert (august["period_start"], august["period_end"]) == ("2026-08-03", "2026-08-30")
         assert august["source"]["source_file"] == "知识库.md"
 
-        created = call("/api/runs", {"period": "2026-08", "mode": "GENERATE"})
+        created = call("/api/runs", {"period": "2026-08", "mode": "GENERATE", "operator_role": "DOS"})
         assert (created["period_start"], created["period_end"]) == ("2026-08-03", "2026-08-30")
         assert created["period_boundary_source"] == "MANUAL_PERIOD_DOCUMENT"
 

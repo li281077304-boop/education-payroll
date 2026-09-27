@@ -241,11 +241,14 @@ class PayrollHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._payload(); path = urlparse(self.path).path
             if path == "/api/runs":
+                operator_role = str(payload.get("operator_role") or "").strip()
+                if not operator_role:
+                    return self._error("请选择 DOS / 教学管理者或学科组长后再创建核算。")
                 return self._json(self.server.service.create(
                     str(payload.get("period", "")), str(payload.get("mode", "AUDIT")),
                     period_start=str(payload.get("period_start", "")), period_end=str(payload.get("period_end", "")),
                     period_boundary_source=str(payload.get("period_boundary_source", "")),
-                    operator_role=str(payload.get("operator_role", "DOS")),
+                    operator_role=operator_role,
                     selected_group=str(payload.get("selected_group", "")),
                 ), HTTPStatus.CREATED)
             if path == "/api/core-rules":

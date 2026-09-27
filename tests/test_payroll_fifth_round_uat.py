@@ -262,7 +262,7 @@ def test_subject_group_http_file_endpoint_cannot_bypass_confirmation(tmp_path):
         token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
         request = Request(
             base + "/api/runs",
-            data=json.dumps({"period": "2026-08", "mode": "GENERATE"}).encode(),
+            data=json.dumps({"period": "2026-08", "mode": "GENERATE", "operator_role": "DOS"}).encode(),
             headers={"Content-Type": "application/json", "X-Payroll-Token": token},
             method="POST",
         )

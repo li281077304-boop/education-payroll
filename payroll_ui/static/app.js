@@ -15,6 +15,8 @@ let supportImportPath = "";
 let supportImportName = "";
 let baseSalaryImportPath = "";
 let baseSalaryImportName = "";
+let pendingHistoryReferenceFile = null;
+let pendingHistoryReferenceGroup = "";
 let renewalMaterialPreview = null;
 const materialBusy = new Set();
 
@@ -199,7 +201,7 @@ async function home() {
     renewalMaterialPreview = null;
     const today = new Date();
     const defaultPeriod = defaultPayrollPeriod(today);
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">先选择你本次承担的范围。DOS 负责全教学部；学科组长只处理确认属于本组的人。</p></div><div class="create-box"><label for="operator-role">本次使用身份</label><select id="operator-role" onchange="toggleLeaderGroupChoice()"><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅本组）</option></select><label id="selected-group-wrap" class="hidden" for="selected-group">负责科组</label><select id="selected-group" class="hidden"><option value="">请选择科组</option><option value="数学组">数学组</option><option value="理化组">理化组</option><option value="语文组">语文组</option><option value="英语组">英语组</option><option value="其它">其他</option></select><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用该工资月份的人工月 authority。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">核对一份已有工资表</option><option value="GENERATE">生成工资表</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建核算</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">先选择你本次承担的范围。DOS 负责全教学部；学科组长只处理确认属于本组的人。</p></div><div class="create-box"><label for="operator-role">本次使用身份</label><select id="operator-role" required onchange="toggleLeaderGroupChoice()"><option value="" selected>请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅本组）</option></select><label id="selected-group-wrap" class="hidden" for="selected-group">负责科组</label><select id="selected-group" class="hidden"><option value="">请选择科组</option><option value="数学组">数学组</option><option value="理化组">理化组</option><option value="语文组">语文组</option><option value="英语组">英语组</option><option value="其它">其他</option></select><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用该工资月份的人工月 authority。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">核对一份已有工资表</option><option value="GENERATE">生成工资表</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建核算</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
     duplicateHint();
   } catch (error) { showMessage(error.message); }
 }
@@ -485,7 +487,7 @@ function historyList() {
     const groupCount = (run.issue_groups || []).length;
     const fieldCount = run.issues?.length || summary.unexplained || summary.manual_review || 0;
     const next = run.status === "STALE" ? "重新选择变化的材料" : run.status === "DRAFT" ? "继续导入材料" : run.status === "FILES_READY" ? "开始核对" : (summary.unexplained || summary.manual_review) ? "处理核对问题" : "查看核对结果";
-    return `<article class="history-row"><div><strong>${escapeHtml(run.period)}</strong><div class="small muted">编号 ${escapeHtml(run.id)} · 更新于 ${fmtDate(run.updated_at || run.created_at)}</div></div><div>${statusBadge(run)}<div class="small muted">材料 ${run.health.readiness}% · 待处理 ${groupCount} 个问题${fieldCount ? `（字段核查 ${fieldCount} 项）` : ""}</div></div><button class="secondary" onclick="openRun('${run.id}')">${next}</button></article>`;
+    return `<article class="history-row"><div><strong>${escapeHtml(run.period)}</strong><div class="small muted">编号 ${escapeHtml(run.id)} · 更新于 ${fmtDate(run.updated_at || run.created_at)}</div></div><div>${statusBadge(run)}<div class="small muted">材料 ${run.health.readiness}% · 审计问题 ${groupCount} 个${fieldCount ? `（字段核查 ${fieldCount} 项）` : ""}</div></div><button class="secondary" onclick="openRun('${run.id}')">${next}</button></article>`;
   }).join("")}</div>`;
 }
 
@@ -500,12 +502,15 @@ function duplicateHint() {
 async function createRun() {
   try {
     const mode = $("#mode") ? $("#mode").value : "AUDIT";
-    const operatorRole = $("#operator-role")?.value || "DOS";
+    const operatorRole = $("#operator-role")?.value || "";
     const selectedGroup = $("#selected-group")?.value || "";
+    if (!operatorRole) return showMessage("请选择 DOS / 教学管理者或学科组长后再创建核算。", "error");
     if (operatorRole === "SUBJECT_LEADER" && !selectedGroup) return showMessage("学科组长模式请先选择负责科组。", "error");
     current = await api("/api/runs", { method: "POST", body: JSON.stringify({ period: $("#period").value, mode, operator_role: operatorRole, selected_group: selectedGroup, period_start: $("#period-start")?.value || "", period_end: $("#period-end")?.value || "", period_boundary_source: $("#period-start")?.value || $("#period-end")?.value ? "USER_CONFIRMED" : "LEGACY_CALENDAR_DEFAULT" }) });
     baseSalaryImportPreview = null;
     renewalMaterialPreview = null;
+    pendingHistoryReferenceFile = null;
+    pendingHistoryReferenceGroup = "";
     tab = "materials";
     renderRun();
   } catch (error) { showMessage(error.message); }
@@ -529,6 +534,8 @@ async function openRun(id) {
     if (current?.id !== id) {
       baseSalaryImportPreview = null;
       renewalMaterialPreview = null;
+      pendingHistoryReferenceFile = null;
+      pendingHistoryReferenceGroup = "";
     }
     current = await api(`/api/runs/${id}`);
     tab = current.status === "STALE" || current.status === "DRAFT" || current.status === "FILES_READY" ? "materials" : (current.issue_groups || []).length ? "issues" : (current.generated_payroll || (current.mode === "GENERATE" && current.core_calculation?.rows?.length)) ? "payroll" : "materials";
@@ -539,27 +546,121 @@ async function openRun(id) {
 function runSteps() {
   const steps = [["materials", "准备核算材料"], ["staff", "教师名单与归属"], ["issues", "待处理问题"], ["payroll", "工资预览与导出"]];
   const index = Math.max(0, steps.findIndex(([id]) => id === tab));
-  return `<div class="steps">${steps.map(([id, label], stepIndex) => `<span class="${stepIndex < index ? "done" : stepIndex === index ? "active" : ""}">${stepIndex + 1} ${label}</span>`).join("")}</div>`;
+  const numbers = ["①", "②", "③", "④"];
+  return `<div class="steps">${steps.map(([id, label], stepIndex) => `<span class="${stepIndex < index ? "done" : stepIndex === index ? "active" : ""}">${numbers[stepIndex]} ${label}</span>`).join("")}</div>`;
 }
 
 function navigation() {
-  const groupCount = (current.issue_groups || []).length;
-  const decisions = current.decisions || [];
-  const deferredCount = decisions.filter((item) => item.status === "DEFERRED" || item.action === "DEFERRED").length;
-  const processedCount = decisions.length - deferredCount;
-  const hasPayrollPreview = Boolean(current.generated_payroll || current.core_calculation?.rows?.length);
-  const rosterReady = Boolean(current.files?.schedule);
-  const issuesReady = rosterReady || Object.keys(current.pending_subject_group_imports || {}).length > 0 || current.support_source?.status === "PENDING_CONFIRMATION";
-  const items = [["materials", "① 准备核算材料", true], ["staff", "② 教师名单与归属", rosterReady], ["issues", `③ 待处理问题${groupCount ? ` (${groupCount})` : ""}`, issuesReady], ["payroll", "④ 工资预览与导出", hasPayrollPreview]];
+  const todo = currentTodoSummary();
+  const items = [["materials", "准备核算材料"], ["staff", "教师名单与归属"], ["issues", "待处理问题"], ["payroll", "工资预览与导出"]];
   const activeIndex = Math.max(0, items.findIndex(([id]) => id === tab));
   const back = activeIndex > 0 ? items[activeIndex - 1] : null;
   const next = activeIndex < items.length - 1 ? items[activeIndex + 1] : null;
   const currentLabel = items[activeIndex]?.[1] || "准备核算材料";
-  return `<nav class="tabs">${items.map(([id, label, enabled]) => `<button class="${tab === id ? "active" : ""}" ${enabled ? `onclick="setTab('${id}')"` : "disabled"}>${label}</button>`).join("")}</nav><div class="flow-location" aria-live="polite"><strong>当前位置：${currentLabel}</strong><span>待处理 ${groupCount} · 已处理 ${processedCount} · 暂缓 ${deferredCount}</span></div><div class="flow-footer"><button class="secondary" ${back ? `onclick="setTab('${back[0]}')"` : "disabled"}>上一步</button><span>${currentLabel}</span><button onclick="${next ? `continueFlow('${next[0]}')` : "setTab('payroll')"}" ${next && !next[2] ? "disabled" : ""}>${next ? (tab === "issues" ? "保存并处理下一项" : "保存并继续") : "查看工资预览"}</button></div>`;
+  const nextLabel = tab === "issues" ? "下一步：工资预览" : "下一步";
+  return `<div class="flow-location" aria-live="polite"><strong>当前位置：${currentLabel}</strong><span>待处理 ${todo.pending} · 已处理 ${todo.processed} · 暂缓 ${todo.deferred}</span></div><div class="flow-footer"><button class="secondary" ${back ? `onclick="setTab('${back[0]}')"` : "disabled"}>上一步</button><button ${next ? `onclick="continueFlow('${next[0]}')"` : "disabled"}>${nextLabel}</button></div>`;
+}
+
+function groupHasPendingUserAction(group) {
+  const decision = group?.decision || {};
+  return !decision.status || decision.status === "NEEDS_RECONFIRMATION";
+}
+
+function actionKeyForCause(cause) {
+  return ({
+    base_salary_input: "salary-basis",
+    renewal_result_source: "renewal-source",
+    compensation_fee_policy: "af-policy",
+    support_department_source: "support-source",
+  })[cause] || `issue:${cause || "unknown"}`;
+}
+
+function currentTodoSummary() {
+  const groups = current?.issue_groups || [];
+  const pendingGroups = groups.filter(groupHasPendingUserAction);
+  const pendingGroupIds = new Set(pendingGroups.map((item) => item.id));
+  const pendingKeys = new Set();
+  const representedGroups = new Set();
+  for (const action of current?.user_actions || []) {
+    const memberIds = (action.group_ids || []).filter((id) => pendingGroupIds.has(id));
+    if (!memberIds.length) continue;
+    memberIds.forEach((id) => representedGroups.add(id));
+    pendingKeys.add(actionKeyForCause(action.cause));
+  }
+  for (const group of pendingGroups) {
+    if (!representedGroups.has(group.id)) pendingKeys.add(`issue-group:${group.id}`);
+  }
+
+  if (gradeSupportSection(current?.grade_help)) pendingKeys.add("grade-help");
+  if (current?.material_inputs?.renewal && !current.run_renewal_result_snapshot && !renewalMaterialPreview) pendingKeys.add("renewal-source");
+  if (renewalMaterialPreview?.run_id === current?.id) pendingKeys.add("renewal-source");
+  if (periodMismatchCard()) pendingKeys.add("period-month");
+  if (coverageWarningCard()) pendingKeys.add("period-coverage");
+  if (current?.period_check?.outside_authority) pendingKeys.add("period-authority-review");
+  if (current?.period_authority?.is_fallback) pendingKeys.add("period-authority");
+  if (current?.support_department_pending_preview?.status === "PENDING_CONFIRMATION") pendingKeys.add("support-source");
+  for (const [key, item] of Object.entries(current?.pending_subject_group_imports || {})) {
+    pendingKeys.add(`subject-group:${item.source_sha256 || key}`);
+  }
+  const historyPending = current?.historical_salary_reference_pending_preview || {};
+  if (historyPending.status === "PENDING_CONFIRMATION") pendingKeys.add(`history-membership:${historyPending.source_sha256 || historyPending.source_name || "pending"}`);
+  if (pendingHistoryReferenceFile) pendingKeys.add("history-reference-group");
+  const supportBound = Boolean(current?.support_source?.bound);
+  const references = savedHistoricalSalaryReferences();
+  if (!supportBound && historyPending.status !== "PENDING_CONFIRMATION") {
+    for (const reference of references.filter((item) => !(item.use_confirmations || []).length)) {
+      const group = reference.selected_group || reference.group_membership?.group || "";
+      pendingKeys.add(`history-use:${reference.reference_id || `${reference.source_sha256 || ""}:${group}`}`);
+    }
+  }
+  const unknownBasisCount = Number(current?.employment?.salary_basis_counts?.SOURCE_UNKNOWN || 0);
+  if (unknownBasisCount > 0) pendingKeys.add("salary-basis");
+  if (baseSalaryTodoCard()) pendingKeys.add("salary-basis");
+  if (current?.mode === "GENERATE" && !current.af_policy_confirmation) pendingKeys.add("af-policy");
+
+  const processedKeys = new Set();
+  const deferredKeys = new Set();
+  for (const decision of current?.business_decisions || []) {
+    if (decision.status === "NEEDS_RECONFIRMATION") continue;
+    const key = `issue-group:${decision.group_id || decision.root_cause_key || "unknown"}`;
+    if (decision.status === "ACTIVE" && decision.action === "DEFERRED") deferredKeys.add(key);
+    else if (decision.status === "ACTIVE") processedKeys.add(key);
+  }
+  for (const decision of current?.decisions || []) {
+    const key = `legacy-issue:${decision.issue_id || decision.field || "unknown"}`;
+    if (decision.action === "DEFERRED") deferredKeys.add(key);
+    else if (decision.action) processedKeys.add(key);
+  }
+  if (current?.support_source?.bound) processedKeys.add("support-source");
+  for (const material of current?.subject_group_materials || []) {
+    if (material.status === "CONFIRMED" && !material.removed_at) processedKeys.add(`subject-group:${material.source_sha256 || material.material_id}`);
+  }
+  for (const item of current?.subject_group_pending_history || []) {
+    if (item.event === "CANCELLED" || item.event === "LEGACY_UNCONFIRMED_FILE_CANCELLED") deferredKeys.add(`subject-group:${item.material_id || item.source_sha256 || item.role || "candidate"}`);
+  }
+  if ((current?.support_department_pending_history || []).some((item) => item.event === "CANCELLED")) deferredKeys.add("support-source");
+  for (const reference of references) {
+    const group = reference.selected_group || reference.group_membership?.group || "";
+    const key = `history-membership:${reference.reference_id || `${reference.source_sha256 || ""}:${group}`}`;
+    if (reference.group_membership?.confirmed) processedKeys.add(key);
+    if ((reference.use_confirmations || []).length) processedKeys.add(`history-use:${reference.reference_id || `${reference.source_sha256 || ""}:${group}`}`);
+  }
+  if (current?.historical_salary_reference_pending_history?.some((item) => item.event === "CANCELLED")) deferredKeys.add("history-membership:deferred");
+  if (current?.run_renewal_result_snapshot) processedKeys.add("renewal-source");
+  if (Object.keys(current?.salary_basis_confirmations || {}).length) processedKeys.add("salary-basis");
+  if (current?.base_salary_input_snapshot && !current?.support_source?.bound) processedKeys.add("salary-basis");
+  if (current?.base_salary_deferred) deferredKeys.add("salary-basis");
+  if (current?.af_policy_confirmation) processedKeys.add("af-policy");
+  if (["SWITCHED", "KEPT"].includes(current?.period_check?.decision)) processedKeys.add("period-month");
+  if (current?.period_authority && !current.period_authority.is_fallback && (current.period_authority.source_file || current.period_authority.source_label || current.period_authority.boundary_source)) processedKeys.add("period-authority");
+  if ((current?.period_window_history || []).length) processedKeys.add("period-coverage");
+  for (const key of current?.ui_deferred_todo_keys || []) deferredKeys.add(key);
+
+  return { pending: pendingKeys.size, processed: processedKeys.size, deferred: deferredKeys.size };
 }
 
 function continueFlow(nextTab) {
-  if (nextTab === "payroll" && !(current.generated_payroll || current.core_calculation?.rows?.length)) return showMessage("请先在待处理问题中明确点击“开始核算”。");
+  if (nextTab === "payroll" && !(current.generated_payroll || current.core_calculation?.rows?.length)) return showMessage("请先点击开始核算。");
   if (nextTab === "issues" && !current.files?.schedule) return showMessage("请先在材料准备中导入当前人工月排课表。");
   setTab(nextTab);
 }
@@ -616,6 +717,8 @@ async function changeRunPeriod() {
     baseSalaryImportPreview = null;
     renewalMaterialPreview = null;
     supportImportPreview = null;
+    pendingHistoryReferenceFile = null;
+    pendingHistoryReferenceGroup = "";
     tab = "materials";
     renderRun();
     showMessage(`已切换到 ${current.period}。人工月和来源已按该月份 authority 重新绑定。`, "success");
@@ -851,7 +954,7 @@ function supportMaterialCard() {
   const previewSummary = waiting ? `<div class="support-preview-summary"><p><strong>${escapeHtml(fileName || "支持部工资资料候选")}</strong></p><div class="facts"><span>工作表：${escapeHtml(sheet || "待识别")}</span><span>匹配教师：${escapeHtml(teacherCount)}</span><span>源批注：${escapeHtml(commentCount)}</span><span>文件标识：${escapeHtml(String(preview?.source?.sha256 || pending.source_sha256 || "").slice(0, 10))}</span></div>${source.bound ? '<p class="small warn">当前已确认版本继续生效；候选版本确认前不会替换。</p>' : ""}<p class="small muted">预览只读；确认、替换或暂缓请到“待处理问题”完成。</p><button class="secondary" onclick="setTab('issues')">去待处理问题</button></div>` : "";
   const boundDetails = source.bound ? `<details class="support-source-details"><summary>查看已确认资料与字段范围</summary><p class="small muted">文件：${escapeHtml(source.source_name || "—")} · 工作表：${escapeHtml(source.source_sheet || "—")} · 教师覆盖：${escapeHtml(source.entries || 0)} 人 · 批注：${escapeHtml(source.comment_count ?? 0)} 条 · 确认人：${escapeHtml(source.confirmed_by || "—")}</p>${fieldRows ? `<div class="table-wrap"><table class="table"><thead><tr><th>工资项目</th><th>字段</th><th>来源列</th><th>采用情况</th></tr></thead><tbody>${fieldRows}</tbody></table></div>` : ""}</details>` : "";
   const remove = source.bound || pending.status === "PENDING_CONFIRMATION" ? `<label class="person-field">本次移除确认人<input id="support-remove-confirmed-by" value="" placeholder="填写确认人姓名"></label><button class="quiet danger-link" onclick="removeSupportSource()">${source.bound ? "从本次核算移除" : "取消这份待确认资料"}</button>` : "";
-  return `<article id="support-material-card" class="material-card support-material-card"><div class="material-top"><strong>支持部工资资料</strong><span class="status ${stateClass}">${state}</span></div><p class="small muted">本月支持部教学部工资表是正式工资基础来源；一张表可提供 G～L、身份及支持部项目。历史工资表只作为参考，需另行确认。</p>${source.bound ? `<div class="facts"><span>文件：${escapeHtml(source.source_name || "—")}</span><span>工作表：${escapeHtml(source.source_sheet || "—")}</span><span>教师：${escapeHtml(source.entries || 0)} 人</span><span>批注：${escapeHtml(source.comment_count ?? 0)} 条</span><span>确认人：${escapeHtml(source.confirmed_by || "—")}</span></div>${boundDetails}` : '<div class="empty compact">本次还没有已确认的支持部工资资料。</div>'}${previewSummary}<div data-drop-role="support" tabindex="0" role="button" aria-label="拖入支持部工资资料" class="drop-zone">${waiting ? "可拖入另一版本重新预览" : source.bound ? "拖入新版本，预览后再确认替换" : "拖入 Excel 文件，或选择文件预览"}</div><input id="support-material-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewSupportFile(event)"><div class="action-bar"><button class="secondary" onclick="document.querySelector('#support-material-file').click()">${source.bound ? "更换支持部资料" : "选择支持部工资资料"}</button>${remove}</div><div id="support-material-import-status" role="status" aria-live="polite" class="small muted"></div></article>`;
+  return `<section id="support-material-card" class="salary-source-panel support-material-card"><div class="material-top"><strong>本月工资资料（权威）</strong><span class="status ${stateClass}">${state}</span></div><p class="small muted">来源：支持部提供。本月正式工资基础资料优先级最高；一张表可提供 G～L、身份及支持部项目。</p>${source.bound ? `<div class="facts"><span>文件：${escapeHtml(source.source_name || "—")}</span><span>工作表：${escapeHtml(source.source_sheet || "—")}</span><span>教师：${escapeHtml(source.entries || 0)} 人</span><span>批注：${escapeHtml(source.comment_count ?? 0)} 条</span><span>确认人：${escapeHtml(source.confirmed_by || "—")}</span></div>${boundDetails}` : '<div class="empty compact">本次还没有已确认的本月工资资料。</div>'}${previewSummary}<div data-drop-role="support" tabindex="0" role="button" aria-label="拖入本月工资资料" class="drop-zone">${waiting ? "可拖入另一版本重新预览" : source.bound ? "拖入新版本，预览后再确认替换" : "拖入 Excel 文件，或选择文件预览"}</div><input id="support-material-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewSupportFile(event)"><div class="action-bar"><button class="secondary" onclick="document.querySelector('#support-material-file').click()">${source.bound ? "更换本月工资资料" : "导入本月工资资料"}</button>${remove}</div><div id="support-material-import-status" role="status" aria-live="polite" class="small muted"></div></section>`;
 }
 
 function cancelSupportPreview() {
@@ -864,6 +967,35 @@ function cancelSupportPreview() {
 
 async function openHistoricalImport() {
   document.querySelector("#base-salary-history-file")?.click();
+}
+
+function stageHistoricalReferenceFile(file) {
+  if (!file) return;
+  pendingHistoryReferenceFile = file;
+  pendingHistoryReferenceGroup = current.operator_role === "SUBJECT_LEADER" ? (current.selected_group || "") : "";
+  baseSalaryImportPreview = null;
+  renderRun();
+  showMessage("已选择历史工资文件；请确认所属科组后继续识别。", "info");
+}
+
+function setPendingHistoricalReferenceGroup(group) {
+  pendingHistoryReferenceGroup = String(group || "").trim();
+}
+
+function cancelStagedHistoricalReference() {
+  pendingHistoryReferenceFile = null;
+  pendingHistoryReferenceGroup = "";
+  const input = document.querySelector("#base-salary-history-file");
+  if (input) input.value = "";
+  renderRun();
+}
+
+async function previewStagedHistoricalReference() {
+  if (!pendingHistoryReferenceFile) return showMessage("请先选择历史工资文件。", "error");
+  if (!pendingHistoryReferenceGroup) return showMessage("请选择这份历史工资资料所属的科组。", "error");
+  const file = pendingHistoryReferenceFile;
+  const group = pendingHistoryReferenceGroup;
+  await previewBaseSalaryFileObject(file, group);
 }
 
 async function removeSupportSource() {
@@ -922,6 +1054,9 @@ function baseSalaryPage() {
 function historicalSalaryReferenceCard() {
   const references = savedHistoricalSalaryReferences();
   const people = current.employment?.teachers || [];
+  const stagedFile = pendingHistoryReferenceFile;
+  const selectedGroup = pendingHistoryReferenceGroup || (current.operator_role === "SUBJECT_LEADER" ? current.selected_group : "");
+  const stagedMarkup = stagedFile ? `<div class="history-reference-stage"><div class="facts"><strong>已选择文件：</strong><span>${escapeHtml(stagedFile.name)}</span></div><label for="history-reference-group">这份资料属于哪个科组？<select id="history-reference-group" ${current.operator_role === "SUBJECT_LEADER" ? "disabled" : ""} onchange="setPendingHistoricalReferenceGroup(this.value)"><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${selectedGroup === group ? "selected" : ""}>${group}</option>`).join("")}</select></label>${current.operator_role === "SUBJECT_LEADER" ? `<p class="small muted">本次身份：学科组长 · ${escapeHtml(current.selected_group || "待选科组")}（历史资料归属已预填）</p>` : ""}<div id="history-reference-import-status" role="status" aria-live="polite" class="small muted"></div><div class="action-bar"><button onclick="previewStagedHistoricalReference()">继续：识别并预览</button><button class="secondary" onclick="openHistoricalImport()">更换文件</button><button class="quiet" onclick="cancelStagedHistoricalReference()">取消</button></div></div>` : "";
   const referenceRows = references.map((reference) => {
     const group = reference.selected_group || reference.group_membership?.group || "待确认科组";
     const count = reference.group_membership?.members?.length || reference.teacher_count || reference.entries?.length || Object.keys(reference.entries || {}).length;
@@ -929,7 +1064,7 @@ function historicalSalaryReferenceCard() {
     return `<div class="file-name"><strong>${escapeHtml(group)} · ${escapeHtml(reference.source_name || reference.source || "历史工资参考")}</strong><span class="small ${applied ? "ok" : "info"}">${applied ? "已明确采用到本月" : "已确认，仅作参考"}</span><span class="small muted">教师 ${escapeHtml(count)} 人 · ${escapeHtml(String(reference.source_sha256 || "").slice(0, 10))}</span></div>`;
   }).join("");
   const status = references.length ? `已保存 ${references.length} 份历史参考` : "未提供历史工资参考";
-  return `<section id="historical-salary-reference-card" class="card historical-reference-card"><div class="section-head"><div><p class="eyebrow">资料覆盖概览</p><h2>历史工资参考</h2><p class="muted">历史数据只作为 G～L 候选参考；不会自动成为本月工资，也不会带入上月其它工资项目。</p></div><span class="status ${references.length ? "info" : "muted"}">${escapeHtml(status)}</span></div>${references.length ? `<div class="subject-group-confirmed-list">${referenceRows}</div>` : `<div class="banner info"><strong>尚未提供历史工资参考资料</strong><span>这不是教师工资异常；可继续添加历史参考，或稍后再处理。</span></div>`}<div class="facts"><span>本月处理教师 ${escapeHtml(people.length)} 人</span></div><div class="action-bar"><span class="small muted">历史参考只用于已确认成员的 G～L；需要采用时，请到待处理问题页逐份确认。</span><button class="secondary" onclick="openHistoricalImport()">${references.length ? "继续添加历史工资参考" : "导入历史工资参考"}</button></div></section>`;
+  return `<section id="historical-salary-reference-card" class="salary-source-panel historical-reference-card"><div class="material-top"><strong>历史工资参考</strong><span class="status ${references.length ? "info" : "muted"}">${escapeHtml(status)}</span></div><p class="small muted">只作为教师身份、归组与 G～L 候选参考；不会自动成为本月工资，也不会带入上月其它工资项目。</p>${references.length ? `<div class="subject-group-confirmed-list">${referenceRows}</div>` : `<div class="empty compact">尚未提供历史工资参考资料。</div>`}${stagedMarkup}<div class="facts"><span>本月处理教师 ${escapeHtml(people.length)} 人</span></div>${stagedFile ? "" : `<div class="action-bar"><span class="small muted">先选文件，再确认科组；识别后仍需在待处理问题页确认。</span><button class="secondary" onclick="openHistoricalImport()">${references.length ? "继续添加历史工资参考" : "导入历史工资参考"}</button></div>`}<input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></section>`;
 }
 
 function savedHistoricalSalaryReferences() {
@@ -973,13 +1108,13 @@ function bindBaseSalaryDropZone() {
     zone.classList.remove("dragging");
     const files = [...(event.dataTransfer?.files || [])];
     if (files.length !== 1) return showMessage("请一次选择一张历史工资表。");
-    await previewBaseSalaryFileObject(files[0]);
+    stageHistoricalReferenceFile(files[0]);
   });
 }
 
 async function previewBaseSalaryFile(event) {
   const file = event.target?.files?.[0];
-  if (file) await previewBaseSalaryFileObject(file);
+  if (file) stageHistoricalReferenceFile(file);
 }
 
 // 支持部工资资料：一次上传同时供基本工资 G～L 与支持部字段使用，
@@ -1037,15 +1172,14 @@ async function cancelSupportCandidate() {
   } catch (error) { await refreshAfterError(error); }
 }
 
-async function previewBaseSalaryFileObject(file) {
+async function previewBaseSalaryFileObject(file, selectedGroup) {
   baseSalaryImportPreview = null;
   baseSalaryImportPath = "";
   baseSalaryImportName = "";
-  const status = $("#base-salary-import-status");
+  const status = $("#history-reference-import-status") || $("#base-salary-import-status");
   if (status) status.textContent = "正在读取并匹配教师…";
   try {
     if (!/\.(xls|xlsx|xlsm)$/i.test(file.name)) throw new Error("请选择 Excel 工资表（.xls、.xlsx 或 .xlsm）。");
-    const selectedGroup = $("#history-reference-group")?.value || current.selected_group || "";
     if (!selectedGroup) throw new Error("请先选择这份历史工资参考所属的科组。");
     const bytes = new Uint8Array(await file.arrayBuffer());
     const uploaded = await api("/api/upload", { method: "POST", body: JSON.stringify({ name: file.name, content_base64: bytesToBase64(bytes) }) });
@@ -1055,6 +1189,8 @@ async function previewBaseSalaryFileObject(file) {
     baseSalaryImportPath = uploaded.path;
     baseSalaryImportName = file.name;
     baseSalaryImportPreview = { ...preview, run_id: current.id };
+    pendingHistoryReferenceFile = null;
+    pendingHistoryReferenceGroup = "";
     renderRun();
     showMessage(preview.can_import ? `已识别 ${preview.matched.length} 位教师；这是历史参考资料，不会自动进入本月工资。` : "历史工资参考表中有待核实项目，请查看预览。", preview.can_import ? "info" : "error");
   } catch (error) {
@@ -1222,7 +1358,7 @@ function salaryMaterialsModule() {
   const source = current.support_source || {};
   const references = savedHistoricalSalaryReferences();
   const stateText = source.bound ? "已导入本月权威工资资料" : references.length ? `暂无本月权威资料，已有 ${references.length} 份历史工资参考` : "暂无本月权威工资资料或历史工资参考";
-  return `<section id="salary-material-module" class="salary-material-module card"><div class="section-head"><div><p class="eyebrow">工资资料</p><h2>工资资料</h2><p class="muted">${escapeHtml(stateText)}</p></div><span class="status ${source.bound ? "ok" : references.length ? "info" : "warn"}">${source.bound ? "本月权威" : references.length ? "历史参考" : "未提供"}</span></div><div class="salary-material-options">${supportMaterialCard()}${historicalSalaryReferenceCard()}</div><label for="history-reference-group">历史参考所属科组<select id="history-reference-group" ${current.operator_role === "SUBJECT_LEADER" ? "disabled" : ""}><option value="">请选择科组</option>${["数学组", "理化组", "语文组", "英语组", "其它"].map((group) => `<option value="${group}" ${(current.operator_role === "SUBJECT_LEADER" ? current.selected_group : "") === group ? "selected" : ""}>${group}</option>`).join("")}</select></label><input id="base-salary-history-file" class="sr-only" type="file" accept=".xls,.xlsx,.xlsm" onchange="previewBaseSalaryFile(event)"></section>`;
+  return `<section id="salary-material-module" class="salary-material-module card"><div class="section-head"><div><p class="eyebrow">工资资料</p><h2>工资资料</h2><p class="muted">${escapeHtml(stateText)}</p></div><span class="status ${source.bound ? "ok" : references.length ? "info" : "warn"}">${source.bound ? "本月权威" : references.length ? "历史参考" : "未提供"}</span></div><div class="salary-material-options">${supportMaterialCard()}${historicalSalaryReferenceCard()}</div></section>`;
 }
 
 function productionMaterialCards() {
@@ -1311,13 +1447,13 @@ function periodMismatchCard() {
     const details = (check.sources || []).map((item) => `${escapeHtml(item.source_file || item.role)}：${escapeHtml(item.source_month || "未知")}`).join("；");
     const months = [...new Set((check.sources || []).map((item) => item.source_month).filter(Boolean))];
     const choices = months.map((month) => `<button onclick="switchPeriodTo('${escapeHtml(month)}')">按 ${escapeHtml(month)} 继续</button>`).join("");
-    return `<section class="card warning-card"><h2>材料月份不一致</h2><p class="muted">系统检测到不同材料对应不同工资月份，不能自动替你选择。${details}</p><p class="small warn">请选择本次实际工资月份；系统不会替你猜测。</p><div class="action-bar">${choices}</div></section>`;
+    return `<section class="card warning-card" data-todo-key="period-month"><h2>材料月份不一致</h2><p class="muted">系统检测到不同材料对应不同工资月份，不能自动替你选择。${details}</p><p class="small warn">请选择本次实际工资月份；系统不会替你猜测。</p><div class="action-bar">${choices}</div></section>`;
   }
   // PENDING means the user still needs to choose.  Only an explicit choice
   // may dismiss this card.
   if (!check.mismatch || ["SWITCHED", "KEPT"].includes(check.decision)) return "";
   const source = check.source_month || "未知月份";
-  return `<section class="card"><h2>课表月份需要确认</h2><p class="muted">检测到课表主要属于 ${escapeHtml(source)}，当前核算月份为 ${escapeHtml(check.run_month)}。</p><div class="action-bar"><button onclick="resolvePeriod('SWITCH')">切换到 ${escapeHtml(source)}</button><button class="secondary" onclick="resolvePeriod('KEEP')">仍按 ${escapeHtml(check.run_month)}</button></div></section>`;
+  return `<section class="card" data-todo-key="period-month"><h2>课表月份需要确认</h2><p class="muted">检测到课表主要属于 ${escapeHtml(source)}，当前核算月份为 ${escapeHtml(check.run_month)}。</p><div class="action-bar"><button onclick="resolvePeriod('SWITCH')">切换到 ${escapeHtml(source)}</button><button class="secondary" onclick="resolvePeriod('KEEP')">仍按 ${escapeHtml(check.run_month)}</button></div></section>`;
 }
 
 function periodNeedsDecision(check = current?.period_check) {
@@ -1885,6 +2021,7 @@ async function cancelHistoricalReferencePreview() {
 }
 
 function deferRenewalPreview() {
+  current.ui_deferred_todo_keys = [...new Set([...(current.ui_deferred_todo_keys || []), "renewal-source"])];
   renewalMaterialPreview = null;
   renderRun();
   showMessage("已暂缓续费来源确认；原始资料保留，未写入本月续费工资项目。", "info");
@@ -1913,10 +2050,13 @@ function issuesPage() {
   if (current.role_scope_recalculation_required) {
     return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">角色范围已更新。旧问题不属于新范围，因此暂不展示；你主动开始核算后会生成当前范围的问题清单。</p></div><button onclick="recheck()">开始核算</button></div><div class="banner info"><strong>不会自动重算</strong><span>点击上方“开始核算”才会按已保存角色与当前 Run 材料重新处理。</span></div></section>`;
   }
-  const baseSalaryBlock = current.mode === "GENERATE" && !current.base_salary_input_snapshot && !current.base_salary_deferred && (current.employment?.salary_basis_counts?.SOURCE_UNKNOWN || 0) > 0
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">所有需要确认、选择、接受或暂缓的事项都集中在这里；处理后保持当前位置。</p></div><button onclick="recheck()">${current.core_calculation?.rows?.length ? "重新核算" : "开始核算"}</button></div>${scopeDecisionCards()}<div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters(event)" oncompositionend="updateFilters(event)"></label></div>${baseSalaryTodoCard()}<div id="issues-content">${issueResultsMarkup()}</div>${afPolicyBlock()}<div id="issue-detail"></div></section>`;
+}
+
+function baseSalaryTodoCard() {
+  return current.mode === "GENERATE" && !current.base_salary_input_snapshot && !current.base_salary_deferred && (current.employment?.salary_basis_counts?.SOURCE_UNKNOWN || 0) > 0
     ? `<section class="action-first base-salary-action"><h3>导入基本工资</h3><p class="muted">本月支持部资料优先；历史工资先作为参考。暂不录入时，M 和总工资保持待补充，核算稍后由你统一启动。</p><div class="action-bar"><button onclick="setTab('base-salary')">查看工资来源选项</button><button class="secondary" onclick="showMessage('可以稍后从材料准备页补充；当前不会按 0 计算。', 'success')">稍后补充</button></div><label class="person-field">暂不录入确认人<input id="defer-base-confirmed-by" value="${escapeHtml(current.af_policy_confirmation?.confirmed_by || "")}" placeholder="填写姓名"></label><div class="action-bar"><button class="secondary" onclick="deferBaseSalaryQuick()">暂不录入</button></div></section>`
     : "";
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">所有需要确认、选择、接受或暂缓的事项都集中在这里；处理后保持当前位置。</p></div><button onclick="recheck()">${current.core_calculation?.rows?.length ? "重新核算" : "开始核算"}</button></div>${scopeDecisionCards()}<div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters(event)" oncompositionend="updateFilters(event)"></label></div>${baseSalaryBlock}<div id="issues-content">${issueResultsMarkup()}</div>${afPolicyBlock()}<div id="issue-detail"></div></section>`;
 }
 
 function issueRow(group) {
@@ -2156,11 +2296,15 @@ async function refreshAfterError(error) {
 }
 
 async function decide(id, advance = false) {
+  const pendingQueueBeforeSave = (current.issue_groups || [])
+    .filter((group) => group.id !== id && groupHasPendingUserAction(group))
+    .map((group) => group.id);
   try {
     current = await api(`/api/runs/${current.id}/decisions`, { method: "POST", body: JSON.stringify({ issue_id: id, action: $("#decision").value, person: $("#person").value, reason: $("#reason").value, fingerprint: detailBasisToken }) });
     const groups = current.issue_groups || [];
-    const currentIndex = groups.findIndex((item) => item.id === id);
-    const next = advance ? groups[currentIndex + 1] : groups.find((item) => item.id === id);
+    const next = advance
+      ? pendingQueueBeforeSave.map((nextId) => groups.find((item) => item.id === nextId)).find((item) => item && groupHasPendingUserAction(item)) || groups.find((item) => item.id !== id && groupHasPendingUserAction(item))
+      : groups.find((item) => item.id === id);
     renderRun();
     if (next) await evidence(next.id);
     else { tab = "issues"; renderRun(); }

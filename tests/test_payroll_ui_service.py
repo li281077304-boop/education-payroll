@@ -462,7 +462,7 @@ def test_loopback_ui_bootstrap_and_create_run(tmp_path):
     base = f"http://127.0.0.1:{server.server_port}"
     try:
         token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
-        request = Request(base + "/api/runs", data=b'{"period":"2026-08"}', method="POST", headers={"Content-Type": "application/json", "X-Payroll-Token": token})
+        request = Request(base + "/api/runs", data=b'{"period":"2026-08","operator_role":"DOS"}', method="POST", headers={"Content-Type": "application/json", "X-Payroll-Token": token})
         payload = json.loads(urlopen(request).read())
         assert payload["period"] == "2026-08"
     finally:
@@ -482,7 +482,7 @@ def test_company_template_can_be_set_from_ui_and_survives_source_deletion(tmp_pa
         managed = Path(registered["managed_path"])
         assert managed.is_file()
         template.unlink()
-        run = _post_json(base, token, "/api/runs", {"period": "2026-09", "mode": "GENERATE"})
+        run = _post_json(base, token, "/api/runs", {"period": "2026-09", "mode": "GENERATE", "operator_role": "DOS"})
         saved = service.store.get(run["id"])
         assert saved["template_path"] == str(managed.resolve())
         assert saved["template"]["source"] == "已登记公司工资模板"
@@ -544,7 +544,7 @@ def test_loopback_fixture_flow_keeps_an_unexplained_difference_visible(tmp_path)
     base = f"http://127.0.0.1:{server.server_port}"
     try:
         token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
-        run = _post_json(base, token, "/api/runs", {"period": "2026-08"})
+        run = _post_json(base, token, "/api/runs", {"period": "2026-08", "operator_role": "DOS"})
         run = _post_json(base, token, f"/api/runs/{run['id']}/files", {"role": "schedule", "path": str(schedule)})
         for role, file_path in (("math", math), ("science", science)):
             preview = _post_json(base, token, f"/api/runs/{run['id']}/material", {"kind": "subject_group", "path": str(file_path)})

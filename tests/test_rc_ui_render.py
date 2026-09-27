@@ -143,3 +143,40 @@ for (const text of ['历史工资对账','27/27','25/27','24/30','已分类差�
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_todo_summary_counts_material_confirmation_without_issue_groups_and_uses_saved_decisions():
+    """The flow header counts actionable material cards, not audit rows alone."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;},querySelectorAll(){return []; }}, window:{}, console};
+vm.createContext(context);
+vm.runInContext(source, context);
+vm.runInContext(`current={
+ id:'run-pending', mode:'GENERATE', issue_groups:[], user_actions:[], business_decisions:[], decisions:[],
+ support_department_pending_preview:{status:'PENDING_CONFIRMATION'},
+ historical_salary_reference_pending_preview:{status:'PENDING_CONFIRMATION',source_sha256:'history-v1'},
+ support_source:{bound:false}, period_authority:{}, employment:{salary_basis_counts:{SOURCE_UNKNOWN:0},teachers:[]}
+}; renewalMaterialPreview=null;`, context);
+let summary = vm.runInContext('currentTodoSummary()', context);
+assert(summary.pending >= 2, JSON.stringify(summary));
+assert.equal(vm.runInContext('current.issue_groups.length', context), 0);
+vm.runInContext(`current={
+ id:'run-decisions', mode:'AUDIT', issue_groups:[
+  {id:'done-1',decision:{status:'ACTIVE',action:'ACCEPTED_EXCEPTION'}},
+  {id:'defer-1',decision:{status:'ACTIVE',action:'DEFERRED'}}
+ ], user_actions:[], business_decisions:[
+  {group_id:'done-1',status:'ACTIVE',action:'ACCEPTED_EXCEPTION'},
+  {group_id:'defer-1',status:'ACTIVE',action:'DEFERRED'}
+ ], decisions:[], files:{}, support_source:{bound:false}, period_authority:{}, employment:{salary_basis_counts:{SOURCE_UNKNOWN:0},teachers:[]}
+};`, context);
+summary = vm.runInContext('currentTodoSummary()', context);
+assert.deepEqual(JSON.parse(JSON.stringify(summary)), {pending:0,processed:1,deferred:1});
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

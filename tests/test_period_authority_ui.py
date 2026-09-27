@@ -195,11 +195,13 @@ def test_defer_does_not_navigate_into_exception_flow_or_recalculate(tmp_path):
 def test_new_run_requires_operator_role_and_exposes_group_selector_contract():
     source = APP_JS.read_text(encoding="utf-8")
     assert 'id="operator-role"' in source
-    assert 'value="DOS"' in source
+    assert 'value="" selected>请选择角色</option>' in source
+    assert 'if (!operatorRole) return showMessage("请选择 DOS / 教学管理者或学科组长后再创建核算。"' in source
     assert 'value="SUBJECT_LEADER"' in source
     assert 'id="selected-group"' in source
     assert "operator_role: operatorRole" in source
     assert "selected_group: selectedGroup" in source
+    assert 'path == "/api/runs"' in (Path(__file__).parents[1] / "payroll_ui" / "server.py").read_text(encoding="utf-8")
 
 
 def test_main_run_navigation_has_four_user_steps_and_one_export_destination():
@@ -207,10 +209,47 @@ def test_main_run_navigation_has_four_user_steps_and_one_export_destination():
     block = source.split("function runSteps()", 1)[1].split("function reconfirmationBanner", 1)[0]
     for label in ("准备核算材料", "教师名单与归属", "待处理问题", "工资预览与导出"):
         assert label in block
+    render_run = source.split("function renderRun()", 1)[1].split("function toggleLegacyRunGroup()", 1)[0]
+    assert render_run.count("${runSteps()}") == 1
+    assert render_run.count("${navigation()}") == 1
+    navigation = source.split("function navigation()", 1)[1].split("function groupHasPendingUserAction", 1)[0]
+    assert '<nav class="tabs">' not in navigation
+    assert "当前位置：${currentLabel}" in navigation
+    assert "下一步：工资预览" in navigation
+    assert "保存并处理下一项" not in navigation
+    assert 'nextButton.addEventListener("click", () => decide(id, true))' in source
+    decide = source.split("async function decide(id, advance = false)", 1)[1].split("async function saveManagement", 1)[0]
+    assert "await api(`/api/runs/${current.id}/decisions`" in decide
+    assert "groupHasPendingUserAction(item)" in decide
+    assert "请先点击开始核算。" in source
     assert "核对结果" not in block
     assert "function teacherScopePage()" in source
     render_block = source.split("function renderTab()", 1)[1].split("function baseSalaryImportMarkup()", 1)[0]
     assert "partTimePayCard(partTime)" not in render_block
+
+
+def test_salary_materials_is_one_module_and_history_file_precedes_group_selection():
+    source = APP_JS.read_text(encoding="utf-8")
+    module = source.split("function salaryMaterialsModule()", 1)[1].split("function productionMaterialCards()", 1)[0]
+    history = source.split("function historicalSalaryReferenceCard()", 1)[1].split("function savedHistoricalSalaryReferences()", 1)[0]
+    stage = source.split("async function previewStagedHistoricalReference()", 1)[1].split("async function removeSupportSource()", 1)[0]
+    selection = source.split("async function previewBaseSalaryFileObject", 1)[1].split("async function previewExistingSupportMaterial", 1)[0]
+    file_change = source.split("async function previewBaseSalaryFile(event)", 1)[1].split("function previewSupportFile", 1)[0]
+    assert module.count("supportMaterialCard()") == 1
+    assert module.count("historicalSalaryReferenceCard()") == 1
+    assert "class=\"card historical-reference-card\"" not in history
+    assert "本月工资资料（权威）" in source
+    assert "来源：支持部提供" in source
+    assert "这份资料属于哪个科组？" in history
+    assert "stageHistoricalReferenceFile(file)" in file_change
+    assert "selectedGroup" in selection
+    assert "class=\"salary-material-module card\"" in module
+    assert "salary-source-panel support-material-card" in source
+    assert "salary-source-panel historical-reference-card" in history
+    css = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.css").read_text(encoding="utf-8")
+    assert ".salary-material-options{display:block}" in css
+    assert "previewBaseSalaryFileObject(file, group)" in stage
+    assert "base-salary-reference-preview" in selection
 
 
 def test_the_daily_flow_keeps_engineering_configuration_in_advanced_settings():
