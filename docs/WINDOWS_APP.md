@@ -167,26 +167,30 @@ PyInstaller 只在 `_internal` 里放运行时；脚本用 ASCII 名构建后再
 
 ## 11. 真实验收清单
 
+自动化执行：`python windows\uat_release.py --release <发布目录> --stage all`
+（它用 `ShellExecuteW "open"` 启动程序，也就是 Explorer 双击所执行的同一个调用）。
+
 | 步骤 | 结果 |
 |---|---|
-| 1. 当前没有 Payroll 服务运行 | 见 FINAL REPORT |
-| 2. 双击「工资核算助手.exe」 | 见 FINAL REPORT |
-| 3. 没有 CMD 黑窗口 | 见 FINAL REPORT |
-| 4. 服务自动启动，`/api/health` 正常 | 见 FINAL REPORT |
-| 5. 默认浏览器自动打开 | 见 FINAL REPORT |
-| 6. 首页正常加载 | 见 FINAL REPORT |
-| 7. data_dir 是 `%LOCALAPPDATA%\EducationPayroll` | 见 FINAL REPORT |
-| 8. 再双击一次不产生第二个服务/数据库 | 见 FINAL REPORT |
-| 9. 极速生成工资表（手选 2026-08）成功 | 见 FINAL REPORT |
-| 10. 关闭浏览器后数据仍在 | 见 FINAL REPORT |
-| 11. 换目录（`C:\Payroll Release\`、桌面）仍可运行 | 见 FINAL REPORT |
-| 12. 重启电脑后再次双击仍可使用 | 见 FINAL REPORT |
+| 1. 当前没有 Payroll 服务运行 | 通过 |
+| 2. 双击「工资核算助手.exe」 | 通过 |
+| 3. 没有 CMD 黑窗口 | 通过（PE 子系统 = `WINDOWS_GUI`，进程不分配控制台） |
+| 4. 服务自动启动，`/api/health` 正常 | 通过（3.2 秒内返回 `contract=payroll-ui/1`） |
+| 5. 默认浏览器自动打开 | 通过（观察到新的浏览器进程） |
+| 6. 首页正常加载 | 通过（静态资源无 404） |
+| 7. data_dir 是 `%LOCALAPPDATA%\EducationPayroll` | 通过（指纹与 `data_dir_fingerprint` 一致） |
+| 8. 再双击一次不产生第二个服务/数据库 | 通过（pid 不变、8760 唯一监听、DB 内容与 mtime 均未变） |
+| 9. 极速生成工资表（手选 2026-08）成功 | 通过（创建请求 `period=2026-08`，页面显示工资月份 2026-08） |
+| 10. 关闭浏览器后数据仍在 | 通过 |
+| 11. 换目录（`C:\Payroll Release\`、桌面）仍可运行 | 通过 |
+| 12. 重启电脑后再次双击仍可使用 | **待真人复验**：自动化只做了等价的冷机模拟（结束进程、保留数据目录、重新启动）；重启机器本身不在自动化范围内 |
 
 自动化部分：
 
 ```bat
 .venv\Scripts\python.exe -m pytest -q tests\test_launcher.py tests\test_launcher_windows.py
 .venv\Scripts\python.exe -m pytest -q tests\test_browser_uat_windows.py
+python windows\uat_release.py --release windows\dist\EducationPayroll-Windows-v1\EducationPayroll --stage all
 ```
 
 ## 12. 已知限制
