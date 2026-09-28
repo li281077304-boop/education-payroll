@@ -48,6 +48,7 @@ class PayrollRecord:
     av: Optional[float] = None
     source: str = ""
     provenance: Mapping[str, SourceEvidence] = field(default_factory=dict)
+    additional_fields: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

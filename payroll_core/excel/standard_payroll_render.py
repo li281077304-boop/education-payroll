@@ -455,15 +455,27 @@ def _render_with_template(
         # from the same reviewed workbook rather than retyped.  Nothing else is
         # copied from that file: the payroll amounts stay this Run's own result.
         support = _support_entry(support_snapshot, str(row.teacher))
+        simple_flow = payroll.formula_inputs.get("monthly_flow_version") == "SUBMISSION_FIRST_V1" if isinstance(payroll.formula_inputs, Mapping) else False
+        resolved_snapshot = payroll.formula_inputs.get("payroll_input_fields_snapshot") if isinstance(payroll.formula_inputs, Mapping) else {}
+        resolved_entries = resolved_snapshot.get("entries") if isinstance(resolved_snapshot, Mapping) else {}
+        resolved_fields = resolved_entries.get(str(row.teacher), {}) if isinstance(resolved_entries, Mapping) else {}
         support_level = None
         if support is not None:
+            identity = support.get("identity") if isinstance(support.get("identity"), Mapping) else {}
+            support_level = identity.get("teacher_level")
+        if simple_flow:
+            for code, value in (("B", resolved_fields.get("B", {}).get("value")),
+                                ("D", resolved_fields.get("D", {}).get("value")),
+                                ("E", resolved_fields.get("E", {}).get("value")),
+                                ("F", resolved_fields.get("F", {}).get("value"))):
+                sheet[f"{code}{row_number}"].value = value
+        elif support is not None:
             identity = support.get("identity") if isinstance(support.get("identity"), Mapping) else {}
             for key, headers in (("group", ("科组",)), ("email", ("邮箱",)), ("hire_date", ("入职日期",))):
                 header = _header_column(sheet, headers)
                 value = identity.get(key)
                 if header and value not in (None, ""):
                     sheet.cell(row_number, header).value = value
-            support_level = identity.get("teacher_level")
         base_inputs = {}
         m_field = row.final_fields.get("M", {}) if isinstance(getattr(row, "final_fields", None), Mapping) else {}
         is_part_time = _is_part_time_row(row)
@@ -472,7 +484,10 @@ def _render_with_template(
                 base_inputs = dict(evidence["inputs"])
                 break
         for code in ("G", "H", "I", "J", "K", "L"):
-            sheet.cell(row_number, columns[code.lower()]).value = _value(base_inputs.get(code)) if base_inputs else None
+            if simple_flow:
+                sheet.cell(row_number, columns[code.lower()]).value = _value(resolved_fields.get(code, {}).get("value"))
+            else:
+                sheet.cell(row_number, columns[code.lower()]).value = _value(base_inputs.get(code)) if base_inputs else None
         counts = (payroll.formula_inputs.get("one_to_one_counts", {}) if isinstance(payroll.formula_inputs, Mapping) else {}).get(row.teacher, {})
         # The supplied template labels the middle-school columns as 初一/初二/初三,
         # while the normalized schedule may use 七/八/九年级.  They are the same
@@ -490,7 +505,11 @@ def _render_with_template(
         # reviewed workbook is bound (its level text is the source the payroll
         # office reads).  Otherwise the rating authority's display is used, so
         # a Run without a support source keeps working exactly as before.
-        if support_level not in (None, ""):
+        if simple_flow:
+            # New monthly flow uses only current support/group B:L inputs;
+            # it never fills F from a rating authority as a second source.
+            pass
+        elif support_level not in (None, ""):
             sheet.cell(row_number, columns["star"]).value = support_level
         elif star_display is not None:
             sheet.cell(row_number, columns["star"]).value = star_display

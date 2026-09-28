@@ -211,7 +211,8 @@ def test_main_run_navigation_has_four_user_steps_and_one_export_destination():
         assert label in block
     render_run = source.split("function renderRun()", 1)[1].split("function toggleLegacyRunGroup()", 1)[0]
     assert render_run.count("${runSteps()}") == 1
-    assert render_run.count("${navigation()}") == 1
+    assert render_run.count("navigation()") == 1
+    assert "${stepNavigation}" in render_run
     navigation = source.split("function navigation()", 1)[1].split("function groupHasPendingUserAction", 1)[0]
     assert '<nav class="tabs">' not in navigation
     assert "当前位置：${currentLabel}" in navigation

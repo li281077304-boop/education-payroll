@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from payroll_core.excel.inspect import inspect_workbook
 
 from .health import HEALTH_PATH, health_payload
-from .service import PayrollService
+from .service import MONTHLY_FLOW_SUBMISSION_FIRST, PayrollService
 
 
 class PayrollHttpServer(ThreadingHTTPServer):
@@ -251,6 +251,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                     operator_role=operator_role,
                     selected_group=str(payload.get("selected_group", "")),
                     selected_groups=payload.get("selected_groups"),
+                    monthly_flow_version=MONTHLY_FLOW_SUBMISSION_FIRST,
                 ), HTTPStatus.CREATED)
             if path == "/api/core-rules":
                 return self._json(self.server.service.save_core_rule_version(payload.get("rules", {}), str(payload.get("source", "")), str(payload.get("actor", ""))), HTTPStatus.CREATED)

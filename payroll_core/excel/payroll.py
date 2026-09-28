@@ -57,15 +57,25 @@ def read_payroll_excel(path: str | Path, period: str) -> AdapterResult[PayrollRe
             field: cell_evidence(sheet, cached_sheet, row, columns[label], source_file, label)
             for field, label in PAYROLL_LABELS.items()
         }
+        additional_fields = {}
+        for code in ("B", "D", "E", "F", "G", "H", "I", "J", "K", "L"):
+            cell = sheet[f"{code}{row}"]
+            item = cell_evidence(sheet, cached_sheet, row, cell.column, source_file, f"{code}列")
+            evidence[code] = item
+            additional_fields[code] = item.normalized_value
         # Current salary sheets use F for teacher tier. Older sheets do not
         # consistently give it a semantic header, so retain its exact source.
         evidence["teacher_level"] = cell_evidence(sheet, cached_sheet, row, 6, source_file, "教师级别（F列）")
         for field, item in evidence.items():
+            # F and teacher_level are two views of the same physical column;
+            # retain F for B:L provenance but emit one warning/comment only.
+            if field == "F":
+                continue
             if item.state in {CellValueState.MISSING_CACHE, CellValueState.EXTERNAL_REFERENCE}:
                 cache_missing += 1
                 code = "EXTERNAL_REFERENCE_UNRESOLVED" if item.state is CellValueState.EXTERNAL_REFERENCE else "MISSING_CACHE"
                 result.warnings.append(AdapterIssue(code, "Formula value is not reliable without a cached value", sheet_name, field))
-            column = 6 if field == "teacher_level" else columns[PAYROLL_LABELS[field]]
+            column = 6 if field == "teacher_level" else columns[PAYROLL_LABELS[field]] if field in PAYROLL_LABELS else sheet[f"{field}{row}"].column
             comment = sheet.cell(row, column).comment
             if comment is not None:
                 result.comments.append(CommentRecord(source_file, sheet_name, sheet.cell(row, column).coordinate, teacher, field, comment.text, comment.author))
@@ -82,6 +92,7 @@ def read_payroll_excel(path: str | Path, period: str) -> AdapterResult[PayrollRe
                 av=as_float(evidence["av"].normalized_value),
                 source=source_file,
                 provenance=evidence,
+                additional_fields=additional_fields,
             )
         )
     result.coverage = {"records": len(result.records), "required_fields": len(PAYROLL_LABELS) - 1, "formula_values_unresolved": cache_missing}

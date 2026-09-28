@@ -284,7 +284,7 @@ def copy_mapping(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
 
 
-def renewal_fields_from_snapshot(snapshot: Mapping[str, Any] | None, teacher: str) -> dict[str, dict[str, Any]] | None:
+def renewal_fields_from_snapshot(snapshot: Mapping[str, Any] | None, teacher: str, *, zero_missing: bool = False) -> dict[str, dict[str, Any]] | None:
     """Read frozen AH/AI/AJ fields for a display teacher, if available."""
     if not isinstance(snapshot, Mapping):
         return None
@@ -298,6 +298,17 @@ def renewal_fields_from_snapshot(snapshot: Mapping[str, Any] | None, teacher: st
         if str(key) == teacher or str(entry.get("teacher_id", "")) == teacher or str(entry.get("display_name", "")) == teacher:
             candidates.append(entry)
     if not candidates:
+        confirmed_snapshot = (
+            snapshot.get("version") == "RUN_RENEWAL_RESULT_SNAPSHOT/v1"
+            and bool(snapshot.get("source_hash") or snapshot.get("sha256") or snapshot.get("confirmed_by"))
+            and bool(snapshot.get("run_id"))
+        )
+        if zero_missing or confirmed_snapshot:
+            evidence = [{"kind": "APPROVED_RENEWAL_SOURCE_NO_TEACHER_ROW", "source_hash": str(snapshot.get("source_hash") or snapshot.get("sha256") or ""),
+                        "period": str(snapshot.get("period_label") or snapshot.get("period") or "")}]
+            return {code: {"value": 0.0, "state": DETERMINED,
+                           "reason": "本月已确认续费资料没有该教师记录，按本月无续费计 0。", "evidence": evidence}
+                    for code in ("AH", "AI", "AJ")}
         return None
     if len(candidates) > 1:
         reason = "同一教师命中多个不同续费身份，无法安全绑定。"
@@ -494,7 +505,7 @@ def resolve_final_fields(
     items = [item for item in business_inputs if isinstance(item, Mapping)]
     fields = {code: (_absent_zero(code) if default_zero_missing and code in ZERO_WHEN_ABSENT_CODES else _empty(code)) for code in FINAL_FIELD_CODES}
     renewal_items = _source_items(items, "RENEWAL_RESULT", teacher)
-    renewal = renewal_fields_from_snapshot(renewal_snapshot, teacher)
+    renewal = renewal_fields_from_snapshot(renewal_snapshot, teacher, zero_missing=default_zero_missing)
     if renewal is None:
         renewal = _renewal_fields(renewal_items, teacher)
         if renewal_snapshot is not None and not renewal_items:

@@ -535,7 +535,7 @@ def _post_json(base: str, token: str, path: str, payload: dict) -> dict:
     return json.loads(urlopen(request).read())
 
 
-def test_loopback_fixture_flow_keeps_an_unexplained_difference_visible(tmp_path):
+def test_loopback_new_monthly_flow_imports_group_sources_directly(tmp_path):
     _, _, schedule, math, science = _prepared_run_with_values(tmp_path / "files", one_to_one=1.2, class_value=2.16)
     static = Path(__file__).parents[1] / "payroll_ui" / "static"
     server = PayrollHttpServer(("127.0.0.1", 0), PayrollService(tmp_path / "web-data"), static)
@@ -546,17 +546,15 @@ def test_loopback_fixture_flow_keeps_an_unexplained_difference_visible(tmp_path)
         token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
         run = _post_json(base, token, "/api/runs", {"period": "2026-08", "operator_role": "DOS"})
         run = _post_json(base, token, f"/api/runs/{run['id']}/files", {"role": "schedule", "path": str(schedule)})
-        for role, file_path in (("math", math), ("science", science)):
-            preview = _post_json(base, token, f"/api/runs/{run['id']}/material", {"kind": "subject_group", "path": str(file_path)})
-            item = preview["subject_group_preview"]
-            run = _post_json(base, token, f"/api/runs/{run['id']}/subject-group-confirm", {"role": role, "source_sha256": item["source_sha256"], "confirmed_by": "脱敏 UAT 确认人"})["run"]
+        assert run["monthly_flow_version"] == "SUBMISSION_FIRST_V1"
+        for file_path in (math, science):
+            run = _post_json(base, token, f"/api/runs/{run['id']}/material", {"kind": "subject_group", "path": str(file_path)})["run"]
+            assert len(run["subject_group_materials"]) >= 1
+            assert not run.get("pending_subject_group_imports")
         checked = _post_json(base, token, f"/api/runs/{run['id']}/check", {})
-        issue = next(item for item in checked["issues"] if item["field"] == "one_to_one")
-        assert checked["status"] == "REVIEW_REQUIRED"
-        assert issue["difference"] == -0.6
-        evidence_request = Request(base + f"/api/runs/{run['id']}/evidence?issue={issue['id']}", headers={"X-Payroll-Token": token})
-        evidence = json.loads(urlopen(evidence_request).read())
-        assert len(evidence["evidence"]) >= 2
+        assert checked["processing_scope_snapshot"]["scope_count"] > 0
+        assert len(checked["processing_scope_snapshot"]["teachers"]) == checked["processing_scope_snapshot"]["scope_count"]
+        assert not any(item.get("field") in {"salary_basis", "employment", "base_salary"} for item in checked["issues"])
     finally:
         server.shutdown(); server.server_close(); worker.join()
 

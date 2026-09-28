@@ -91,7 +91,7 @@ class CoreFlow:
         policy = self._policy_version_for_run(run)
         part_time = self._calculation_version(run, "part_time")
         teachers = {r.teacher for r in schedule} | {r.teacher for r in payroll}
-        if run.get("mode") == "GENERATE":
+        if run.get("mode") == "GENERATE" and not self._submission_first(run):
             teachers.update(p["teacher"] for p in (policy or {}).get("profiles", []))
         employment_facts = self._employment_types_for(run, teachers=sorted(teachers), for_calculation=True)
         profiles, contexts = [], []
@@ -253,7 +253,8 @@ class CoreFlow:
         # payroll sheet remains an additional reference only; neither source
         # can silently replace an independent system-authority rating.
         references = dict(run.get("reference_ratings") or {})
-        references.update({p.teacher: star_from_level(p.teacher_level) for p in payroll if star_from_level(p.teacher_level) is not None})
+        if not self._submission_first(run):
+            references.update({p.teacher: star_from_level(p.teacher_level) for p in payroll if star_from_level(p.teacher_level) is not None})
         result = calculate_payroll(period=run["period"], schedule=schedule, rules=CoreRules.from_dict(rule_version["rules"]), ratings=ratings, profiles=profiles, reference_ratings=references, teacher_contexts=contexts, part_time_rates=rates, effective_ac=effective_ac or {})
         raw = result.as_dict()
         def value(item: dict) -> dict:
