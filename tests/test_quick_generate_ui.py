@@ -31,10 +31,46 @@ vm.runInContext(`let page=''; api=async()=>[]; shell=(html)=>{page=html}; duplic
  await vm.runInContext('home()',context);
  const page=vm.runInContext('page',context);
  assert(page.includes('onclick="startQuickGenerate()"'));
+ assert(page.includes('id="quick-period" type="month"'));
+ assert(page.includes('工资月份'));
+ assert(page.includes('value="'+vm.runInContext('defaultPayrollPeriod(new Date())',context)+'"'));
  assert(page.includes('极速生成工资表'));
  assert(page.includes('onclick="showProfessionalCreate()"'));
  assert(page.includes('id="professional-create" class="card hidden"'));
  assert(page.includes('onclick="createRun()"'));
+})().catch(error=>{console.error(error);process.exit(1)});
+''')
+
+
+def test_quick_entry_posts_the_user_selected_period_without_changing_it_later() -> None:
+    _node(r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8').split('(async () => {')[0];
+let body=null,postedPath='',rendered=false;
+const context={document:{querySelector(selector){return selector==='#quick-period'?{value:'2026-08'}:null},addEventListener(){}},window:{},console};
+vm.createContext(context);vm.runInContext(source,context);
+vm.runInContext(`api=async(path,options)=>{postedPath=path;body=JSON.parse(options.body);return {run:{id:'quick-aug',period:body.period,ui_mode:'QUICK'}}};renderRun=()=>{rendered=true};showMessage=(message)=>{throw Error(message)};`,context);
+(async()=>{
+ await vm.runInContext('startQuickGenerate()',context);
+ assert.equal(vm.runInContext('postedPath',context),'/api/quick-runs');
+ assert.equal(vm.runInContext('body.period',context),'2026-08');
+ assert.equal(vm.runInContext('current.period',context),'2026-08');
+ assert.equal(vm.runInContext('rendered',context),true);
+})().catch(error=>{console.error(error);process.exit(1)});
+''')
+
+
+def test_quick_entry_without_month_edit_keeps_default_period() -> None:
+    _node(r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8').split('(async () => {')[0];
+let body=null;
+const context={document:{querySelector(){return null},addEventListener(){}},window:{},console};
+vm.createContext(context);vm.runInContext(source,context);
+vm.runInContext(`api=async(_path,options)=>{body=JSON.parse(options.body);return {run:{id:'quick-default',period:body.period}}};renderRun=()=>{};showMessage=(message)=>{throw Error(message)};`,context);
+(async()=>{
+ await vm.runInContext('startQuickGenerate()',context);
+ assert.equal(vm.runInContext('body.period',context),vm.runInContext('defaultPayrollPeriod()',context));
 })().catch(error=>{console.error(error);process.exit(1)});
 ''')
 

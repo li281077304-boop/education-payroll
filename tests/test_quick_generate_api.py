@@ -89,6 +89,35 @@ def test_quick_http_creates_regular_run_imports_materials_generates_and_download
         server.shutdown(); server.server_close(); worker.join()
 
 
+def test_quick_historical_period_uses_its_period_and_rating_authorities(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PayrollService(tmp_path / "private-payroll-data")
+    service.record_period_authority("2026-08", "2026-08-03", "2026-08-30", "USER_CONFIRMED",
+                                   confirmed_by="脱敏 UAT", reason="8 月合成周期。")
+    service.record_period_authority("2026-09", "2026-09-01", "2026-09-30", "USER_CONFIRMED",
+                                   confirmed_by="脱敏 UAT", reason="9 月合成周期。")
+    aug_rating = service.save_rating_version("2026-08", "2026-08", "8 月合成星级", "aug-v1",
+                                             [{"teacher": "教师甲", "rating": 3}])[0]
+    service.save_rating_version("2026-09", "2026-09", "9 月合成星级", "sep-v1",
+                                [{"teacher": "教师甲", "rating": 4}])
+    service.register_company_template(str(_sanitized_template(tmp_path)), "脱敏 UAT")
+    monkeypatch.setattr(service_module, "default_output_dir",
+                        lambda filename=None: (tmp_path / "exports" / str(filename)) if filename else (tmp_path / "exports"))
+
+    # 模拟当前日期已进入 9 月，但用户从极速首页明确选择补算 8 月。
+    run = service.create_quick_run("2026-08")["run"]
+    assert run["period"] == "2026-08"
+    assert run["period_start"] == "2026-08-03"
+    assert run["period_end"] == "2026-08-30"
+    assert run["rating_version_id"] == aug_rating["id"]
+
+    staged = service.stage_quick_material(run["id"], str(_schedule(tmp_path / "august.csv", ["教师甲"])))
+    assert staged["detected_kind"] == "schedule"
+    after_upload = service.get(run["id"])
+    assert after_upload["period"] == "2026-08"
+    assert after_upload["rating_version_id"] == aug_rating["id"]
+    assert after_upload["period_authority"]["period_start"] == "2026-08-03"
+
+
 def test_quick_schedule_only_generates_full_schedule_roster_with_blank_b_to_l(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service(tmp_path, monkeypatch, ["教师甲", "教师乙"])
     run = service.create_quick_run("2026-08")["run"]
