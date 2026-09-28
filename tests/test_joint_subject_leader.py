@@ -79,6 +79,54 @@ def test_joint_processing_scope_unions_confirmed_group_authorities_and_snapshots
     assert "语文教师" not in checked["processing_scope_snapshot"]["teachers"]
 
 
+def test_first_two_group_confirmations_before_any_check_do_not_lock_recalculation(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "理化组"])
+    math_path = _group_file(tmp_path / "math-first.csv", "数学教师")
+    science_path = _group_file(tmp_path / "science-first.csv", "理化教师")
+    math_candidate = service.preview_subject_group_material(run_id, str(math_path), "数学组")["subject_group_preview"]
+    science_candidate = service.preview_subject_group_material(run_id, str(science_path), "理化组")["subject_group_preview"]
+
+    service.confirm_subject_group_material(run_id, "math", math_candidate["source_sha256"], "负责人",
+                                           selected_group="数学组", candidate_id=math_candidate["candidate_id"])
+    after_first = service.store.get(run_id)
+    assert not after_first.get("recalculation_required")
+    assert not after_first.get("calculation_invalidation_history")
+    assert science_candidate["candidate_id"] in after_first["pending_subject_group_imports"]
+
+    service.confirm_subject_group_material(run_id, science_candidate["role"], science_candidate["source_sha256"], "负责人",
+                                           selected_group="理化组", candidate_id=science_candidate["candidate_id"])
+    after_second = service.store.get(run_id)
+    assert not after_second.get("recalculation_required")
+    assert len(after_second["subject_group_materials"]) == 2
+
+    checked = service.check(run_id)
+    assert set(checked["processing_scope_snapshot"]["teachers"]) == {"数学教师", "理化教师"}
+    assert not checked.get("recalculation_required")
+
+
+def test_first_history_reference_confirmation_does_not_block_second_group_reference(tmp_path):
+    service = PayrollService(tmp_path / "data")
+    run_id = _run(service, tmp_path, groups=["数学组", "理化组"])
+    math_source = _history(tmp_path / "math-history.xlsx", "math-id", 2400)
+    science_source = _history(tmp_path / "science-history.xlsx", "science-id", 3100)
+
+    service.stage_historical_salary_reference_preview(run_id, str(math_source), "数学组")
+    math_pending = service.store.get(run_id)["historical_salary_reference_pending_preview"]
+    service.import_base_salary_from_history(run_id, str(math_source), math_pending["source_sha256"], "负责人", selected_group="数学组")
+    after_first = service.store.get(run_id)
+    assert not after_first.get("recalculation_required")
+    assert not after_first.get("calculation_invalidation_history")
+    assert after_first["historical_salary_reference_snapshots"][0]["selected_group"] == "数学组"
+
+    service.stage_historical_salary_reference_preview(run_id, str(science_source), "理化组")
+    science_pending = service.store.get(run_id)["historical_salary_reference_pending_preview"]
+    service.import_base_salary_from_history(run_id, str(science_source), science_pending["source_sha256"], "负责人", selected_group="理化组")
+    after_second = service.store.get(run_id)
+    assert not after_second.get("recalculation_required")
+    assert {item["selected_group"] for item in after_second["historical_salary_reference_snapshots"]} == {"数学组", "理化组"}
+
+
 def test_joint_processing_scope_unions_history_membership_and_confirmed_materials(tmp_path):
     service = PayrollService(tmp_path / "data")
     run_id = _run(service, tmp_path, groups=["数学组", "理化组"])
@@ -129,6 +177,18 @@ def test_confirming_new_group_after_check_archives_and_invalidates_active_result
     assert after["business_decisions"][0]["status"] == "NEEDS_RECONFIRMATION"
     assert after["decisions"] == []
     assert after["calculation_invalidation_history"][-1]["previous_decisions"]
+
+    history_count = len(after["calculation_invalidation_history"])
+    pending_source = _group_file(tmp_path / "follow-up-pending.csv", "理化教师")
+    pending = service.preview_subject_group_material(run_id, str(pending_source), "理化组")["subject_group_preview"]
+    service.confirm_subject_group_material(run_id, pending["role"], pending["source_sha256"], "负责人",
+                                           selected_group="理化组", candidate_id=pending["candidate_id"])
+    after_material = service.store.get(run_id)
+    assert after_material["recalculation_required"] is True
+    assert len(after_material["calculation_invalidation_history"]) == history_count
+    monkeypatch.undo()
+    checked = service.check(run_id)
+    assert not checked.get("recalculation_required")
 
 
 def test_confirming_history_membership_invalidates_existing_results_without_recheck(tmp_path, monkeypatch):
@@ -356,6 +416,36 @@ def test_legacy_role_selection_accepts_multiple_groups_without_rewriting_old_res
     assert selected["selected_groups"] == ["数学组", "理化组"]
     assert selected["selected_group"] == ""
     assert selected["generated_payroll"]["rows"][0]["final"] == 100
+
+
+def test_legacy_role_recalculation_does_not_block_existing_pending_group_confirmation(tmp_path):
+    service = PayrollService(tmp_path / "sandbox")
+    created = service.create("2026-08", "GENERATE")
+    service.import_file(created["id"], "schedule", str(_schedule(tmp_path / "legacy-schedule.csv", [
+        ("math-id", "数学教师", "数学"),
+    ])))
+    source = _group_file(tmp_path / "legacy-math.csv", "数学教师")
+    candidate = service.preview_subject_group_material(created["id"], str(source), "数学组")["subject_group_preview"]
+    legacy = service.store.get(created["id"])
+    legacy.pop("operator_role", None)
+    legacy.pop("part_time_payroll_mode", None)
+    legacy["core_calculation"] = {"rows": [{"teacher": "旧范围教师"}]}
+    legacy["generated_payroll"] = {"rows": [{"teacher": "旧范围教师"}]}
+    service.store.save(legacy)
+
+    selected = service.select_legacy_run_operator(created["id"], "SUBJECT_LEADER", "数学组", "负责人")
+    assert selected["role_scope_recalculation_required"] is True
+    assert candidate["candidate_id"] in selected["pending_subject_group_imports"]
+
+    confirmed = service.confirm_subject_group_material(
+        created["id"], candidate["role"], candidate["source_sha256"], "负责人",
+        selected_group="数学组", candidate_id=candidate["candidate_id"],
+    )
+    assert confirmed["confirmation"]["candidate_id"] == candidate["candidate_id"]
+    after = service.store.get(created["id"])
+    assert after["role_scope_recalculation_required"] is True
+    assert "generated_payroll" not in after
+    assert not after["pending_subject_group_imports"]
 
 
 def test_http_create_and_legacy_operator_accept_joint_groups_and_reject_illegal_group(tmp_path):

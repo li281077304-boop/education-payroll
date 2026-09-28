@@ -262,3 +262,34 @@ vm.runInContext(`current={id:'run-1',operator_role:'SUBJECT_LEADER',selected_gro
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_recalculation_banner_does_not_hide_pending_cards_for_new_or_legacy_runs():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;},querySelectorAll(){return []; }}, window:{}, console};
+vm.createContext(context); vm.runInContext(source, context);
+vm.runInContext(`current={id:'deadlock-run',period:'2026-08',mode:'GENERATE',operator_role:'SUBJECT_LEADER',selected_groups:['数学组','理化组'],
+ recalculation_required:true,recalculation_required_reason:'人员范围变化',issue_groups:[{id:'old',teacher:'旧结果教师',title:'旧范围差异'}],issues:[{teacher:'旧结果教师'}],
+ pending_subject_group_imports:{candidateB:{candidate_id:'candidateB',role:'math',recognized_group:'理化组',source_sha256:'sha-b',source_name:'理化待确认.xlsx',teacher_count:1,record_count:2,can_confirm:true}},
+ support_department_pending_preview:{status:'PENDING_CONFIRMATION',source_name:'本月工资.xlsx',source_sheet:'教学部',can_confirm:true,preview_snapshot:{}},
+ historical_salary_reference_pending_preview:{status:'PENDING_CONFIRMATION',source_name:'数学历史.xlsx',selected_group:'数学组',source_sha256:'history-b',preview:{}},
+ material_inputs:{renewal:{name:'续费来源.xlsx'}},run_renewal_result_snapshot:null,
+ support_source:{bound:false},historical_salary_reference_snapshots:[],
+ employment:{salary_basis_counts:{SOURCE_UNKNOWN:1},teachers:[{teacher:'教师甲',teacher_id:'t1',salary_basis:'SOURCE_UNKNOWN'}]},
+ period_check:null,period_authority:{is_fallback:false},business_decisions:[],decisions:[],user_actions:[],files:{},base_salary_deferred:false};`, context);
+let html = vm.runInContext('issuesPage()', context);
+for (const text of ['需要重新核算','开始核算','理化待确认.xlsx','本月工资.xlsx','数学历史.xlsx','工资基础状态','续费来源']) assert(html.includes(text), text);
+assert(!html.includes('旧结果教师'), 'stale issue rows must not be presented as current');
+vm.runInContext('current.recalculation_required=false; current.role_scope_recalculation_required=true', context);
+html = vm.runInContext('issuesPage()', context);
+for (const text of ['需要重新核算','开始核算','理化待确认.xlsx','本月工资.xlsx','数学历史.xlsx','工资基础状态']) assert(html.includes(text), text);
+assert(!html.includes('旧结果教师'), 'legacy role-scope results must not replace pending actions');
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

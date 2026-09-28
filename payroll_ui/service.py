@@ -5393,6 +5393,7 @@ class PayrollService(CoreFlow):
         run["field_records"] = []
         run["issue_groups"] = []
         run["user_actions"] = []
+        run["subject_group_source_conflicts"] = []
         run["decisions"] = []
         run.pop("core_calculation", None)
         run.pop("generated_payroll", None)
@@ -6928,6 +6929,20 @@ class PayrollService(CoreFlow):
         payroll visible as the current result. This deliberately does not call
         ``check``; the operator must explicitly start the next calculation.
         """
+        summary = run.get("summary") or {}
+        result_keys = (
+            "core_calculation", "generated_payroll", "processing_scope_snapshot",
+            "audit_context", "calculation_context", "run_part_time_pricing_snapshot",
+        )
+        has_calculation_context = (
+            any(key in run and run.get(key) is not None for key in result_keys)
+            or any(bool(run.get(key)) for key in ("issue_groups", "field_records", "issues", "user_actions", "decisions"))
+            or bool(summary.get("automatic_required") or summary.get("core_calculation_complete")
+                    or summary.get("full_scope_complete") or summary.get("unexplained") or summary.get("manual_review"))
+            or run.get("status") in {"PASS", "REVIEW_REQUIRED"}
+        )
+        if not has_calculation_context:
+            return
         now = datetime.now(timezone.utc).isoformat()
         run.setdefault("calculation_invalidation_history", []).append({
             "event": event,
@@ -6939,17 +6954,27 @@ class PayrollService(CoreFlow):
             "previous_generated_payroll": copy.deepcopy(run.get("generated_payroll")),
             "previous_processing_scope_snapshot": copy.deepcopy(run.get("processing_scope_snapshot")),
             "previous_audit_context": copy.deepcopy(run.get("audit_context")),
+            "previous_calculation_context": copy.deepcopy(run.get("calculation_context")),
+            "previous_run_part_time_pricing_snapshot": copy.deepcopy(run.get("run_part_time_pricing_snapshot")),
             "previous_issues": copy.deepcopy(run.get("issues") or []),
             "previous_field_records": copy.deepcopy(run.get("field_records") or []),
             "previous_issue_groups": copy.deepcopy(run.get("issue_groups") or []),
             "previous_user_actions": copy.deepcopy(run.get("user_actions") or []),
             "previous_summary": copy.deepcopy(run.get("summary") or {}),
+            "previous_field_status": copy.deepcopy(run.get("field_status") or []),
             "previous_decisions": copy.deepcopy(run.get("decisions") or []),
+            "previous_source_formula_advisories": copy.deepcopy(run.get("source_formula_advisories") or []),
+            "previous_hourly_submission_results": copy.deepcopy(run.get("hourly_submission_results") or {}),
+            "previous_subject_group_source_conflicts": copy.deepcopy(run.get("subject_group_source_conflicts") or []),
         })
         run.pop("core_calculation", None)
         run.pop("generated_payroll", None)
         run.pop("processing_scope_snapshot", None)
         run.pop("audit_context", None)
+        run.pop("calculation_context", None)
+        run.pop("run_part_time_pricing_snapshot", None)
+        run.pop("source_formula_advisories", None)
+        run.pop("hourly_submission_results", None)
         run["issues"] = []
         run["field_records"] = []
         run["issue_groups"] = []

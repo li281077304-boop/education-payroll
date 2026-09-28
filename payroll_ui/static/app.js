@@ -2097,10 +2097,14 @@ async function confirmSalaryBasisBatch() {
 }
 
 function issuesPage() {
-  if (runNeedsRecalculation(current)) {
-    return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">${escapeHtml(current.recalculation_required_reason || "处理范围或工资基础已变化")}。旧问题不会当作当前结果显示。</p></div><button onclick="recheck()">开始核算</button></div><div class="banner info"><strong>不会自动重算</strong><span>点击上方“开始核算”才会按已保存人员与当前 Run 材料重新处理。</span></div></section>`;
-  }
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">所有需要确认、选择、接受或暂缓的事项都集中在这里；处理后保持当前位置。</p></div><button onclick="recheck()">${current.core_calculation?.rows?.length ? "重新核算" : "开始核算"}</button></div>${scopeDecisionCards()}<div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters(event)" oncompositionend="updateFilters(event)"></label></div>${baseSalaryTodoCard()}<div id="issues-content">${issueResultsMarkup()}</div>${afPolicyBlock()}<div id="issue-detail"></div></section>`;
+  const needsRecalculation = runNeedsRecalculation(current);
+  const recalculationBanner = needsRecalculation
+    ? `<div class="banner info"><strong>需要重新核算</strong><span>${escapeHtml(current.recalculation_required_reason || "范围或工资基础已变化")}。旧问题不作为当前结果；下方资料和确认事项仍可继续处理。点击“开始核算”才会重新读取并计算。</span></div>`
+    : "";
+  const issueResults = needsRecalculation
+    ? '<div id="issues-content"><p class="small muted">当前问题清单将在你开始核算后生成。</p></div>'
+    : `<div id="issues-content">${issueResultsMarkup()}</div>`;
+  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 3 步</p><h2>待处理问题</h2><p class="muted">所有需要确认、选择、接受或暂缓的事项都集中在这里；处理后保持当前位置。</p></div><button onclick="recheck()">${needsRecalculation || !current.core_calculation?.rows?.length ? "开始核算" : "重新核算"}</button></div>${recalculationBanner}${scopeDecisionCards()}<div class="filters"><label for="filter-teacher">教师<input id="filter-teacher" placeholder="输入教师姓名" value="${escapeHtml(filters.teacher)}" oninput="updateFilters(event)" oncompositionend="updateFilters(event)"></label></div>${baseSalaryTodoCard()}${issueResults}${afPolicyBlock()}<div id="issue-detail"></div></section>`;
 }
 
 function baseSalaryTodoCard() {
