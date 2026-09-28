@@ -39,6 +39,12 @@ from payroll_ui.service import PayrollService
 REPO_ROOT = Path(__file__).parents[1]
 STATIC = REPO_ROOT / "payroll_ui" / "static"
 
+# The bundle-builder section below exercises the macOS ``.app`` shim and its
+# shell bootstrap.  Those artefacts do not exist on Windows, so they are
+# skipped there; the Windows release equivalent is covered by
+# ``tests/test_launcher_windows.py``.
+MACOS_ONLY = pytest.mark.skipif(os.name == "nt", reason="macOS .app bundle entry point")
+
 
 def free_port() -> int:
     with socket.socket() as sock:
@@ -218,18 +224,44 @@ def test_probe_flags_foreign_json_and_plain_http(tmp_path):
 # --------------------------------------------------------------------------- config
 
 
-def test_config_pins_fixed_port_and_application_support_data_dir(monkeypatch, tmp_path):
+def test_config_pins_fixed_port_and_production_data_dir(monkeypatch, tmp_path):
     monkeypatch.delenv(paths.ENV_CONFIG, raising=False)
     monkeypatch.setenv(paths.ENV_REPO_ROOT, str(REPO_ROOT))
     monkeypatch.setenv(paths.ENV_PYTHON, sys.executable)
     cfg = resolve_config()
 
     assert cfg.port == DEFAULT_PORT
-    assert cfg.data_dir == Path.home() / "Library" / "Application Support" / "EducationPayroll"
+    # The exact location is platform specific; what must never vary is that the
+    # data lives in the user's own application-support area and nowhere else.
+    assert cfg.data_dir == paths.default_data_dir()
     assert cfg.db_path.name == "payroll-ui.sqlite3"
     assert cfg.state_dir.parent == cfg.data_dir
     assert "/tmp" not in str(cfg.data_dir)
+    assert cfg.frozen is False
     assert cfg.base_url == f"http://127.0.0.1:{DEFAULT_PORT}/"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="macOS production entry point")
+def test_default_data_dir_on_macos_is_application_support():
+    assert paths.default_data_dir() == Path.home() / "Library" / "Application Support" / "EducationPayroll"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows production entry point")
+def test_default_data_dir_on_windows_is_local_appdata(monkeypatch, tmp_path):
+    """Windows keeps production data in %LOCALAPPDATA%\\EducationPayroll.
+
+    This is the Windows counterpart of the macOS Application Support rule: the
+    database must never sit next to the executable, so replacing the program
+    folder can never touch it.
+    """
+    local = tmp_path / "Local"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    data_dir = paths.default_data_dir()
+
+    assert data_dir == local / "EducationPayroll"
+    assert data_dir.parts[-2:] == ("Local", "EducationPayroll")
+    assert paths.program_root() not in data_dir.parents
+    assert data_dir.name != "EducationPayroll-tmp"
 
 
 def test_config_reads_an_explicit_file_and_rejects_a_missing_checkout(tmp_path):
@@ -324,7 +356,7 @@ def test_stop_service_sends_terminate_to_the_recorded_pid_only(monkeypatch, tmp_
 
     monkeypatch.setattr(lifecycle, "probe", lambda *_a, **_k: lifecycle.ProbeResult(ProbeKind.ABSENT, "hung"))
     monkeypatch.setattr(lifecycle, "process_alive", lambda _pid: alive["value"])
-    monkeypatch.setattr(lifecycle, "looks_like_payroll", lambda pid: pid == 4242)
+    monkeypatch.setattr(lifecycle, "looks_like_payroll", lambda pid, *_a: pid == 4242)
 
     stopped, message = stop_service(cfg, killer=killer, waiter=lambda _s: None)
 
@@ -341,7 +373,7 @@ def test_stop_service_refuses_a_recycled_or_unrelated_pid(monkeypatch, tmp_path)
 
     monkeypatch.setattr(lifecycle, "probe", lambda *_a, **_k: lifecycle.ProbeResult(ProbeKind.ABSENT))
     monkeypatch.setattr(lifecycle, "process_alive", lambda _pid: True)
-    monkeypatch.setattr(lifecycle, "looks_like_payroll", lambda _pid: False)
+    monkeypatch.setattr(lifecycle, "looks_like_payroll", lambda _pid, *_a: False)
 
     stopped, message = stop_service(cfg, killer=lambda pid, sig: signals.append((pid, sig)),
                                    waiter=lambda _s: None)
@@ -359,7 +391,7 @@ def test_stop_service_skips_when_health_pid_disagrees_with_the_record(monkeypatc
     monkeypatch.setattr(lifecycle, "probe", lambda *_a, **_k: lifecycle.ProbeResult(
         ProbeKind.OURS, "other process", {"pid": 6002}))
     monkeypatch.setattr(lifecycle, "process_alive", lambda _pid: True)
-    monkeypatch.setattr(lifecycle, "looks_like_payroll", lambda _pid: True)
+    monkeypatch.setattr(lifecycle, "looks_like_payroll", lambda _pid, *_a: True)
 
     stopped, message = stop_service(cfg, killer=lambda pid, sig: signals.append((pid, sig)),
                                    waiter=lambda _s: None)
@@ -511,6 +543,7 @@ def test_cli_status_exposes_paths_and_probe_kind(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- bundle builder
 
 
+@MACOS_ONLY
 def test_build_app_script_produces_both_production_entry_points(tmp_path):
     output_dir = tmp_path / "dist"
     completed = subprocess.run(
@@ -614,6 +647,7 @@ def _test_bundle(tmp_path: Path) -> Path:
     return bundle
 
 
+@MACOS_ONLY
 def test_bundle_bootstrap_missing_repository_records_error_before_python(tmp_path, monkeypatch):
     home = tmp_path / "user home"
     home.mkdir()
@@ -632,6 +666,7 @@ def test_bundle_bootstrap_missing_repository_records_error_before_python(tmp_pat
     assert not (home / "python-invocations.log").exists(), "repo 检查失败时不得调用 Python"
 
 
+@MACOS_ONLY
 def test_bundle_bootstrap_invalid_python_records_error_and_shows_dialog(tmp_path, monkeypatch):
     home = tmp_path / "user home"
     home.mkdir()
@@ -651,6 +686,7 @@ def test_bundle_bootstrap_invalid_python_records_error_and_shows_dialog(tmp_path
     assert "display dialog" in dialog_log.read_text(encoding="utf-8")
 
 
+@MACOS_ONLY
 def test_bundle_bootstrap_module_import_failure_is_recorded_before_dialog(tmp_path, monkeypatch):
     home = tmp_path / "user home"
     home.mkdir()
@@ -672,6 +708,7 @@ def test_bundle_bootstrap_module_import_failure_is_recorded_before_dialog(tmp_pa
     assert "display dialog" in dialog_log.read_text(encoding="utf-8")
 
 
+@MACOS_ONLY
 def test_bundle_bootstrap_fixed_data_dir_mismatch_fails_closed(tmp_path, monkeypatch):
     home = tmp_path / "user home"
     home.mkdir()
@@ -687,6 +724,7 @@ def test_bundle_bootstrap_fixed_data_dir_mismatch_fails_closed(tmp_path, monkeyp
     assert "PRODUCTION_CONFIG_UNSAFE" in (state_dir / "diagnostics.log").read_text(encoding="utf-8")
 
 
+@MACOS_ONLY
 def test_bundle_bootstrap_validates_then_delegates_to_python_without_changing_data_dir(tmp_path, monkeypatch):
     home = tmp_path / "user home"
     home.mkdir()

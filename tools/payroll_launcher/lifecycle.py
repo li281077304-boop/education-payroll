@@ -4,13 +4,15 @@ Safety rules enforced here:
 
 * a foreign process on the port is reported, never killed;
 * a restart only ever signals the process recorded in our own pid file, and
-  only after its command line and health payload agree with that record;
+  only after its identity and health payload agree with that record;
 * the launcher never chooses a data directory other than the configured one,
   so it cannot silently fork the real database.
+
+Every operating-system primitive is delegated to :mod:`.host`, so the rules
+above hold identically on macOS and Windows.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import signal
@@ -20,12 +22,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .paths import LauncherConfig
+from . import host
+from .paths import LauncherConfig, service_argv
 from .probe import ProbeKind, ProbeResult, probe
 
 START_TIMEOUT_SECONDS = 45.0
 POLL_INTERVAL_SECONDS = 0.3
 TERMINATE_GRACE_SECONDS = 10.0
+SHUTDOWN_GRACE_SECONDS = 8.0
 MAX_LOG_BYTES = 2 * 1024 * 1024
 
 STATE_REUSED = "reused"
@@ -92,7 +96,8 @@ def write_pid_file(cfg: LauncherConfig, pid: int, detail: dict | None = None) ->
             "host": cfg.host,
             "data_dir": str(cfg.data_dir),
             "repo_root": str(cfg.repo_root),
-            "python": str(cfg.python),
+            "program": str(cfg.python),
+            "frozen": cfg.frozen,
             "started_at": _now(),
         }
         if detail:
@@ -110,31 +115,33 @@ def clear_pid_file(cfg: LauncherConfig) -> None:
 
 
 def process_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return host.process_alive(pid)
 
 
 def process_command(pid: int) -> str:
+    return host.process_command(pid)
+
+
+def looks_like_payroll(pid: int, cfg: LauncherConfig | None = None) -> bool:
+    """Guard against acting on a recycled pid.
+
+    POSIX exposes the whole command line, so the module marker is conclusive.
+    Windows only exposes the executable path, and a released build runs the UI
+    inside its own ``工资核算助手.exe`` -- there the released executable *is*
+    the expected image, which is checked against the configured program path.
+    """
+    command = process_command(pid)
+    if not command:
+        return False
+    if "payroll_ui" in command or "payroll-launcher" in command:
+        return True
+    if cfg is None or not host.IS_WINDOWS:
+        # Keep the strict POSIX rule: anything else is not provably ours.
+        return False
     try:
-        completed = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return completed.stdout.strip()
-
-
-def looks_like_payroll(pid: int) -> bool:
-    """Guard against acting on a recycled pid."""
-    return "payroll_ui" in process_command(pid)
+        return Path(command).resolve() == Path(cfg.python).resolve()
+    except OSError:
+        return False
 
 
 def log_tail(cfg: LauncherConfig, lines: int = 25) -> list[str]:
@@ -146,38 +153,51 @@ def log_tail(cfg: LauncherConfig, lines: int = 25) -> list[str]:
 
 
 def _service_log(cfg: LauncherConfig) -> Path:
-    return cfg.state_dir / "service-output.log"
+    return cfg.service_log_file
 
 
-def start_process(cfg: LauncherConfig) -> subprocess.Popen:
-    """Spawn the UI detached from this process, with no terminal attached."""
-    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+def _service_environment(cfg: LauncherConfig) -> dict:
     env = dict(os.environ)
-    env["PYTHONPATH"] = str(cfg.repo_root)
+    if not cfg.frozen:
+        # A frozen build resolves its own bundled modules; exporting PYTHONPATH
+        # there would let a stray checkout shadow them.
+        env["PYTHONPATH"] = str(cfg.repo_root)
     env["PYTHONUNBUFFERED"] = "1"
     # Keep proxy settings from interfering with a loopback connection.
     for key in ("NO_PROXY", "no_proxy"):
         existing = env.get(key, "")
         env[key] = ",".join(part for part in (existing, "127.0.0.1,localhost") if part)
+    return env
+
+
+def start_process(cfg: LauncherConfig) -> subprocess.Popen:
+    """Spawn the UI detached from this process, with no terminal attached."""
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
     handle = _service_log(cfg).open("ab")
     try:
         return subprocess.Popen(
-            [
-                str(cfg.python), "-u", "-m", "payroll_ui",
-                "--data-dir", str(cfg.data_dir),
-                "--port", str(cfg.port),
-                "--no-browser",
-            ],
+            service_argv(cfg),
+            # Never inherit whatever directory the user happened to launch from.
             cwd=str(cfg.repo_root),
-            env=env,
+            env=_service_environment(cfg),
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=not host.IS_WINDOWS,
+            creationflags=_detached_flags(),
             close_fds=True,
         )
     finally:
         handle.close()
+
+
+def _detached_flags() -> int:
+    """Windows: no console window, and not tied to the launcher's lifetime."""
+    if not host.IS_WINDOWS:
+        return 0
+    CREATE_NO_WINDOW = 0x08000000
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    return CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
 
 
 def wait_for_health(cfg: LauncherConfig, process: subprocess.Popen | None = None,
@@ -201,24 +221,19 @@ class LauncherLock:
 
     def __init__(self, cfg: LauncherConfig):
         self.cfg = cfg
-        self._handle = None
+        self._token = None
 
     def __enter__(self) -> "LauncherLock":
         self.cfg.state_dir.mkdir(parents=True, exist_ok=True)
-        self._handle = self.cfg.lock_file.open("a+")
-        try:
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            pass
+        self._token = host.acquire_launcher_lock(self.cfg.lock_file)
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        if self._handle is not None:
+        if self._token is not None:
             try:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+                host.release_launcher_lock(self._token)
             finally:
-                self._handle.close()
-                self._handle = None
+                self._token = None
 
 
 def ensure_running(cfg: LauncherConfig, python_problem: str | None = None) -> LaunchResult:
@@ -264,7 +279,7 @@ def ensure_running(cfg: LauncherConfig, python_problem: str | None = None) -> La
             )
 
         cfg.data_dir.mkdir(parents=True, exist_ok=True)
-        log_line(cfg, f"start {cfg.python} -m payroll_ui --data-dir {cfg.data_dir} --port {cfg.port}")
+        log_line(cfg, "start " + " ".join(service_argv(cfg)))
         try:
             process = start_process(cfg)
         except OSError as exc:
@@ -301,6 +316,40 @@ def ensure_running(cfg: LauncherConfig, python_problem: str | None = None) -> La
         )
 
 
+def request_shutdown(cfg: LauncherConfig, pid: int) -> bool:
+    """Ask our own service to close its database and exit.
+
+    Only a frozen release can honour this, because only there does the
+    launcher also own the service's own startup path.  The request names the
+    pid and the data-directory fingerprint, and the service ignores anything
+    that does not describe itself.
+    """
+    if not cfg.frozen or pid <= 0:
+        return False
+    from payroll_ui.health import data_dir_fingerprint
+
+    try:
+        cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        cfg.stop_request_file.write_text(json.dumps({
+            "contract": "payroll-shutdown/1",
+            "pid": int(pid),
+            "data_dir_fingerprint": data_dir_fingerprint(cfg.data_dir),
+            "requested_at": _now(),
+        }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        log_line(cfg, f"WARN 无法写入停止请求：{exc}")
+        return False
+    log_line(cfg, f"request-shutdown pid={pid}")
+    return True
+
+
+def clear_shutdown_request(cfg: LauncherConfig) -> None:
+    try:
+        cfg.stop_request_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def stop_service(cfg: LauncherConfig, killer=os.kill, waiter=time.sleep) -> tuple[bool, str]:
     """Stop only the process this launcher owns.  Never guesses."""
     record = read_pid_file(cfg)
@@ -320,15 +369,25 @@ def stop_service(cfg: LauncherConfig, killer=os.kill, waiter=time.sleep) -> tupl
     if not process_alive(pid):
         clear_pid_file(cfg)
         return True, "服务已经停止。"
-    if not looks_like_payroll(pid):
+    if not looks_like_payroll(pid, cfg):
         return False, "记录的进程身份不是工资核算服务，为避免误杀已跳过。"
 
+    deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
     try:
+        if request_shutdown(cfg, pid):
+            shutdown_deadline = time.monotonic() + SHUTDOWN_GRACE_SECONDS
+            while time.monotonic() < shutdown_deadline:
+                if not process_alive(pid):
+                    clear_pid_file(cfg)
+                    log_line(cfg, f"stopped pid={pid} (graceful)")
+                    return True, "工资服务已安全停止。"
+                waiter(0.25)
         killer(pid, signal.SIGTERM)
     except OSError as exc:
         return False, f"无法结束工资服务进程：{exc}"
+    finally:
+        clear_shutdown_request(cfg)
 
-    deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
     while time.monotonic() < deadline:
         if not process_alive(pid):
             clear_pid_file(cfg)
@@ -373,10 +432,11 @@ def status(cfg: LauncherConfig) -> dict:
     current = probe(cfg.host, cfg.port, cfg.data_dir)
     owns = None
     if record and record.get("pid"):
+        recorded = int(record["pid"])
         owns = {
-            "recorded_pid": int(record["pid"]),
-            "recorded_pid_alive": process_alive(int(record["pid"])),
-            "recorded_pid_is_payroll": looks_like_payroll(int(record["pid"])),
+            "recorded_pid": recorded,
+            "recorded_pid_alive": process_alive(recorded),
+            "recorded_pid_is_payroll": looks_like_payroll(recorded, cfg),
         }
     return {
         "url": cfg.base_url,
@@ -386,9 +446,11 @@ def status(cfg: LauncherConfig) -> dict:
         "database": str(cfg.db_path),
         "database_exists": cfg.db_path.is_file(),
         "repo_root": str(cfg.repo_root),
-        "python": str(cfg.python),
+        "program": str(cfg.python),
+        "frozen": cfg.frozen,
         "state_dir": str(cfg.state_dir),
         "diagnostics_log": str(cfg.log_file),
+        "service_log": str(cfg.service_log_file),
         "probe": {"kind": current.kind.value, "detail": current.detail, "health": current.payload},
         "launcher_record": owns,
     }

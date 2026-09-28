@@ -44,6 +44,12 @@ work/
 macos/dist/
 macos/*.app/
 
+# Same rule for the Windows release: the repository keeps the builder
+# (windows/build_windows.py + windows/payroll_windows.spec).  The frozen bundle
+# is ~34 MB of machine-built runtime and must be reproducible from a checkout,
+# not stored in Git.
+windows/dist/
+
 # Explicitly excluded sensitive Skill assets
 skill/payroll/references/学生年级查表.csv
 skill/payroll/references/学生年级查表.csv.bak_20260901

@@ -1,0 +1,24 @@
+# Reproducible checkouts on every operating system.
+#
+# Without this, a Windows clone with core.autocrlf=true rewrites the UI assets
+# to CRLF.  The Node-driven UI tests patch those exact files, and their
+# "strip the bootstrap IIFE" regex matches a bare LF, so the suite failed on
+# Windows for a reason that had nothing to do with the code under test.  A
+# release built from such a checkout would also ship different bytes than the
+# reviewed commit.
+* text=auto eol=lf
+
+# Binary assets must never be normalised.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.xlsx binary
+*.xls binary
+*.xlsm binary
+*.zip binary
+*.7z binary
+*.rar binary
+*.db binary
+*.sqlite3 binary

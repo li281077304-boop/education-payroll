@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 from payroll_core.excel.inspect import inspect_workbook
 
+from . import native_dialogs
 from .health import HEALTH_PATH, health_payload
 from .service import MONTHLY_FLOW_SUBMISSION_FIRST, PayrollService
 
@@ -579,33 +580,29 @@ class PayrollHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _pick_excel() -> str | None:
-        script = 'POSIX path of (choose file with prompt "选择 Excel 文件" of type {"org.openxmlformats.spreadsheetml.sheet", "com.microsoft.excel.xls", "com.microsoft.excel.xlsm"})'
-        try:
-            return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
+        return native_dialogs.pick_file(
+            "选择 Excel 文件",
+            patterns=native_dialogs.EXCEL_PATTERNS,
+            macos_utis=native_dialogs.EXCEL_UTIS,
+        )
 
     @staticmethod
     def _pick_period_document() -> str | None:
         """Pick the authoritative 人工月 document (Markdown / CSV / Excel).
 
-        Deliberately unfiltered by UTI: the office keeps this material as .md,
-        .csv and .xlsx, and an unknown UTI would make the dialog fail silently.
-        The reader reports an actionable error for an unsupported file.
+        Deliberately unfiltered on macOS: the office keeps this material as
+        .md, .csv and .xlsx, and an unknown UTI would make the dialog fail
+        silently.  The reader reports an actionable error for an unsupported
+        file either way.
         """
-        script = 'POSIX path of (choose file with prompt "选择人工月资料（Markdown / CSV / Excel）")'
-        try:
-            return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
+        return native_dialogs.pick_file(
+            "选择人工月资料（Markdown / CSV / Excel）",
+            patterns=native_dialogs.DOCUMENT_PATTERNS,
+        )
 
     @staticmethod
     def _pick_directory() -> str | None:
-        script = 'POSIX path of (choose folder with prompt "选择工资资料包文件夹")'
-        try:
-            return subprocess.check_output(["osascript", "-e", script], text=True, stderr=subprocess.DEVNULL).strip()
-        except (OSError, subprocess.CalledProcessError):
-            return None
+        return native_dialogs.pick_folder("选择工资资料包文件夹")
 
     def _save_uploaded_file(self, payload: dict) -> dict:
         """Persist a browser-selected local copy for the normal read-only import path."""

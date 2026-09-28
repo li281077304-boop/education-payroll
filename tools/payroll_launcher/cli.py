@@ -30,10 +30,12 @@ from .lifecycle import ensure_running, log_line, restart_service, status, stop_s
 from .paths import (
     DEFAULT_PORT,
     HOST,
+    SERVICE_FLAG,
     LauncherConfig,
     LauncherConfigError,
     interpreter_problem,
     resolve_config,
+    with_overrides,
 )
 from .probe import ProbeKind, probe
 
@@ -216,22 +218,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--print-config", action="store_true", help="打印解析后的配置")
     parser.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--no-dialog", action="store_true", help="不弹窗，失败信息打印到标准输出")
+    parser.add_argument(SERVICE_FLAG, action="store_true",
+                        help=argparse.SUPPRESS)  # 内部：把本进程当作工资服务运行
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.service:
+        # Internal: the launcher re-enters its own executable to serve the UI.
+        from . import service_mode
+
+        return service_mode.run_service(
+            args.data_dir or paths.default_data_dir(),
+            args.port if args.port is not None else DEFAULT_PORT,
+        )
     try:
         cfg = resolve_config(args.config)
     except LauncherConfigError as exc:
         message = f"工资核算助手启动失败，请查看诊断信息。\n\n{exc}"
-        fallback = LauncherConfig(
-            repo_root=Path(os.environ.get(paths.ENV_REPO_ROOT, Path.cwd())),
-            python=Path(os.environ.get(paths.ENV_PYTHON, sys.executable)),
-            host=HOST,
-            port=DEFAULT_PORT,
-            data_dir=paths.default_data_dir(),
-        )
+        if paths.is_frozen():
+            fallback = LauncherConfig(
+                repo_root=paths.program_root(),
+                python=Path(sys.executable),
+                host=HOST,
+                port=DEFAULT_PORT,
+                data_dir=args.data_dir or paths.default_data_dir(),
+                frozen=True,
+            )
+        else:
+            fallback = LauncherConfig(
+                repo_root=Path(os.environ.get(paths.ENV_REPO_ROOT, Path.cwd())),
+                python=Path(os.environ.get(paths.ENV_PYTHON, sys.executable)),
+                host=HOST,
+                port=DEFAULT_PORT,
+                data_dir=args.data_dir or paths.default_data_dir(),
+            )
         failure = lifecycle.LaunchResult(
             ok=False, state="config-invalid", message=message, url=fallback.base_url,
             diagnostics=str(exc), log_tail=lifecycle.log_tail(fallback),
@@ -248,13 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.data_dir or args.port:
-        cfg = LauncherConfig(
-            repo_root=cfg.repo_root,
-            python=cfg.python,
-            host=cfg.host,
-            port=args.port or cfg.port,
-            data_dir=args.data_dir or cfg.data_dir,
-        )
+        cfg = with_overrides(cfg, data_dir=args.data_dir, port=args.port)
 
     try:
         if args.print_config:

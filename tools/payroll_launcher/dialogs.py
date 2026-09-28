@@ -3,6 +3,11 @@
 A normal user must never see a Python traceback or a bare crash.  Every failure
 path ends in a Chinese dialog with an actionable choice, and the technical
 detail is written to a local report that the user can open on demand.
+
+The dialog itself is the one genuinely platform-specific piece of user
+experience: macOS drives ``osascript``, Windows uses the built-in message box.
+Both routes return the same logical choice, so the recovery flows in
+:mod:`.cli` stay identical.
 """
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import host
 from .lifecycle import LaunchResult, log_tail
 from .paths import LauncherConfig
 
@@ -18,6 +24,8 @@ RETRY = "retry"
 RESTART = "restart"
 DIAGNOSTICS = "diagnostics"
 DISMISSED = "dismissed"
+
+_CHOICE_NAMES = {"重试": RETRY, "重新启动": RESTART, "查看诊断": DIAGNOSTICS}
 
 
 def _escape(text: str) -> str:
@@ -28,19 +36,19 @@ def _has_osascript() -> bool:
     return Path("/usr/bin/osascript").is_file()
 
 
-def choose_after_failure(message: str, allow_restart: bool) -> str:
-    """Show the failure dialog.  Falls back to stderr when no GUI is available."""
+def _failure_buttons(allow_restart: bool) -> list[str]:
     buttons = ["查看诊断"] if not allow_restart else ["查看诊断", "重新启动"]
     buttons.append("重试")
+    return buttons
+
+
+def _choose_via_osascript(message: str, buttons: list[str]) -> str:
     button_list = ", ".join(f'"{_escape(name)}"' for name in buttons)
     script = (
         f'display dialog "{_escape(message)}" '
         f"buttons {{{button_list}}} default button \"重试\" "
         f'with title "{DIALOG_TITLE}" with icon caution'
     )
-    if not _has_osascript():
-        print(f"[{DIALOG_TITLE}] {message}")
-        return DISMISSED
     try:
         completed = subprocess.run(
             ["/usr/bin/osascript", "-e", script],
@@ -48,12 +56,26 @@ def choose_after_failure(message: str, allow_restart: bool) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         print(f"[{DIALOG_TITLE}] {message}")
-        return DISMISSED
-    output = (completed.stdout or "").strip()
+        return ""
     if completed.returncode != 0:
+        return ""
+    output = (completed.stdout or "").strip()
+    return output.split(":", 1)[1].strip() if ":" in output else output
+
+
+def choose_after_failure(message: str, allow_restart: bool) -> str:
+    """Show the failure dialog.  Falls back to stderr when no GUI is available."""
+    buttons = _failure_buttons(allow_restart)
+    if _has_osascript():
+        name = _choose_via_osascript(message, buttons)
+    elif host.IS_WINDOWS:
+        name = host.show_choice(message, buttons, default="重试", title=DIALOG_TITLE)
+    else:
+        name = ""
+    if not name:
+        print(f"[{DIALOG_TITLE}] {message}")
         return DISMISSED
-    name = output.split(":", 1)[1].strip() if ":" in output else output
-    return {"重试": RETRY, "重新启动": RESTART, "查看诊断": DIAGNOSTICS}.get(name, DISMISSED)
+    return _CHOICE_NAMES.get(name, DISMISSED)
 
 
 def problem_report_path(cfg: LauncherConfig) -> Path:
@@ -75,7 +97,8 @@ def write_problem_report(cfg: LauncherConfig, result: LaunchResult) -> Path:
         f"- 正式数据目录：{cfg.data_dir}",
         f"- 数据库文件：{cfg.db_path}",
         f"- 程序目录：{cfg.repo_root}",
-        f"- Python：{cfg.python}",
+        f"- 程序：{cfg.python}",
+        f"- 是否发布包：{'是' if cfg.frozen else '否（源码运行）'}",
         f"- 启动器状态目录：{cfg.state_dir}",
         "",
         "## 技术说明",
@@ -91,9 +114,10 @@ def write_problem_report(cfg: LauncherConfig, result: LaunchResult) -> Path:
         "## 下一步",
         "",
         "1. 如果提示端口被占用：关闭占用该端口的程序后，回到对话框点“重试”。",
-        "2. 如果提示 Python 环境不完整：在程序目录执行安装命令后点“重试”。",
-        "3. 如果服务无响应：点“重新启动”，启动器只会结束它自己启动的进程。",
-        "4. 本文件只包含路径和技术信息，不包含任何工资或教师数据。",
+        "2. 如果提示程序目录或界面资源缺失：请重新解压完整的程序压缩包，不要只复制单个 exe。",
+        "3. 如果提示 Python 环境不完整（仅源码运行时可能出现）：在程序目录安装依赖后点“重试”。",
+        "4. 如果服务无响应：点“重新启动”，启动器只会结束它自己启动的进程。",
+        "5. 本文件只包含路径和技术信息，不包含任何工资或教师数据。",
         "",
     ]
     path = problem_report_path(cfg)
@@ -102,10 +126,7 @@ def write_problem_report(cfg: LauncherConfig, result: LaunchResult) -> Path:
 
 
 def open_path(path: Path) -> None:
-    try:
-        subprocess.run(["/usr/bin/open", str(path)], capture_output=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        print(f"诊断文件位置：{path}")
+    host.open_path(path)
 
 
 def open_diagnostics(cfg: LauncherConfig) -> None:
@@ -121,8 +142,4 @@ def open_diagnostics(cfg: LauncherConfig) -> None:
 
 def open_url(url: str) -> bool:
     """Open the local page, reporting failure to the caller for visible handling."""
-    try:
-        completed = subprocess.run(["/usr/bin/open", url], capture_output=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return completed.returncode == 0
+    return host.open_url(url)
