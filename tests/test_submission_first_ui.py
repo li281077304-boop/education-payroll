@@ -120,3 +120,32 @@ assert(!html.includes('不会自动填 0'));
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_submission_first_payroll_preview_hides_part_time_but_legacy_keeps_it():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;},querySelectorAll(){return []; }},window:{},console};
+vm.createContext(context); vm.runInContext(source, context);
+vm.runInContext(`const row={teacher:'教师甲',status:'NEEDS_CONFIRMATION',blockers:[],fields:{
+ AA:{value:1,state:'DETERMINED'},AC:{value:0,state:'DETERMINED'},AD:{value:1,state:'DETERMINED'},
+ AE:{value:40,state:'DETERMINED'},AF:{value:0,state:'DETERMINED'},PART_TIME:{value:null,state:'NEEDS_INPUT',reason:'兼职按节课时费'}},
+ final_fields:{M:{value:null,state:'BLOCKED_BY_INPUT'},AH:{value:0,state:'DETERMINED'},AI:{value:0,state:'DETERMINED'},
+ AJ:{value:0,state:'DETERMINED'},AK:{value:0,state:'DETERMINED'},AV:{value:null,state:'MISSING_SOURCE'}}};
+ current={id:'run-preview',period:'2026-08',period_label:'2026-08',mode:'GENERATE',generated_payroll:{status:'NEEDS_CONFIRMATION',rows:[row]},
+ period_authority:{},period_check:{},authority_context:{rating:{}},summary:{}}; tab='payroll';`, context);
+vm.runInContext(`current.monthly_flow_version='SUBMISSION_FIRST_V1'`, context);
+const simple = vm.runInContext('payrollPreviewPage()', context);
+assert(!simple.includes('兼职按节课时费'));
+assert(!simple.includes('PART_TIME'));
+vm.runInContext(`delete current.monthly_flow_version`, context);
+const legacy = vm.runInContext('payrollPreviewPage()', context);
+assert(legacy.includes('兼职按节课时费'));
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

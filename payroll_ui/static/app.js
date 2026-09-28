@@ -1950,7 +1950,8 @@ function payrollPreviewPage() {
     const star = row.star ?? starEvidence ?? "—";
     const blockers = (row.blockers || []).join("、");
     const secondaryLabels = { AH: fieldDisplayLabel("AH"), AI: fieldDisplayLabel("AI"), AJ: fieldDisplayLabel("AJ"), AK: fieldDisplayLabel("AK"), PART_TIME: "兼职按节课时费" };
-    const secondary = ["AH", "AI", "AJ", "AK", "PART_TIME"].map((code) => `<div><span>${escapeHtml(secondaryLabels[code])}</span>${coreCalculationCell(payrollPreviewField(row, code), true)}</div>`).join("");
+    const secondaryCodes = submissionFirstFlow() ? ["AH", "AI", "AJ", "AK"] : ["AH", "AI", "AJ", "AK", "PART_TIME"];
+    const secondary = secondaryCodes.map((code) => `<div><span>${escapeHtml(secondaryLabels[code])}</span>${coreCalculationCell(payrollPreviewField(row, code), true)}</div>`).join("");
     const shortStatus = row.status === "FINAL" ? "已确认" : blockers ? `待确认（${(row.blockers || []).length} 项）` : "待确认";
     return `<tr><td><strong>${escapeHtml(row.teacher || row.teacher_id || "—")}</strong><div class="small muted">${escapeHtml(shortStatus)}</div><details class="preview-details"><summary>查看续费、星级与依据</summary>${blockers ? `<p class="small muted">待处理：${escapeHtml(blockers)}</p>` : ""}<div class="preview-secondary">${secondary}<div><span>教师星级（与 AE 课时单价不同）</span>${coreCalculationCell({ value: star, state: star === "—" ? "NEEDS_INPUT" : "DETERMINED", reason: starSource }, true)}</div></div></details></td>${fields}</tr>`;
   }).join("");
