@@ -369,6 +369,11 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 if action == "files":
                     role = str(payload.get("role", ""))
                     if role in {"math", "science"}:
+                        run = self.server.service.get(run_id)
+                        if run.get("monthly_flow_version") == "SUBMISSION_FIRST_V1":
+                            return self._json(self.server.service.import_material_file(
+                                run_id, "subject_group", str(payload.get("path", "")),
+                            ))
                         return self._error("学科组提交表必须先预览并由负责人确认后，才会用于本月工资。", HTTPStatus.CONFLICT)
                     return self._json(self.server.service.import_file(run_id, role, str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
                 if action == "package":

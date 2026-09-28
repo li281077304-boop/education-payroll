@@ -128,7 +128,7 @@ def test_the_materials_page_flags_lessons_outside_the_authority(tmp_path):
     assert "2026-08-31" in card
 
 
-def test_the_preview_shows_the_period_and_star_authority_evidence(tmp_path):
+def test_the_preview_shows_period_but_never_exposes_star_version_controls(tmp_path):
     current = {
         "id": "run-1", "period": "2026-08", "period_label": "2026-08", "mode": "GENERATE",
         "period_authority": INLINE_AUTHORITY, "period_check": {},
@@ -140,12 +140,11 @@ def test_the_preview_shows_the_period_and_star_authority_evidence(tmp_path):
         "summary": {},
     }
     page = _run_ui(tmp_path, f"current = {json.dumps(current, ensure_ascii=False)}; __result = payrollPreviewPage();")
-    assert "本期使用的依据" in page, "工资预览必须能看见本期依据"
+    assert "本期人工月" in page, "工资预览必须能看见本期工资周期"
     assert "2026-08-01 ～ 2026-08-30" in page
-    assert "人工月资料" in page
-    assert "rating-2026-1" in page, "星级版本要可见"
-    assert "2026-01 ～ 2026-12" in page, "星级生效期要可见"
-    assert "校区星级名单" in page, "星级来源要可见"
+    assert "教师星级：系统自动应用" in page
+    for detail in ("rating-2026-1", "2026-01 ～ 2026-12", "校区星级名单", "星级版本", "星级来源"):
+        assert detail not in page
     # 主表仍然保持精简：M/AA/AC/AD/AE/AF/AV 七个快速核对字段，
     # 而且每个字段都必须是「代码 + 中文业务名称」，不能只给字母。
     for label in ("M 实际基本工资", "AA 折算小时数", "AC 班课折算小时数", "AD 最终授课小时数据", "AE 该档每小时金额", "AF 总课时费", "AV 总工资数"):
@@ -229,37 +228,30 @@ def test_main_run_navigation_has_four_user_steps_and_one_export_destination():
     assert "partTimePayCard(partTime)" not in render_block
 
 
-def test_salary_materials_is_one_module_and_history_file_precedes_group_selection():
-    source = APP_JS.read_text(encoding="utf-8")
-    module = source.split("function salaryMaterialsModule()", 1)[1].split("function productionMaterialCards()", 1)[0]
-    history = source.split("function historicalSalaryReferenceCard()", 1)[1].split("function savedHistoricalSalaryReferences()", 1)[0]
-    stage = source.split("async function previewStagedHistoricalReference()", 1)[1].split("async function removeSupportSource()", 1)[0]
-    selection = source.split("async function previewBaseSalaryFileObject", 1)[1].split("async function previewExistingSupportMaterial", 1)[0]
-    file_change = source.split("async function previewBaseSalaryFile(event)", 1)[1].split("function previewSupportFile", 1)[0]
-    assert module.count("supportMaterialCard()") == 1
-    assert module.count("historicalSalaryReferenceCard()") == 1
-    assert "class=\"card historical-reference-card\"" not in history
-    assert "本月工资资料（权威）" in source
-    assert "来源：支持部提供" in source
-    assert "这份资料属于哪个科组？" in history
-    assert "stageHistoricalReferenceFile(file)" in file_change
-    assert "selectedGroup" in selection
-    assert "class=\"salary-material-module card\"" in module
-    assert "salary-source-panel support-material-card" in source
-    assert "salary-source-panel historical-reference-card" in history
-    css = (Path(__file__).parents[1] / "payroll_ui" / "static" / "app.css").read_text(encoding="utf-8")
-    assert ".salary-material-options{display:block}" in css
-    assert "previewBaseSalaryFileObject(file, group)" in stage
-    assert "base-salary-reference-preview" in selection
+def test_current_materials_have_no_historical_salary_entry_and_support_is_secondary(tmp_path):
+    script = """
+current = {id:'run-v1', monthly_flow_version:'SUBMISSION_FIRST_V1', mode:'GENERATE', period:'2026-08',
+ support_source:{bound:false}, support_department_pending_preview:null, subject_group_materials:[], materials:[],
+ health:{warnings:[],missing:[],readiness:100}, files:{schedule:{name:'schedule.csv'}}};
+__result = materialsPage();
+"""
+    page = _run_ui(tmp_path, script)
+    assert "学科组提交表" in page
+    assert "支持部补充资料" in page
+    assert "background:#fafbfc" in page
+    for detail in ("导入历史工资", "历史工资参考", "历史基本工资", "星级版本", "ratingDashboard"):
+        assert detail not in page
 
 
 def test_the_daily_flow_keeps_engineering_configuration_in_advanced_settings():
     source = APP_JS.read_text(encoding="utf-8")
-    for anchor in ("company-template-card", "period-authority-card", "base-salary-card", "rating-source-card"):
+    for anchor in ("company-template-card", "period-authority-card"):
         assert f'id="{anchor}"' in source, anchor
+    for removed in ("id=\"base-salary-card\"", "id=\"rating-source-card\""):
+        assert removed not in source
     assert "advanced-settings" in source, "工程配置应折叠在高级设置里"
     start = source.index("advanced-settings")
-    assert "工程配置" in source[start:start + 300], "折叠区要说明这是低频工程配置"
+    assert "日常月度工资流程不需要在这里选择教师星级" in source[start:start + 300]
 
 
 # --------------------------------------------------------- 人工月权威资料（界面）

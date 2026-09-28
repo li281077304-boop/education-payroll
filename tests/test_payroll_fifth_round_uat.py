@@ -253,7 +253,7 @@ def test_direct_subject_group_import_is_blocked_at_service_boundary(tmp_path):
     assert "math" not in service.store.get(run["id"])["files"]
 
 
-def test_subject_group_http_file_endpoint_cannot_bypass_confirmation(tmp_path):
+def test_submission_first_http_group_upload_is_immediately_confirmed(tmp_path):
     server = PayrollHttpServer(("127.0.0.1", 0), PayrollService(tmp_path / "data"), Path(__file__).parents[1] / "payroll_ui" / "static")
     worker = Thread(target=server.serve_forever, daemon=True)
     worker.start()
@@ -267,17 +267,26 @@ def test_subject_group_http_file_endpoint_cannot_bypass_confirmation(tmp_path):
             method="POST",
         )
         run = json.loads(urlopen(request).read())
+        schedule = _schedule(tmp_path / "schedule.csv", [("教师甲", "数学", "2026-08-05")])
         request = Request(
             base + f"/api/runs/{run['id']}/files",
-            data=json.dumps({"role": "math", "path": str(tmp_path / "math.csv")}).encode(),
+            data=json.dumps({"role": "schedule", "path": str(schedule)}).encode(),
             headers={"Content-Type": "application/json", "X-Payroll-Token": token},
             method="POST",
         )
-        with pytest.raises(HTTPError) as error:
-            urlopen(request)
-        assert error.value.code == 409
-        assert "预览并由负责人确认" in error.value.read().decode("utf-8")
-        assert "math" not in server.service.store.get(run["id"])["files"]
+        run = json.loads(urlopen(request).read())
+        group = _group(tmp_path / "math.csv", ["教师甲"])
+        request = Request(
+            base + f"/api/runs/{run['id']}/files",
+            data=json.dumps({"role": "math", "path": str(group)}).encode(),
+            headers={"Content-Type": "application/json", "X-Payroll-Token": token},
+            method="POST",
+        )
+        uploaded = json.loads(urlopen(request).read())
+        saved = server.service.store.get(run["id"])
+        assert uploaded["run"]["subject_group_materials"][0]["status"] == "CONFIRMED"
+        assert not saved.get("pending_subject_group_imports")
+        assert "math" in saved["files"]
     finally:
         server.shutdown()
         worker.join(timeout=2)

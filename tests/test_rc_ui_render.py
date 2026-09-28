@@ -26,7 +26,8 @@ vm.runInContext(`current = {id:'run-1', authority_context:{
  rules:{name:'rules-v1',source:'synthetic',effective_period:'2025-10 起持续维护'}
 }}`, context);
 const authority = vm.runInContext("authoritySummary()",context);
-for (const text of ['当前核对依据','排课权威源','星级权威版本','教师政策版本','工资规则版本','查看、修正或改用版本']) assert(authority.includes(text), text);
+for (const text of ['当前核对依据','排课权威源','教师政策版本','工资规则版本','查看工资规则依据','教师星级由系统自动读取']) assert(authority.includes(text), text);
+for (const text of ['星级权威版本','rating-v1','星级来源','生效期']) assert(!authority.includes(text), text);
 const payload = {
  issue: {id:'biz-test',teacher:'教师甲',title:'档位与课时费依据',fields:['AE','AF'],fingerprint:'test-v1'},
  field_records: [

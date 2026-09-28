@@ -35,19 +35,73 @@ assert(!staff.includes('长期归属科组'));
 assert(!staff.includes('工资基础'));
 const materials = vm.runInContext('materialsPage()', context);
 assert(materials.includes('学科组提交表'));
-assert(materials.includes('支持部权威工资资料（可选）'));
+assert(materials.includes('支持部工资资料'));
+assert(materials.includes('补充资料（可选）'));
 assert(!materials.includes('历史工资参考'));
+assert(!materials.includes('导入历史工资'));
+assert(!materials.includes('ratingDashboard'));
 assert(!materials.includes('请选择这份资料所属科组'));
 const summary = vm.runInContext('currentTodoSummary()', context);
 assert.equal(summary.pending, 1); // AF rule only; no history/salary/employment todo.
 assert.equal(summary.processed, 0);
 assert.equal(summary.deferred, 0);
 const authority = vm.runInContext('authoritySummary()', context);
-assert(authority.includes('教师星级：已自动应用'));
+assert(authority.includes('教师星级：系统自动应用'));
+assert(!authority.includes('rating-v1'));
+assert(!authority.includes('星级版本'));
 const af = vm.runInContext('afPolicyBlock()', context);
 for (const text of ['本月义务课时规则','普通教师：30 小时','教师甲','教师乙','af-teacher-search','max-height:178px','确认本月规则']) assert(af.includes(text), text);
 assert(!af.includes('salary_basis'));
 '''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_monthly_settings_and_preview_have_no_star_version_or_source_controls():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8').split('(async () => {')[0];
+const view={innerHTML:''};
+const context={document:{querySelector(){return view},querySelectorAll(){return []}},window:{clearTimeout(){},setTimeout(){}},console};
+vm.createContext(context);vm.runInContext(source,context);
+vm.runInContext(`current={id:'run-settings',monthly_flow_version:'SUBMISSION_FIRST_V1',mode:'GENERATE',period:'2026-08',period_authority:{period_start:'2026-08-03',period_end:'2026-08-30'},period_check:{},authority_context:{rating:{version_id:'rating-v1',source:'固定名单',effective_period:'2026-08'}},core_calculation:{rows:[{teacher:'教师甲',star:4,fields:{AE:{value:42,state:'DETERMINED'}}}]},generated_payroll:{rows:[{teacher:'教师甲',star:4,fields:{AE:{value:42,state:'DETERMINED'}}}],status:'NEEDS_CONFIRMATION'},summary:{}};tab='payroll';api=async path=>path==='/api/authorities'?{ratings:[{id:'rating-v1'}],policies:[],rules:[]} : path==='/api/company-template'?[]:{authorities:[]};shell=html=>{view.innerHTML=html};`,context);
+(async()=>{
+ await vm.runInContext(`authorityDashboard('run-settings')`,context);
+ for(const text of ['星级版本','星级来源','ratingDashboard','rating-v1','历史基本工资','导入历史工资'])assert(!view.innerHTML.includes(text),text);
+ vm.runInContext(`current.generated_payroll.rows[0].final_fields={}`,context);
+ const preview=vm.runInContext('payrollPreviewPage()',context);
+ for(const text of ['星级版本','星级来源','ratingDashboard','rating-v1','固定名单'])assert(!preview.includes(text),text);
+ assert(preview.includes('教师星级：系统自动应用'));
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_star_authority_configuration_error_is_admin_notice_not_monthly_todo():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8').split('(async () => {')[0];
+const context={document:{querySelector(){return null},querySelectorAll(){return []}},window:{},console};
+vm.createContext(context);vm.runInContext(source,context);
+vm.runInContext(`current={id:'run-rating-error',monthly_flow_version:'SUBMISSION_FIRST_V1',mode:'GENERATE',period:'2026-08',
+ authority_context:{rating:{binding_status:'ADMIN_CONFIGURATION_ERROR'}},issue_groups:[],user_actions:[],business_decisions:[],decisions:[],
+ period_check:{},period_authority:{},support_department_pending_preview:null,af_policy_confirmation:{confirmed:true},files:{schedule:{}}};`,context);
+const todo=vm.runInContext('currentTodoSummary()',context);
+assert.equal(todo.pending,0);
+const status=vm.runInContext('authoritySummary()',context);
+assert(status.includes('星级名单基础资料需管理员检查'));
+assert(status.includes('无需选择或确认星级名单'));
+assert(!status.includes('星级版本'));
+''';
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -137,11 +191,13 @@ vm.runInContext(`const row={teacher:'教师甲',status:'NEEDS_CONFIRMATION',bloc
  final_fields:{M:{value:null,state:'BLOCKED_BY_INPUT'},AH:{value:0,state:'DETERMINED'},AI:{value:0,state:'DETERMINED'},
  AJ:{value:0,state:'DETERMINED'},AK:{value:0,state:'DETERMINED'},AV:{value:null,state:'MISSING_SOURCE'}}};
  current={id:'run-preview',period:'2026-08',period_label:'2026-08',mode:'GENERATE',generated_payroll:{status:'NEEDS_CONFIRMATION',rows:[row]},
- period_authority:{},period_check:{},authority_context:{rating:{}},summary:{}}; tab='payroll';`, context);
+ period_authority:{period_start:'2026-08-03',period_end:'2026-08-30'},period_check:{},authority_context:{rating:{version_id:'rating-v1',source:'年度星级名单',effective_period:'2026-08'}},summary:{}}; tab='payroll';`, context);
 vm.runInContext(`current.monthly_flow_version='SUBMISSION_FIRST_V1'`, context);
 const simple = vm.runInContext('payrollPreviewPage()', context);
 assert(!simple.includes('兼职按节课时费'));
 assert(!simple.includes('PART_TIME'));
+assert(simple.includes('教师星级：系统自动应用'));
+for(const text of ['rating-v1','年度星级名单','星级版本','星级来源','ratingDashboard'])assert(!simple.includes(text),text);
 vm.runInContext(`delete current.monthly_flow_version`, context);
 const legacy = vm.runInContext('payrollPreviewPage()', context);
 assert(legacy.includes('兼职按节课时费'));

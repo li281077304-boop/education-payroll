@@ -141,6 +141,44 @@ def test_without_submission_full_schedule_population_remains_and_missing_salary_
     assert not nonblank, nonblank[:12]
 
 
+def test_submission_first_rejects_historical_salary_import_paths_without_changing_run(tmp_path: Path) -> None:
+    service, run_id = _run(tmp_path, teachers=["教师甲"])
+    before = service.store.get(run_id)
+    expected = "当前月度工资流程不接收历史工资资料"
+
+    with pytest.raises(ValueError, match=expected):
+        service.preview_base_salary_import(run_id, str(tmp_path / "missing-history.xlsx"))
+    with pytest.raises(ValueError, match=expected):
+        service.stage_historical_salary_reference_preview(run_id, str(tmp_path / "missing-history.xlsx"), "数学组")
+    with pytest.raises(ValueError, match=expected):
+        service.import_base_salary_from_history(
+            run_id, str(tmp_path / "missing-history.xlsx"), "unused-hash", "UAT负责人", selected_group="数学组",
+        )
+    with pytest.raises(ValueError, match=expected):
+        service.use_historical_salary_reference(run_id, "UAT负责人", "unused-hash", "数学组")
+
+    after = service.store.get(run_id)
+    assert after["id"] == before["id"]
+    assert after.get("base_salary_inputs") == before.get("base_salary_inputs")
+    assert not after.get("historical_salary_reference_pending_preview")
+    assert not after.get("historical_salary_reference_snapshots")
+
+
+def test_submission_first_rating_configuration_gap_is_classified_for_administrator(tmp_path: Path) -> None:
+    service, run_id = _run(tmp_path, teachers=["教师甲"])
+    first = service.save_rating_version("2026-08", "2026-08", "合成名单 A", "v1", [{"teacher": "教师甲", "rating": 3}])[0]
+    service.save_rating_version("2026-08", "2026-08", "合成名单 B", "v2", [{"teacher": "教师甲", "rating": 4}])
+    run = service.store.get(run_id)
+    # 两份同月有效名单不被系统或工资 Run 任意挑选。
+    run["rating_version_id"] = None
+    service.store.save(run)
+
+    rendered = service.get(run_id)
+    assert rendered["authority_context"]["rating"]["binding_status"] == "ADMIN_CONFIGURATION_ERROR"
+    assert rendered["authority_context"]["rating"]["version_id"] is None
+    assert first["effective_from"] == "2026-08"
+
+
 def test_confirmed_renewal_snapshot_without_teacher_row_sets_ah_ai_aj_ak_to_zero() -> None:
     snapshot = {
         "version": "RUN_RENEWAL_RESULT_SNAPSHOT/v1",

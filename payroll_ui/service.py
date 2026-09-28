@@ -274,6 +274,11 @@ class PayrollService(CoreFlow):
     def _submission_first(run: dict | None) -> bool:
         return isinstance(run, dict) and run.get("monthly_flow_version") == MONTHLY_FLOW_SUBMISSION_FIRST
 
+    @staticmethod
+    def _reject_historical_salary_input_for_v1(run: dict) -> None:
+        if PayrollService._submission_first(run):
+            raise ValueError("当前月度工资流程不接收历史工资资料；请使用本月学科组提交表或支持部补充资料。")
+
     def __init__(self, root: Path):
         self.root = Path(root)
         self.store = RunStore(self.root)
@@ -3145,6 +3150,7 @@ class PayrollService(CoreFlow):
     def preview_base_salary_import(self, run_id: str, path: str, selected_group: str = "") -> dict:
         """Read a historical workbook once and preview salary + group-membership candidates."""
         run = self._load(run_id)
+        self._reject_historical_salary_input_for_v1(run)
         self._require_fresh(run)
         source = Path(path).expanduser().resolve()
         facts = self._roster_facts(run)
@@ -3185,6 +3191,7 @@ class PayrollService(CoreFlow):
     def stage_historical_salary_reference_preview(self, run_id: str, path: str, selected_group: str) -> dict:
         """Parse a historical workbook once and persist its reviewed candidate for the Todo page."""
         run = self._load(run_id)
+        self._reject_historical_salary_input_for_v1(run)
         self._require_fresh(run)
         source = Path(path).expanduser().resolve()
         before = source_fingerprint(source)
@@ -3338,6 +3345,7 @@ class PayrollService(CoreFlow):
     def import_base_salary_from_history(self, run_id: str, path: str, expected_sha256: str, confirmed_by: str, source_name: str = "", selected_group: str = "", secondary_teacher_ids: list[str] | None = None) -> dict:
         """Persist a historical salary workbook as reference plus confirmed group membership."""
         run = self._load(run_id)
+        self._reject_historical_salary_input_for_v1(run)
         self._require_fresh(run)
         actor = str(confirmed_by or "").strip()
         if not actor:
@@ -3450,6 +3458,7 @@ class PayrollService(CoreFlow):
     def use_historical_salary_reference(self, run_id: str, confirmed_by: str, source_sha256: str, selected_group: str = "") -> dict:
         """Apply the saved historical reference to this Run after explicit confirmation."""
         run = self._load(run_id)
+        self._reject_historical_salary_input_for_v1(run)
         self._require_fresh(run)
         actor = str(confirmed_by or "").strip()
         references = list(run.get("historical_salary_reference_snapshots") or [])
@@ -7665,6 +7674,12 @@ class PayrollService(CoreFlow):
                 "reference_count": 0, "missing_count": len(employment_view.get("teachers", [])), "by_group": {},
             }
         rating = self._rating_version_for_run(run)
+        rating_binding_status = run.get("star_authority_status") or ("BOUND" if rating else "NOT_PROVIDED")
+        if self._submission_first(run):
+            rating_binding_status = (
+                "BOUND" if rating and rating_binding_status not in {"CONFLICT_NEEDS_CONFIRMATION", "VERIFIED_WITH_CONFLICTS"}
+                else "ADMIN_CONFIGURATION_ERROR"
+            )
         policy = self._policy_version_for_run(run)
         schedule = run.get("files", {}).get("schedule")
         class_rules, class_rule_version_id = self._class_type_rules_for_run(run)
@@ -7706,7 +7721,7 @@ class PayrollService(CoreFlow):
                 "schedule": {"label": "排课权威源", "name": schedule.get("name") if schedule else "尚未导入", "sha256": schedule.get("sha256") if schedule else None},
                 "rating": {
                     **self._authority_reference(rating, "教师星级"),
-                    "binding_status": run.get("star_authority_status", "BOUND" if rating else "NOT_PROVIDED"),
+                    "binding_status": rating_binding_status,
                     "conflicts": list(run.get("star_conflicts", [])),
                 },
                 "policy": self._authority_reference(policy, "教师工资政策"),
