@@ -18,6 +18,7 @@ let baseSalaryImportName = "";
 let pendingHistoryReferenceFile = null;
 let pendingHistoryReferenceGroup = "";
 let renewalMaterialPreview = null;
+let quickState = { stage: "upload", result: null, problem: null, uploaded: [] };
 const materialBusy = new Set();
 
 const coreStateLabels = {
@@ -170,7 +171,11 @@ async function api(url, options = {}) {
     const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", "X-Payroll-Token": token, ...options.headers } });
     const type = response.headers.get("content-type") || "";
     const payload = type.includes("json") ? await response.json() : await response.text();
-    if (!response.ok) throw new Error(payload.error || "操作未完成，请稍后重试。");
+    if (!response.ok) {
+      const error = new Error(payload.error || payload.message || "操作未完成，请稍后重试。");
+      error.payload = payload;
+      throw error;
+    }
     return payload;
   } finally {
     if (button && busy) {
@@ -223,8 +228,143 @@ async function home() {
     renewalMaterialPreview = null;
     const today = new Date();
     const defaultPeriod = defaultPayrollPeriod(today);
-    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>新建工资核算</h1><p class="muted">先选择你本次承担的范围。DOS 负责全教学部；学科组长只处理确认属于本组的人。</p></div><div class="create-box"><label for="operator-role">本次使用身份</label><select id="operator-role" required onchange="toggleLeaderGroupChoice()"><option value="" selected>请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅负责科组）</option></select><div id="selected-group-wrap" class="hidden"><strong>负责科组（可多选）</strong><div id="selected-group" class="checkbox-list" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px">${payrollGroups.map((group) => `<label style="display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #dfe3e8;border-radius:7px;background:#fff;font-weight:500"><input type="checkbox" value="${group}" data-run-group style="width:auto;margin:0"> ${group}</label>`).join("")}</div></div><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用该工资月份的人工月 authority。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">核对一份已有工资表</option><option value="GENERATE">生成工资表</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建核算</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
+    shell(`<section class="hero card"><div><p class="eyebrow">开始核算</p><h1>生成本月工资表</h1><p class="muted">常规月份可直接上传资料生成；需要逐项查看时使用专业核算。</p><div class="action-bar"><button onclick="startQuickGenerate()">极速生成工资表</button><button class="secondary" onclick="showProfessionalCreate()">专业核算</button></div></div></section><section id="professional-create" class="card hidden"><h2>专业核算</h2><div class="create-box"><label for="operator-role">本次使用身份</label><select id="operator-role" required onchange="toggleLeaderGroupChoice()"><option value="" selected>请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（仅负责科组）</option></select><div id="selected-group-wrap" class="hidden"><strong>负责科组（可多选）</strong><div id="selected-group" class="checkbox-list" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px">${payrollGroups.map((group) => `<label style="display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #dfe3e8;border-radius:7px;background:#fff;font-weight:500"><input type="checkbox" value="${group}" data-run-group style="width:auto;margin:0"> ${group}</label>`).join("")}</div></div><label for="period">工资月份</label><input id="period" type="month" value="${defaultPeriod}" onchange="duplicateHint()"><details class="advanced-period"><summary>需要时调整排课核算周期</summary><label for="period-start">核算周期开始</label><input id="period-start" type="date"><label for="period-end">核算周期结束</label><input id="period-end" type="date"><p class="small muted">普通核算不需要填写；留空时使用该工资月份的人工月资料。</p></details><label for="mode">这次要做什么</label><select id="mode"><option value="AUDIT">核对一份已有工资表</option><option value="GENERATE">生成工资表</option></select><p id="duplicate-hint" class="small muted"></p><button onclick="createRun()">创建核算</button><button class="secondary full" onclick="authorityDashboard()">基础资料与规则</button></div></section><section class="card history-section"><div class="section-head"><div><p class="eyebrow">继续已有核算</p><h2>历史核算</h2><p class="muted">选择某个月份继续查看材料、核对结果或工资预览；打开时才读取该记录的完整证据。</p></div><span class="muted">${homeRuns.length} 条记录</span></div>${historyList()}</section>`, false);
     duplicateHint();
+  } catch (error) { showMessage(error.message); }
+}
+
+function showProfessionalCreate() {
+  $("#professional-create")?.classList.remove("hidden");
+  $("#professional-create")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+}
+
+function quickRunActive(run = current) {
+  return run?.ui_mode === "QUICK" && run?.monthly_flow_version === "SUBMISSION_FIRST_V1";
+}
+
+async function startQuickGenerate() {
+  try {
+    const created = await api("/api/quick-runs", { method: "POST", body: JSON.stringify({ period: defaultPayrollPeriod() }) });
+    current = created.run || created;
+    quickState = { stage: "upload", result: null, problem: null, uploaded: [] };
+    renderRun();
+  } catch (error) { showMessage(error.message); }
+}
+
+function quickProblemLines(problem) {
+  const entries = Array.isArray(problem?.issues) ? problem.issues : Array.isArray(problem?.summaries) ? problem.summaries : [];
+  return entries.slice(0, 3).map((item) => {
+    const line = String(item?.user_message || item?.summary || (typeof item === "string" ? item : ""));
+    return /[A-Z]{2,}_[A-Z_]+|\/api\/|Traceback|field_records|issue_groups/.test(line) ? "资料需要进一步确认。" : line;
+  }).filter(Boolean);
+}
+
+function quickRunPage() {
+  const result = quickState.result || {};
+  const staged = current?.quick_materials || [];
+  const schedule = quickState.uploaded.some((item) => item.kind === "schedule") || staged.some((item) => item.kind === "schedule") || Boolean(current?.files?.schedule);
+  const groups = Math.max(quickState.uploaded.filter((item) => item.kind === "subject_group").length, staged.filter((item) => item.kind === "subject_group").length, (current?.subject_group_materials || []).filter((item) => item?.active !== false && item?.status !== "REMOVED").length);
+  if (quickState.stage === "working") return `<section class="card" aria-live="polite"><h1>正在生成工资表…</h1><p class="muted">正在识别资料、核算并生成工资表，请稍候。</p></section>`;
+  if (quickState.stage === "success") return `<section class="card" aria-live="polite"><h1>工资表已生成</h1><div class="facts"><span>教师：${escapeHtml(result.teacher_count ?? "—")} 人</span><span>工资月份：${escapeHtml(result.period || current?.period || "—")}</span><span>人工月：${escapeHtml(result.period_start || current?.period_start || "—")} ～ ${escapeHtml(result.period_end || current?.period_end || "—")}</span></div><div class="action-bar"><button onclick="openQuickWorkbook()">打开工资表</button><button class="secondary" onclick="quickOpenProfessional()">查看专业核算详情</button></div></section>`;
+  const problem = quickState.problem;
+  if (quickState.stage === "problem" && problem) {
+    const lines = quickProblemLines(problem);
+    const admin = Boolean(problem.admin_configuration);
+    return `<section class="card" aria-live="polite"><h1>${admin ? "基础资料需要管理员检查" : `这次有 ${escapeHtml(problem.issue_count || lines.length || 1)} 个问题需要确认`}</h1><p class="muted">${escapeHtml(admin ? "请联系管理员处理基础资料配置。" : "暂时不能自动生成，已上传的资料会保留。")}</p>${lines.length ? `<ul>${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>` : ""}<div class="action-bar">${admin ? '<button class="secondary" onclick="home()">返回工作台</button>' : '<button onclick="quickOpenProfessional()">进入专业模式处理</button>'}</div></section>`;
+  }
+  return `<section class="card" aria-live="polite"><h1>一键生成工资表</h1><p class="muted">上传排课表和学科组提交表，系统会自动识别并生成工资表。</p><div id="quick-drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="拖入文件" style="min-height:120px;display:grid;place-items:center" onclick="document.querySelector('#quick-files')?.click()">把资料拖到这里，或点击选择文件</div><input id="quick-files" class="sr-only" type="file" multiple accept=".xls,.xlsx,.xlsm,.csv" onchange="uploadQuickFiles(event.target.files)"><div class="facts"><span>排课表：${schedule ? "已识别" : "待上传"}</span><span>学科组提交表：${groups ? `已识别 ${groups} 份` : "尚未提供"}</span></div>${schedule && !groups ? '<p class="small muted">未提供学科组提交表，将按全部排课教师生成，B～L 保持空白。</p>' : ""}<div class="action-bar"><button ${schedule ? "" : "disabled"} onclick="quickGenerate()">生成工资表</button></div></section>`;
+}
+
+function bindQuickDropZone() {
+  const zone = $("#quick-drop-zone");
+  if (!zone) return;
+  zone.addEventListener("dragover", (event) => { event.preventDefault(); zone.style.borderColor = "#1f6feb"; });
+  zone.addEventListener("dragleave", () => { zone.style.borderColor = ""; });
+  zone.addEventListener("drop", (event) => {
+    event.preventDefault(); zone.style.borderColor = "";
+    uploadQuickFiles(event.dataTransfer?.files || []);
+  });
+  zone.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); $("#quick-files")?.click(); } });
+}
+
+async function uploadQuickFiles(files) {
+  if (!current?.id || quickState.stage === "working") return;
+  const selected = [...files];
+  if (!selected.length) return;
+  quickState.stage = "working"; renderRun();
+  try {
+    const uploadedFiles = [];
+    for (const file of selected) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const uploaded = await api("/api/upload", { method: "POST", body: JSON.stringify({ name: file.name, content_base64: bytesToBase64(bytes) }) });
+      uploadedFiles.push({ name: file.name, path: uploaded.path });
+    }
+    const result = await api(`/api/quick-runs/${current.id}/materials`, {
+      method: "POST", body: JSON.stringify({ paths: uploadedFiles.map((item) => item.path) }),
+    });
+    if (result.run) current = result.run;
+    const materials = result.materials || [];
+    quickState.uploaded.push(...uploadedFiles.map((file, index) => ({
+      name: file.name,
+      kind: materials[index]?.detected_kind || materials[index]?.kind || materials[index]?.professional_kind || "",
+    })));
+    const failed = materials.find((item) => item?.ok === false);
+    if (result.ok === false || failed) {
+      quickState.stage = "problem";
+      quickState.problem = failed || result;
+      quickState.problem.run_id = current.id;
+      quickState.problem.issues ||= [quickState.problem.message || "这份资料请进入专业核算使用。"];
+      renderRun();
+      return;
+    }
+    quickState.stage = "upload"; renderRun();
+  } catch (error) {
+    quickState.stage = "problem";
+    quickState.problem = error.payload || { issues: [{ message: error.message }] };
+    renderRun();
+  }
+}
+
+async function quickGenerate() {
+  if (!current?.id || quickState.stage === "working") return;
+  quickState.stage = "working"; renderRun();
+  try {
+    const result = await api(`/api/quick-runs/${current.id}/generate`, { method: "POST", body: "{}" });
+    if (result.run) current = result.run;
+    if (result.ok === false) { quickState.stage = "problem"; quickState.problem = result; }
+    else { quickState.stage = "success"; quickState.result = result; }
+    renderRun();
+  } catch (error) {
+    quickState.stage = "problem";
+    quickState.problem = error.payload || { issues: [{ message: error.message }] };
+    renderRun();
+  }
+}
+
+async function quickOpenProfessional() {
+  if (!current?.id) return;
+  try {
+    const result = await api(`/api/quick-runs/${current.id}/professional`, { method: "POST", body: "{}" });
+    current = result.run || result;
+    current.ui_mode = "PROFESSIONAL";
+    tab = "materials";
+    renderRun();
+  } catch (error) { showMessage(error.message); }
+}
+
+async function openQuickWorkbook() {
+  if (!current?.id || !quickState.result) return;
+  const url = quickState.result.download_url || `/api/quick-runs/${current.id}/download`;
+  try {
+    const response = await fetch(url, { headers: { "X-Payroll-Token": token } });
+    if (!response.ok) throw new Error("工资表暂时无法打开，请在专业核算中查看导出结果。");
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = objectUrl;
+    anchor.download = `工资表-${quickState.result.period || current.period}.xlsx`;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
   } catch (error) { showMessage(error.message); }
 }
 
@@ -560,6 +700,20 @@ async function openRun(id) {
       pendingHistoryReferenceGroup = "";
     }
     current = await api(`/api/runs/${id}`);
+    if (quickRunActive(current)) {
+      const saved = current.generated_payroll || {};
+      const completed = Boolean(saved.path) && !runNeedsRecalculation(current);
+      quickState = {
+        stage: completed ? "success" : "upload", problem: null, uploaded: [],
+        result: completed ? {
+          path: saved.path, teacher_count: (saved.rows || []).length,
+          period: current.period, period_start: current.period_start, period_end: current.period_end,
+          download_url: `/api/quick-runs/${current.id}/download`,
+        } : null,
+      };
+      renderRun();
+      return;
+    }
     tab = current.status === "STALE" || current.status === "DRAFT" || current.status === "FILES_READY" ? "materials" : (current.issue_groups || []).length ? "issues" : (current.generated_payroll || (current.mode === "GENERATE" && current.core_calculation?.rows?.length)) ? "payroll" : "materials";
     renderRun();
   } catch (error) { showMessage(error.message); }
@@ -724,6 +878,11 @@ function reconfirmationBanner(run) {
 }
 
 function renderRun() {
+  if (quickRunActive()) {
+    shell(quickRunPage(), false);
+    bindQuickDropZone();
+    return;
+  }
   if (current.operator_selection_required) {
     const heading = '<div class="run-title"><div><p class="eyebrow">历史核算流程升级</p><h1>旧流程记录</h1><div class="small muted">请选择处理角色后继续；此操作只保存流程信息，不会重新核算或改写历史工资结果。</div></div></div>';
     shell(`${heading}<section class="card"><div class="banner info"><strong>旧流程记录，请选择按 DOS 或学科组长继续。</strong><span>确认角色前不会进入新流程。</span></div><label>继续使用<select id="legacy-run-operator" onchange="toggleLegacyRunGroup()"><option value="">请选择角色</option><option value="DOS">DOS / 教学管理者（全教学部）</option><option value="SUBJECT_LEADER">学科组长（负责一个或多个科组）</option></select></label><div id="legacy-run-group-wrap" class="hidden"><strong>负责科组（可多选）</strong><div id="legacy-run-group" class="checkbox-list" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px">${payrollGroups.map((group) => `<label style="display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #dfe3e8;border-radius:7px;background:#fff;font-weight:500"><input type="checkbox" value="${group}" data-legacy-run-group style="width:auto;margin:0"> ${group}</label>`).join("")}</div></div><label>确认人<input id="legacy-run-confirmed-by" placeholder="填写确认人姓名"></label><div class="action-bar"><button onclick="saveLegacyRunOperator()">保存角色并继续</button><span class="small muted">现有历史结果保留；需由你之后主动点击“开始核算”才会生成新范围结果。</span></div></section>`);
@@ -1430,7 +1589,40 @@ function materialsPage() {
     return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">导入排课资料和学科组提交表；续费、退费及支持部资料可按本月实际情况补充。</p></div></div><div class="material-grid">${productionMaterialCards()}</div>${salaryMaterialsModule()}${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>${escapeHtml(warning)}</p>`).join("")}</div>` : ""}</section>`;
   }
   const warnings = [...new Set(current.health.warnings || [])];
-  return `<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入当前人工月排课表、学科组资料和工资来源。确认、选择与暂缓全部进入待处理问题页；本步不启动完整核算。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="批量识别辅助资料" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>批量识别辅助资料（可选）</strong><span>可辅助读取排课、续费、退费、星级等资料；工资资料和学科组提交表仍需在对应区域逐份确认。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择辅助资料文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${salaryMaterialsModule()}${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>材料待补：</strong>${current.health.missing.map(escapeHtml).join("、")}` : "材料状态已保存；请继续确认本次教师名单与归属。"}</div><button class="secondary" onclick="refreshRun()">重新检查材料</button></div></section>`;
+  return `${quickStagedProfessionalMaterials()}<section class="card"><div class="section-head"><div><p class="eyebrow">第 1 步</p><h2>准备核算材料</h2><p class="muted">先导入当前人工月排课表、学科组资料和工资来源。确认、选择与暂缓全部进入待处理问题页；本步不启动完整核算。</p></div><strong class="readiness">${current.health.readiness}%</strong></div><div class="package-drop" data-drop-role="package" tabindex="0" role="button" aria-label="批量识别辅助资料" style="border:1px dashed #b9c4cf;border-radius:8px;padding:14px;text-align:center;color:#68717d;background:#fbfcfd;cursor:pointer"><strong>批量识别辅助资料（可选）</strong><span>可辅助读取排课、续费、退费、星级等资料；工资资料和学科组提交表仍需在对应区域逐份确认。</span></div><div class="action-bar"><button data-action="choose-package" onclick="choosePackage()">选择辅助资料文件夹</button><span class="muted small">选择按钮仅作为备用入口，不影响拖拽和粘贴。</span></div><div class="material-grid">${productionMaterialCards()}</div>${salaryMaterialsModule()}${warnings.length ? `<div class="warning-list"><strong>材料提示</strong>${warnings.map((warning) => `<p>⚠ ${escapeHtml(warning)}</p>`).join("")}</div>` : ""}<div class="action-bar"><div>${current.health.missing.length ? `<strong>材料待补：</strong>${current.health.missing.map(escapeHtml).join("、")}` : "材料状态已保存；请继续确认本次教师名单与归属。"}</div><button class="secondary" onclick="refreshRun()">重新检查材料</button></div></section>`;
+}
+
+function quickStagedProfessionalMaterials() {
+  const staged = (current.quick_materials || []).filter((item) => {
+    if (item.transferred_to_professional) return false;
+    const sha = item.sha256 || "";
+    if (item.kind === "schedule" && current.files?.schedule?.sha256 === sha) return false;
+    if (item.kind === "subject_group" && (current.subject_group_materials || []).some((entry) => (entry.source_sha256 || entry.sha256) === sha && entry.status !== "REMOVED_FROM_RUN")) return false;
+    if (item.professional_kind === "support" && ((current.support_department_pending_preview || {}).source_sha256 === sha || (current.support_department_snapshot || {}).source_sha256 === sha)) return false;
+    if (item.professional_kind === "renewal" && current.material_inputs?.renewal?.sha256 === sha) return false;
+    if (item.professional_kind === "refund" && current.material_inputs?.refund?.sha256 === sha) return false;
+    return true;
+  });
+  if (!staged.length) return "";
+  return `<section class="card"><h2>极速模式已上传的资料</h2><p class="small muted">原文件仍保存在本次核算中，可直接选择专业流程入口导入，不需要重新上传。</p>${staged.map((item, index) => `<div class="file-name"><strong>${escapeHtml(item.name || "已上传资料")}</strong><span class="small muted">${escapeHtml(item.transfer_reason || "尚未进入专业材料流程")}</span><select id="quick-staged-kind-${index}"><option value="schedule">排课表</option><option value="subject_group">学科组提交表</option><option value="renewal">续费表</option><option value="refund">退费表</option><option value="support">支持部工资资料</option></select><button class="secondary" onclick="importQuickStagedProfessional('${escapeHtml(item.sha256 || "")}', ${index})">导入这份已上传资料</button></div>`).join("")}</section>`;
+}
+
+async function importQuickStagedProfessional(sha256, index) {
+  const item = (current.quick_materials || []).find((entry) => entry.sha256 === sha256);
+  const kind = document.getElementById(`quick-staged-kind-${index}`)?.value || "";
+  if (!item?.path || !kind) return showMessage("找不到已上传的资料，请刷新本次核算。", "error");
+  try {
+    if (kind === "support") {
+      const result = await api(`/api/runs/${current.id}/support-preview`, { method: "POST", body: JSON.stringify({ path: item.path }) });
+      current = result.run || result;
+    } else {
+      await importMaterialPath(kind, item.path);
+      return;
+    }
+    current = await api(`/api/runs/${current.id}`);
+    renderRun();
+    showMessage("已将原上传资料导入专业核算。", "success");
+  } catch (error) { await refreshAfterError(error); }
 }
 
 function salaryMaterialsModule() {

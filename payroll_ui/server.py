@@ -125,6 +125,18 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.list())
             if parsed.path == "/api/runs/index":
                 return self._json(self.server.service.list_index())
+            if parsed.path.startswith("/api/quick-runs/") and parsed.path.endswith("/download"):
+                bits = parsed.path.strip("/").split("/")
+                if len(bits) != 4:
+                    return self._error("找不到该工资表。", HTTPStatus.NOT_FOUND)
+                path = self.server.service.quick_download_path(bits[2])
+                body = path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Disposition", 'attachment; filename="payroll.xlsx"')
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers(); self.wfile.write(body); return
             if parsed.path == "/api/business-inputs":
                 query = parse_qs(parsed.query)
                 return self._json(self.server.service.business_inputs(query.get("period", [""])[0], query.get("status", [""])[0]))
@@ -240,6 +252,34 @@ class PayrollHandler(SimpleHTTPRequestHandler):
             return self._error("本地会话已失效，请刷新页面。", HTTPStatus.FORBIDDEN)
         try:
             payload = self._payload(); path = urlparse(self.path).path
+            if path == "/api/quick-runs":
+                return self._json(self.server.service.create_quick_run(str(payload.get("period", ""))), HTTPStatus.CREATED)
+            if path.startswith("/api/quick-runs/"):
+                bits = path.strip("/").split("/")
+                if len(bits) != 4:
+                    return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)
+                run_id, action = bits[2], bits[3]
+                if action == "materials":
+                    paths = payload.get("paths")
+                    if paths is not None:
+                        if not isinstance(paths, list) or not paths:
+                            raise ValueError("请至少选择一份材料。")
+                        results = []
+                        for item in paths:
+                            try:
+                                result = self.server.service.stage_quick_material(run_id, str(item))
+                                results.append({key: value for key, value in result.items() if key != "run"})
+                            except (ValueError, OSError) as exc:
+                                results.append({"ok": False, "error_kind": "PROFESSIONAL_REQUIRED",
+                                                "message": str(exc), "issues": [str(exc)]})
+                        return self._json({"run": self.server.service.get(run_id), "materials": results,
+                                           "ok": all(item.get("ok", True) for item in results)})
+                    return self._json(self.server.service.stage_quick_material(run_id, str(payload.get("path", ""))))
+                if action == "generate":
+                    return self._json(self.server.service.quick_generate(run_id))
+                if action == "professional":
+                    return self._json(self.server.service.quick_to_professional(run_id))
+                return self._error("找不到该操作。", HTTPStatus.NOT_FOUND)
             if path == "/api/runs":
                 operator_role = str(payload.get("operator_role") or "").strip()
                 if not operator_role:

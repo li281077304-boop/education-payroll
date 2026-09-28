@@ -66,7 +66,7 @@ from payroll_core.employment import (
 from payroll_core.adapters.business_results import read_business_result
 from payroll_core.excel.standard_payroll_render import is_payroll_template, render_generated_payroll
 from payroll_core.excel.output_paths import default_output_dir, describe_location, safe_output_path
-from payroll_core.excel.inspect import inspect_workbook
+from payroll_core.excel.inspect import inspect_workbook, load_workbook_pair
 from payroll_core.excel.payroll import read_payroll_excel
 from payroll_core.excel.schedule import read_schedule_excel
 from payroll_core.adapters.payroll_sheet import read_payroll_csv
@@ -1268,6 +1268,253 @@ class PayrollService(CoreFlow):
         run["last_error"] = ""
         self.store.save(run)
         return {"run": self.render(run), "material_kind": kind, "recognized_role": kind, "records": len(reports)}
+
+    # Quick mode only sequences existing Run operations.  It never calculates
+    # a payroll field or changes the submission-first source priority.
+    def create_quick_run(self, period: str) -> dict:
+        rendered = self.create(period, MODE_GENERATE, operator_role=OPERATOR_DOS,
+                               monthly_flow_version=MONTHLY_FLOW_SUBMISSION_FIRST)
+        run = self._load(rendered["id"])
+        run["ui_mode"] = "QUICK"
+        run["quick_materials"] = []
+        self.store.save(run)
+        return {"run": self.render(run), "ui_mode": "QUICK"}
+
+    def _quick_run(self, run_id: str) -> dict:
+        run = self._load(run_id)
+        if (run.get("ui_mode") != "QUICK" or run.get("mode") != MODE_GENERATE
+                or not self._submission_first(run)):
+            raise ValueError("这不是极速生成记录，请进入专业核算。")
+        return run
+
+    def stage_quick_material(self, run_id: str, path: str) -> dict:
+        run = self._quick_run(run_id)
+        source = Path(path).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError("找不到这份材料，请重新拖入文件。")
+        # Use the same workbook fingerprint and normalized CSV adapters as the
+        # ordinary auto-import path; no quick-specific worksheet parser exists.
+        kind = "professional_required"
+        professional_kind = ""
+        if source.suffix.lower() == ".csv":
+            for candidate, role in (("schedule", "schedule"), ("subject_group", "math")):
+                try:
+                    if self._read_csv(role, source, run["period"]).records:
+                        kind = candidate
+                        break
+                except ValueError:
+                    pass
+            if kind == "professional_required":
+                if read_renewal_report(source, run["period"]).records:
+                    professional_kind = "renewal"
+                elif read_refund_report(source, run["period"]):
+                    professional_kind = "refund"
+        else:
+            inspection = inspect_workbook(source)
+            layout = inspection.records[0].fingerprint.layout if inspection.records else ""
+            raw_book, _cached_book = load_workbook_pair(source)
+            title_markers = {
+                str(cell.value or "").strip()
+                for sheet in raw_book.worksheets
+                for row in sheet.iter_rows(min_row=1, max_row=min(4, sheet.max_row), max_col=min(8, sheet.max_column))
+                for cell in row
+                if isinstance(cell.value, str)
+            }
+            has_support_title = any("教学部薪资表" in value or "支持部提供" in value for value in title_markers)
+            if has_support_title:
+                professional_kind = "support"
+            elif layout == LAYOUTS["schedule"]:
+                kind = "schedule"
+            elif layout == LAYOUTS["math"]:
+                parsed_group = self._read_for_run("math", source, run)
+                group_roster = [{"display_name": str(item.teacher), "teacher_id": str(getattr(item, "teacher_id", "") or item.teacher)}
+                                for item in parsed_group.records]
+                support_preview = preview_support_department(source, run["period"], group_roster)
+                support_codes = {"AO", "AP", "AQ", "AR", "AT", "AU"}
+                source_support_codes = {str(item.get("final_field") or "") for item in support_preview.get("field_map", [])
+                                        if str(item.get("final_field") or "") in support_codes and item.get("source_column")}
+                has_support_values = any(
+                    isinstance(row.get("items"), dict)
+                    and any(row["items"].get(code) not in (None, "") for code in support_codes)
+                    for row in support_preview.get("rows", [])
+                )
+                has_support_comments = any(str(item.get("field_code") or "") in support_codes
+                                           for row in support_preview.get("rows", [])
+                                           for item in row.get("annotations", []))
+                if has_support_title or (source_support_codes and (has_support_values or has_support_comments)):
+                    professional_kind = "support"
+                elif parsed_group.records and not parsed_group.errors:
+                    kind = "subject_group"
+            else:
+                if self._monthly_renewal_rows(source, run["period"]):
+                    professional_kind = "renewal"
+                elif read_refund_report(source, run["period"]):
+                    professional_kind = "refund"
+        if kind == "professional_required":
+            if not professional_kind:
+                # Keep the browser-uploaded path with this Run even though the
+                # quick recognizer cannot classify it. Professional mode can
+                # then inspect/import the same local copy without re-upload.
+                fingerprint = version(source)
+                staged = list(run.get("quick_materials") or [])
+                material = {"kind": "PROFESSIONAL_REQUIRED", "professional_kind": "",
+                            "name": source.name, "path": str(source), **fingerprint}
+                if not any(item.get("sha256") == fingerprint["sha256"] for item in staged):
+                    staged.append(material)
+                    run["quick_materials"] = staged
+                    self.store.save(run)
+                return {**self._quick_failure(run_id, "PROFESSIONAL_REQUIRED",
+                                               "这份资料请进入专业核算使用。"),
+                        "run": self.render(run), "detected_kind": kind,
+                        "material": {"name": source.name, "state": "待专业模式识别", "kind": kind}}
+        if professional_kind:
+            fingerprint = version(source)
+            staged = list(run.get("quick_materials") or [])
+            material = {"kind": "PROFESSIONAL_REQUIRED", "professional_kind": professional_kind,
+                        "name": source.name, "path": str(source), **fingerprint}
+            if not any(item.get("sha256") == fingerprint["sha256"] for item in staged):
+                staged.append(material)
+                run["quick_materials"] = staged
+                self.store.save(run)
+            return {**self._quick_failure(run_id, "PROFESSIONAL_REQUIRED",
+                                           "这份资料请进入专业核算使用。"),
+                    "run": self.render(run), "detected_kind": "professional_required",
+                    "professional_kind": professional_kind,
+                    "material": {"name": source.name, "state": "待专业流程导入", "kind": professional_kind}}
+        fingerprint = version(source)
+        existing = list(run.get("quick_materials") or [])
+        if kind == "schedule" and any(item.get("kind") == "schedule" and item.get("sha256") != fingerprint["sha256"] for item in existing):
+            material = {"kind": "PROFESSIONAL_REQUIRED", "professional_kind": "",
+                        "name": source.name, "path": str(source), **fingerprint,
+                        "transfer_reason": "极速模式一次只接受一份排课表；原文件已保留，可在专业模式选择。"}
+            if not any(item.get("sha256") == fingerprint["sha256"] for item in existing):
+                existing.append(material)
+                run["quick_materials"] = existing
+                self.store.save(run)
+            return {**self._quick_failure(run_id, "PROFESSIONAL_REQUIRED",
+                                           "检测到多份排课表，请进入专业核算选择本次使用的课表。"),
+                    "run": self.render(run), "detected_kind": "professional_required",
+                    "material": {"name": source.name, "state": "待专业模式选择", "kind": "professional_required"}}
+        material = {"kind": kind, "name": source.name, "path": str(source), **fingerprint}
+        if not any(item.get("kind") == kind and item.get("sha256") == fingerprint["sha256"] for item in existing):
+            existing.append(material)
+            run["quick_materials"] = existing
+            self.store.save(run)
+        return {"run": self.render(run), "detected_kind": kind,
+                "material": {"name": source.name, "state": "已识别", "kind": kind}}
+
+    @staticmethod
+    def _quick_failure(run_id: str, kind: str, message: str, issues: list[str] | None = None) -> dict:
+        return {"ok": False, "run_id": run_id, "error_kind": kind, "message": message,
+                "issues": (issues or [message])[:3], "admin_configuration": kind == "ADMIN_CONFIGURATION_ERROR"}
+
+    def quick_generate(self, run_id: str) -> dict:
+        run = self._quick_run(run_id)
+        staged = list(run.get("quick_materials") or [])
+        schedules = [item for item in staged if item.get("kind") == "schedule"]
+        if len(schedules) != 1:
+            return self._quick_failure(run_id, "MISSING_SCHEDULE", "请先上传一份排课表。")
+        # Star versions are system configuration, not a monthly employee task.
+        ratings = [item for item in self.store.list_rating_versions()
+                   if item.get("status", "ACTIVE") == "ACTIVE"
+                   and item["effective_from"] <= run["period"] <= item["effective_to"]]
+        if len(ratings) != 1:
+            return self._quick_failure(run_id, "ADMIN_CONFIGURATION_ERROR",
+                                       "该月份的教师星级基础资料需要管理员检查，暂时不能生成工资表。")
+        try:
+            for item in schedules + [item for item in staged if item.get("kind") == "subject_group"]:
+                source = Path(str(item["path"]))
+                if not source.is_file() or version(source)["sha256"] != item["sha256"]:
+                    raise ValueError(f"{item['name']} 已发生变化，请重新上传。")
+                current = self._load(run_id)
+                if item["kind"] == "schedule":
+                    already = (current.get("files") or {}).get("schedule") or {}
+                    if already.get("sha256") == item["sha256"]:
+                        continue
+                elif any(material.get("source_sha256") == item["sha256"] for material in self._active_subject_group_materials(current)):
+                    continue
+                self.import_material_file(run_id, "auto", str(source))
+            current = self._load(run_id)
+            if not (current.get("af_policy_confirmation") or {}).get("confirmed"):
+                self.confirm_af_policy(run_id, "QUICK_GENERATE", default_obligation_hours=30, exceptions={})
+            checked = self.check(run_id)
+            generated = checked.get("generated_payroll") or {}
+            conflicts = list(checked.get("subject_group_source_conflicts") or [])
+            if conflicts:
+                details = [f"{item.get('teacher', '教师')} 在两份提交表中的 {item.get('field_label') or item.get('field') or '工资资料'} 不一致。" for item in conflicts]
+                return self._quick_failure(run_id, "NEEDS_PROFESSIONAL_REVIEW", "这次有资料冲突需要确认，暂时不能自动生成。", details)
+            critical_fields = ("AA", "AC", "AD", "AE", "AF")
+            incomplete_core = [f"{row.get('teacher', '教师')} 的 {code} 尚无法确定。"
+                               for row in (checked.get("core_calculation") or {}).get("rows") or []
+                               for code in critical_fields
+                               if (row.get("fields") or {}).get(code, {}).get("state") not in {"DETERMINED", "NOT_APPLICABLE"}]
+            period_blockers = [str(item) for item in generated.get("blockers") or []
+                               if str(item).startswith("PERIOD_")]
+            if incomplete_core or period_blockers or not generated.get("rows"):
+                return self._quick_failure(run_id, "NEEDS_PROFESSIONAL_REVIEW",
+                                           "这次有问题需要确认，暂时不能自动生成工资表。",
+                                           incomplete_core or period_blockers)
+            output = self.generate_payroll(run_id, "", production=True)
+            current = self._load(run_id)
+            target = Path(str(output.get("path") or ""))
+            if not target.is_file():
+                return self._quick_failure(run_id, "EXPORT_FAILED", "工资表没有成功保存，请进入专业核算查看。")
+            return {"ok": True, "run_id": run_id, "path": str(target), "download_url": f"/api/quick-runs/{run_id}/download",
+                    "period": current["period"], "period_start": current.get("period_start"),
+                    "period_end": current.get("period_end"), "teacher_count": len(output.get("rows") or [])}
+        except (ValueError, OSError) as exc:
+            return self._quick_failure(run_id, "NEEDS_PROFESSIONAL_REVIEW", str(exc))
+
+    def quick_to_professional(self, run_id: str) -> dict:
+        run = self._quick_run(run_id)
+        staged = list(run.get("quick_materials") or [])
+        transfer_errors = []
+        for item in sorted(staged, key=lambda value: 0 if value.get("kind") == "schedule" else 1 if value.get("kind") == "subject_group" else 2):
+            source = Path(str(item.get("path") or ""))
+            if not source.is_file() or version(source).get("sha256") != item.get("sha256"):
+                transfer_errors.append(f"{item.get('name') or '一份资料'} 已发生变化，请在专业模式重新选择修正版。")
+                continue
+            try:
+                if item.get("kind") == "schedule":
+                    if (self._load(run_id).get("files") or {}).get("schedule", {}).get("sha256") != item.get("sha256"):
+                        self.import_file(run_id, "schedule", str(source))
+                    item["transferred_to_professional"] = True
+                elif item.get("kind") == "subject_group":
+                    if not any(material.get("source_sha256") == item.get("sha256") for material in self._active_subject_group_materials(self._load(run_id))):
+                        self.import_material_file(run_id, "auto", str(source))
+                    item["transferred_to_professional"] = True
+                elif item.get("kind") == "PROFESSIONAL_REQUIRED":
+                    kind = str(item.get("professional_kind") or "")
+                    if kind in {"renewal", "refund"}:
+                        self.import_material_file(run_id, kind, str(source))
+                        item["transferred_to_professional"] = True
+                    elif kind == "support":
+                        self.stage_support_department_preview(run_id, str(source))
+                        item["transferred_to_professional"] = True
+                    else:
+                        item["transferred_to_professional"] = False
+                        item["transfer_reason"] = "专业模式仍需确认该资料类型；原文件已保留在本次核算记录中。"
+            except (ValueError, OSError) as exc:
+                transfer_errors.append(f"{item.get('name') or '一份资料'}：{str(exc)}")
+                item["transferred_to_professional"] = False
+                item["transfer_reason"] = str(exc)
+        run = self._load(run_id)
+        if transfer_errors:
+            run["quick_transfer_errors"] = transfer_errors[:3]
+        run["ui_mode"] = "PROFESSIONAL"
+        run["quick_materials"] = staged
+        self.store.save(run)
+        return {"run": self.render(run)}
+
+    def quick_download_path(self, run_id: str) -> Path:
+        run = self._load(run_id)
+        if run.get("ui_mode") != "QUICK" or run.get("monthly_flow_version") != MONTHLY_FLOW_SUBMISSION_FIRST:
+            raise ValueError("该工资表不属于极速生成记录。")
+        output = run.get("generated_payroll") or {}
+        path = Path(str(output.get("path") or ""))
+        if not output.get("path") or not path.is_file() or path.suffix.lower() != ".xlsx":
+            raise ValueError("工资表尚未生成，请先完成生成。")
+        return path
 
     def preview_renewal_material(self, run_id: str) -> dict:
         """Classify source matches separately from roster teachers with no row."""
