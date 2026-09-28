@@ -3481,14 +3481,26 @@ class PayrollService(CoreFlow):
         if run.get("operator_role") and run.get("part_time_payroll_mode") not in (None, "", "LEGACY_COMPATIBILITY"):
             raise ValueError("当前 Run 已有正式流程角色，无需重复选择。")
         now = datetime.now(timezone.utc).isoformat()
+        old_role = str(run.get("operator_role") or "")
+        old_groups = self._selected_groups(run)
+        invalidated = self._invalidate_active_calculation(
+            run,
+            event="LEGACY_RUN_ROLE_SCOPE_CHANGED",
+            reason="旧 Run 已切换到新的 DOS / 学科组长处理范围；原计算结果已归档，需要由用户重新开始核算。",
+            actor=actor,
+            metadata={"previous_operator_role": old_role, "previous_selected_groups": old_groups,
+                      "operator_role": role, "selected_groups": groups},
+        )
         run.update({
             "operator_role": role, "selected_group": group, "selected_groups": groups,
             "part_time_payroll_mode": "GROUP_SUBMISSION_ONLY",
             "workflow_role_selected_by": actor, "workflow_role_selected_at": now,
             "workflow_role_migration": "LEGACY_RUN_EXPLICIT_SELECTION/v1",
         })
-        if run.get("core_calculation") or run.get("generated_payroll"):
+        if invalidated:
             run["role_scope_recalculation_required"] = True
+        self._ensure_legacy_subject_group_pending(run)
+        run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
         self.store.save(run)
         return self.render(run, persist_roster=False)
 
@@ -6922,7 +6934,7 @@ class PayrollService(CoreFlow):
         return output
 
     def _invalidate_active_calculation(self, run: dict, *, event: str, reason: str,
-                                       actor: str = "", metadata: dict | None = None) -> None:
+                                       actor: str = "", metadata: dict | None = None) -> bool:
         """Archive and retire calculated results after a population/input change.
 
         Saving a scope or salary-basis decision must never leave the previous
@@ -6942,7 +6954,7 @@ class PayrollService(CoreFlow):
             or run.get("status") in {"PASS", "REVIEW_REQUIRED"}
         )
         if not has_calculation_context:
-            return
+            return False
         now = datetime.now(timezone.utc).isoformat()
         run.setdefault("calculation_invalidation_history", []).append({
             "event": event,
@@ -6988,6 +7000,7 @@ class PayrollService(CoreFlow):
         run["recalculation_required_reason"] = reason
         run["status"] = "FILES_READY" if self._materials_ready(run) else "DRAFT"
         run.pop("last_error", None)
+        return True
 
     @staticmethod
     def _summary(checks: list[FieldCheck]) -> dict:

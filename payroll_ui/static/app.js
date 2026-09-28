@@ -595,7 +595,7 @@ function actionKeyForCause(cause) {
 }
 
 function currentTodoSummary() {
-  const groups = current?.issue_groups || [];
+  const groups = runNeedsRecalculation(current) ? [] : (current?.issue_groups || []);
   const pendingGroups = groups.filter(groupHasPendingUserAction);
   const pendingGroupIds = new Set(pendingGroups.map((item) => item.id));
   const pendingKeys = new Set();
@@ -690,6 +690,7 @@ function currentTodoSummary() {
     processedKeys.delete(key);
   }
   for (const key of pendingKeys) processedKeys.delete(key);
+  if (runNeedsRecalculation(current) && pendingKeys.size === 0) pendingKeys.add("recalculate");
 
   return { pending: pendingKeys.size, processed: processedKeys.size, deferred: deferredKeys.size };
 }
@@ -1952,6 +1953,7 @@ function issueResultState() {
 }
 
 function issueResultsMarkup() {
+  if (runNeedsRecalculation(current)) return '<p class="small muted">当前问题清单将在你开始核算后生成。</p>';
   const { groups, rows, actions, fieldCount } = issueResultState();
   const issueTable = (items) => items.length ? `<div class="table-wrap"><table class="table issues"><thead><tr><th>程度</th><th>问题</th><th>教师</th><th>影响字段</th><th>系统值</th><th>工资表值</th><th>差异</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>${items.map(issueRow).join("")}</tbody></table></div>` : '<div class="empty">当前筛选条件下没有问题。</div>';
   const groupsById = new Map(rows.map((group) => [group.id, group]));

@@ -400,7 +400,7 @@ def test_joint_history_reference_requires_owned_group_per_file(tmp_path):
     assert service.store.get(run_id)["historical_salary_reference_pending_preview"]["selected_group"] == "数学组"
 
 
-def test_legacy_role_selection_accepts_multiple_groups_without_rewriting_old_result(tmp_path, monkeypatch):
+def test_legacy_role_selection_archives_old_result_and_accepts_multiple_groups(tmp_path, monkeypatch):
     service = PayrollService(tmp_path / "data")
     created = service.create("2026-08", "GENERATE")
     old = service.store.get(created["id"])
@@ -415,7 +415,48 @@ def test_legacy_role_selection_accepts_multiple_groups_without_rewriting_old_res
 
     assert selected["selected_groups"] == ["数学组", "理化组"]
     assert selected["selected_group"] == ""
-    assert selected["generated_payroll"]["rows"][0]["final"] == 100
+    assert "generated_payroll" not in selected
+    assert selected["recalculation_required"] is True
+    assert selected["calculation_invalidation_history"][-1]["event"] == "LEGACY_RUN_ROLE_SCOPE_CHANGED"
+    assert selected["calculation_invalidation_history"][-1]["previous_generated_payroll"]["rows"][0]["final"] == 100
+
+
+def test_legacy_run_archives_old_result_then_explicit_check_creates_new_result(tmp_path, monkeypatch):
+    service = PayrollService(tmp_path / "data")
+    created = service.create("2026-08", "GENERATE", operator_role="DOS")
+    service.import_file(created["id"], "schedule", str(_schedule(tmp_path / "migration-schedule.csv", [
+        ("math-id", "数学教师", "数学"),
+    ])))
+    service.confirm_staff_batch(created["id"], "负责人", group_updates=[{"teacher_id": "math-id", "group": "数学组"}])
+    legacy = service.store.get(created["id"])
+    legacy.pop("operator_role")
+    legacy.pop("part_time_payroll_mode")
+    legacy["core_calculation"] = {"rows": [{"teacher": "旧名单教师"}]}
+    legacy["generated_payroll"] = {"rows": [{"teacher": "旧名单教师", "final": 345}]}
+    legacy["processing_scope_snapshot"] = {"teachers": ["旧名单教师"]}
+    legacy["field_records"] = [{"teacher": "旧名单教师", "field": "old"}]
+    legacy["issue_groups"] = [{"id": "old-group", "teacher": "旧名单教师"}]
+    legacy["audit_context"] = {"scope": ["旧名单教师"]}
+    service.store.save(legacy)
+    monkeypatch.setattr(service, "check", lambda _run_id: pytest.fail("角色迁移不得自动核算"))
+
+    selected = service.select_legacy_run_operator(created["id"], "SUBJECT_LEADER", "数学组", "负责人")
+    archived = selected["calculation_invalidation_history"][-1]
+    assert selected["role_scope_recalculation_required"] is True
+    assert selected["recalculation_required"] is True
+    assert all(key not in selected for key in ("core_calculation", "generated_payroll", "processing_scope_snapshot", "audit_context"))
+    assert selected["issue_groups"] == [] and selected["field_records"] == []
+    assert archived["previous_generated_payroll"]["rows"][0]["final"] == 345
+    assert archived["previous_issue_groups"][0]["teacher"] == "旧名单教师"
+
+    monkeypatch.undo()
+    checked = service.check(created["id"])
+    assert checked["processing_scope_snapshot"]["teachers"] == ["数学教师"]
+    assert checked.get("core_calculation")
+    assert not checked.get("recalculation_required")
+    assert not checked.get("role_scope_recalculation_required")
+    assert len(checked["calculation_invalidation_history"]) == 1
+    assert checked["calculation_invalidation_history"][0]["previous_generated_payroll"]["rows"][0]["final"] == 345
 
 
 def test_legacy_role_recalculation_does_not_block_existing_pending_group_confirmation(tmp_path):
@@ -435,6 +476,10 @@ def test_legacy_role_recalculation_does_not_block_existing_pending_group_confirm
 
     selected = service.select_legacy_run_operator(created["id"], "SUBJECT_LEADER", "数学组", "负责人")
     assert selected["role_scope_recalculation_required"] is True
+    assert selected["recalculation_required"] is True
+    assert "core_calculation" not in selected and "generated_payroll" not in selected
+    assert len(selected["calculation_invalidation_history"]) == 1
+    assert selected["calculation_invalidation_history"][0]["previous_generated_payroll"]["rows"][0]["teacher"] == "旧范围教师"
     assert candidate["candidate_id"] in selected["pending_subject_group_imports"]
 
     confirmed = service.confirm_subject_group_material(
@@ -444,6 +489,7 @@ def test_legacy_role_recalculation_does_not_block_existing_pending_group_confirm
     assert confirmed["confirmation"]["candidate_id"] == candidate["candidate_id"]
     after = service.store.get(created["id"])
     assert after["role_scope_recalculation_required"] is True
+    assert len(after["calculation_invalidation_history"]) == 1
     assert "generated_payroll" not in after
     assert not after["pending_subject_group_imports"]
 

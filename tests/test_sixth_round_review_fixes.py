@@ -143,7 +143,7 @@ def test_conflicting_history_reference_does_not_replace_confirmed_salary_values(
     assert service.store.get(run_id)["base_salary_inputs"] == saved_before
 
 
-def test_legacy_run_requires_explicit_role_and_metadata_save_does_not_recalculate(tmp_path, monkeypatch):
+def test_legacy_run_requires_explicit_role_and_archives_before_user_recalculation(tmp_path, monkeypatch):
     service = PayrollService(tmp_path / "sandbox")
     created = service.create("2026-08", "GENERATE")
     stored = service.store.get(created["id"])
@@ -169,7 +169,10 @@ def test_legacy_run_requires_explicit_role_and_metadata_save_does_not_recalculat
     assert selected["selected_group"] == "数学组"
     assert selected["part_time_payroll_mode"] == "GROUP_SUBMISSION_ONLY"
     assert selected["role_scope_recalculation_required"] is True
-    assert selected["generated_payroll"]["rows"][0]["final"] == 123
+    assert selected["recalculation_required"] is True
+    assert "core_calculation" not in selected
+    assert "generated_payroll" not in selected
+    assert selected["calculation_invalidation_history"][-1]["previous_generated_payroll"]["rows"][0]["final"] == 123
     assert selected["base_salary_inputs"] == salary_before
 
 
@@ -198,7 +201,9 @@ def test_legacy_role_selection_endpoint_persists_metadata_only(tmp_path):
         assert saved["operator_role"] == "DOS"
         assert saved["part_time_payroll_mode"] == "GROUP_SUBMISSION_ONLY"
         assert saved["role_scope_recalculation_required"] is True
-        assert saved["generated_payroll"]["rows"][0]["final"] == 100
+        assert saved["recalculation_required"] is True
+        assert "generated_payroll" not in saved
+        assert saved["calculation_invalidation_history"][-1]["previous_generated_payroll"]["rows"][0]["final"] == 100
     finally:
         server.shutdown()
 

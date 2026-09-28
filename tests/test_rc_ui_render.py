@@ -293,3 +293,33 @@ assert(!html.includes('旧结果教师'), 'legacy role-scope results must not re
     app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
     result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_recalculation_is_one_final_pending_item_only_after_other_todos_finish():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to exercise the production UI renderer")
+    script = r'''
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const source = fs.readFileSync(process.argv[1], 'utf8').split('(async () => {')[0];
+const context = {document:{querySelector(){return null;},querySelectorAll(){return []; }}, window:{}, console};
+vm.createContext(context); vm.runInContext(source, context);
+vm.runInContext(`current={id:'legacy-run',mode:'AUDIT',period:'2026-08',role_scope_recalculation_required:true,
+ issue_groups:[{id:'old-issue',title:'旧结果问题',decision:{status:'NEEDS_RECONFIRMATION'}}],
+ user_actions:[{cause:'old',group_ids:['old-issue']}],business_decisions:[],decisions:[],files:{},
+ support_department_pending_preview:{status:'PENDING_CONFIRMATION'},
+ pending_subject_group_imports:{candidate:{candidate_id:'candidate',role:'math',recognized_group:'数学组',source_sha256:'sha'}},
+ support_source:{bound:false},period_authority:{is_fallback:false},period_check:null,
+ employment:{salary_basis_counts:{SOURCE_UNKNOWN:0},teachers:[]}};`, context);
+let summary = vm.runInContext('currentTodoSummary()', context);
+assert.equal(summary.pending, 2, JSON.stringify(summary));
+vm.runInContext('current.support_department_pending_preview=null; current.pending_subject_group_imports={}', context);
+summary = vm.runInContext('currentTodoSummary()', context);
+assert.equal(summary.pending, 1, JSON.stringify(summary));
+vm.runInContext('current.role_scope_recalculation_required=false; current.issue_groups=[]; current.user_actions=[]', context);
+summary = vm.runInContext('currentTodoSummary()', context);
+assert.equal(summary.pending, 0, JSON.stringify(summary));
+'''
+    app = Path(__file__).parents[1] / "payroll_ui" / "static" / "app.js"
+    result = subprocess.run([node, "-e", script, str(app)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
