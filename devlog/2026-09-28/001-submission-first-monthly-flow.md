@@ -27,5 +27,6 @@
 - Python compile：PASS（`uv run python -m compileall -q payroll_ui payroll_core tests`）。
 - JavaScript syntax：PASS（`node --check payroll_ui/static/app.js`）。
 - `git diff --check`：PASS。
-- GitHub Actions：本提交推送后由对应 branch run 验证；commit SHA 和 run 状态记录在交付报告中。
+- 实现提交：`46655a7a5909ce8418d25adbdb25a1be50cf9598`。
+- GitHub Actions：run `36383977866`（`tests`）对实现提交完成验证，`success`。
 - HUMAN_REQUIRED：NONE。
