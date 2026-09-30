@@ -126,8 +126,8 @@ def _header_score(header: str, aliases: Sequence[str], weak_tokens: Sequence[str
     return 0.0
 
 
-def _best_header_row(sheet, requirement: ImportRequirement) -> tuple[int, int]:
-    """Return (header_row, strong_hits) for the row that looks most like headers."""
+def _best_header_row(sheet, requirement: ImportRequirement) -> tuple[int, int, int]:
+    """Return (header_row, strong_hits, total_hits) for the best header row."""
     best_row, best_strong, best_total = 0, 0, 0
     for row in range(1, min(HEADER_SEARCH_ROWS, sheet.max_row) + 1):
         strong = total = 0
@@ -146,7 +146,7 @@ def _best_header_row(sheet, requirement: ImportRequirement) -> tuple[int, int]:
                     break
         if (strong, total) > (best_strong, best_total):
             best_row, best_strong, best_total = row, strong, total
-    return best_row, best_strong
+    return best_row, best_strong, best_total
 
 
 def analyze_mapping(
@@ -164,12 +164,18 @@ def analyze_mapping(
     except Exception as exc:  # noqa: BLE001 - surfaced to the user, never hidden
         return MappingAnalysis(status="UNREADABLE", message=f"无法读取文件：{source.name}（{type(exc).__name__}: {exc}）")
     try:
-        best = max(workbook.worksheets, key=lambda sheet: _best_header_row(sheet, requirement)[1])
-        header_row, strong_hits = _best_header_row(best, requirement)
-        if not header_row or not strong_hits:
+        best = max(workbook.worksheets, key=lambda sheet: _best_header_row(sheet, requirement)[1:])
+        header_row, strong_hits, _total_hits = _best_header_row(best, requirement)
+        if not header_row:
+            raw_headers = {
+                column: str(best.cell(header_row or 1, column).value or "").strip()
+                for column in range(1, best.max_column + 1)
+            }
+            raw_headers = {column: text for column, text in raw_headers.items() if text}
             return MappingAnalysis(
-                status="MISSING_REQUIRED", sheet=best.title,
-                detected_columns=tuple(str(best.cell(1, column).value or "") for column in range(1, best.max_column + 1) if best.cell(1, column).value),
+                status="MISSING_REQUIRED", sheet=best.title, header_row=header_row or 1,
+                detected_columns=tuple(raw_headers.values()),
+                column_headers=raw_headers,
                 missing=tuple(item.field for item in requirement.required_fields),
                 message="这张表里没有识别到任何已知字段表头。",
             )

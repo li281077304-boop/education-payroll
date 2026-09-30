@@ -48,7 +48,8 @@ STATE_BROWSER_OPEN_FAILED = "browser-open-failed"
 
 def _python_problem_if_needed(cfg: LauncherConfig) -> str | None:
     """Only pay for the interpreter check when a start is actually possible."""
-    if probe(cfg.host, cfg.port, cfg.data_dir).kind is ProbeKind.OURS:
+    if probe(cfg.host, cfg.port, cfg.data_dir, expected_build_sha=cfg.build_sha,
+             expected_build_dirty=cfg.build_dirty if cfg.build_sha else None).kind is ProbeKind.OURS:
         return None
     try:
         return interpreter_problem(cfg.python, cfg.repo_root)

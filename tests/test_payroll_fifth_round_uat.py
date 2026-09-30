@@ -99,7 +99,7 @@ def test_staff_roster_batch_confirmation_persists_group_and_employment(tmp_path)
     assert by_name["教师乙"]["salary_basis"] == "HAS_BASE_SALARY"
 
 
-def test_group_processing_scope_requires_confirmed_membership_not_current_schedule_subject(tmp_path):
+def test_group_processing_scope_uses_current_schedule_majority_without_manual_membership(tmp_path):
     service = PayrollService(tmp_path / "data")
     run = service.create("2026-08", "GENERATE", operator_role="SUBJECT_LEADER", selected_group="数学组")
     service.import_file(run["id"], "schedule", str(_schedule(tmp_path / "schedule.csv", [
@@ -109,13 +109,8 @@ def test_group_processing_scope_requires_confirmed_membership_not_current_schedu
     view = service.get(run["id"])
 
     assert {item["display_name"] for item in view["roster_facts"]["teachers"]} == {"数学老师", "理化老师"}
-    assert view["processing_scope"]["scope_count"] == 0
-    assert "CURRENT_SCHEDULE_SUBJECT_CANDIDATE" not in view["processing_scope"]["sources"]
-    with pytest.raises(ValueError, match="尚未确认任何属于数学组"):
-        service.check(run["id"])
-
-    service.confirm_staff_batch(run["id"], "负责人", group_updates=[{"teacher": "数学老师", "group": "数学组"}])
-    view = service.get(run["id"])
+    assert view["processing_scope"]["scope_count"] == 1
+    assert "CURRENT_PERIOD_SCHEDULE_PRIMARY_SUBJECT" in view["processing_scope"]["sources"]
     result = service.check(run["id"])
 
     assert view["processing_scope"]["scope_count"] == 1

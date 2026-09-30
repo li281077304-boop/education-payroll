@@ -80,6 +80,9 @@ REPO_ROOT=$(json_value repo_root) || show_failure "CONFIG_INVALID" "启动配置
 PYTHON=$(json_value python) || show_failure "CONFIG_INVALID" "启动配置中缺少 Python 解释器路径。请重新安装工资核算助手。"
 CONFIG_DATA_DIR=$(json_value data_dir) || show_failure "CONFIG_INVALID" "启动配置中缺少正式数据目录。请重新安装工资核算助手。"
 PORT=$(json_value port) || show_failure "CONFIG_INVALID" "启动配置中缺少服务端口。请重新安装工资核算助手。"
+BUILD_SHA=$(/usr/bin/plutil -extract build_sha raw -o - "$CONFIG" 2>/dev/null || true)
+RELEASE_VERSION=$(/usr/bin/plutil -extract release_version raw -o - "$CONFIG" 2>/dev/null || echo "Payroll-V1")
+BUILD_DIRTY=$(/usr/bin/plutil -extract build_dirty raw -o - "$CONFIG" 2>/dev/null || echo "true")
 
 if [ "$CONFIG_DATA_DIR" != "$EXPECTED_DATA_DIR" ] || [ "$PORT" != "8760" ]; then
     show_failure "PRODUCTION_CONFIG_UNSAFE" "启动配置与固定正式数据目录或端口不一致。为保护工资数据，程序没有启动。"
@@ -105,6 +108,9 @@ fi
 export PAYROLL_LAUNCHER_REPO_ROOT="$REPO_ROOT"
 export PAYROLL_LAUNCHER_PYTHON="$PYTHON"
 export PAYROLL_LAUNCHER_CONFIG="$CONFIG"
+export PAYROLL_BUILD_SHA="$BUILD_SHA"
+export PAYROLL_RELEASE_VERSION="$RELEASE_VERSION"
+export PAYROLL_BUILD_DIRTY="$BUILD_DIRTY"
 export PYTHONPATH="$REPO_ROOT/tools:$REPO_ROOT"
 cd "$REPO_ROOT" || show_failure "REPO_CWD_FAILED" "无法进入工资程序目录。"
 

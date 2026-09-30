@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 from payroll_core.excel.inspect import inspect_workbook
 
 from . import native_dialogs
-from .health import HEALTH_PATH, health_payload
+from .health import HEALTH_PATH, build_identity, health_payload
 from .service import MONTHLY_FLOW_SUBMISSION_FIRST, PayrollService
 
 
@@ -33,6 +33,7 @@ class PayrollHttpServer(ThreadingHTTPServer):
         self.static_root = static_root
         self.started_at = datetime.now(timezone.utc)
         self.token = secrets.token_urlsafe(24)
+        self.build_identity = build_identity()
 
 
 class PayrollHandler(SimpleHTTPRequestHandler):
@@ -118,6 +119,7 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 self.server.server_port,
                 self.server.started_at,
                 self.server.service.store.count_runs(),
+                identity=self.server.build_identity,
             ))
         if not self._authorized():
             return self._error("本地会话已失效，请刷新页面。", HTTPStatus.FORBIDDEN)
@@ -147,7 +149,10 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.default_export_path(parse_qs(parsed.query).get("filename", ["标准工资表.xlsx"])[0]))
             if parsed.path == "/api/import-mapping":
                 query = parse_qs(parsed.query)
-                return self._json(self.server.service.preview_import_mapping(query.get("path", [""])[0], query.get("role", ["schedule"])[0], query.get("period", [""])[0]))
+                return self._json(self.server.service.preview_import_mapping(
+                    query.get("path", [""])[0], query.get("role", ["schedule"])[0],
+                    query.get("period", [""])[0], query.get("sha256", [""])[0],
+                ))
             if parsed.path == "/api/payroll-submissions":
                 return self._json(self.server.service.submissions.batches(parse_qs(parsed.query).get("period", [""])[0]))
             if parsed.path.startswith("/api/payroll-submissions/") and parsed.path.endswith("/merge-preview"):
@@ -206,7 +211,8 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                 return self._json(self.server.service.preview_base_salary_import(run_id, source_path, selected_group))
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/support-preview"):
                 run_id = parsed.path.split("/")[3]
-                source_path = parse_qs(parsed.query).get("path", [""])[0]
+                query = parse_qs(parsed.query)
+                source_path = query.get("path", [""])[0]
                 return self._json(self.server.service.preview_support_salary_import(run_id, source_path))
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/rating-preview"):
                 run_id = parsed.path.split("/")[3]
@@ -268,14 +274,23 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         results = []
                         for item in paths:
                             try:
-                                result = self.server.service.stage_quick_material(run_id, str(item))
+                                if isinstance(item, dict):
+                                    result = self.server.service.stage_quick_material(
+                                        run_id, str(item.get("path", "")), str(item.get("sha256", "")),
+                                        str(item.get("name", "")),
+                                    )
+                                else:
+                                    result = self.server.service.stage_quick_material(run_id, str(item))
                                 results.append({key: value for key, value in result.items() if key != "run"})
                             except (ValueError, OSError) as exc:
-                                results.append({"ok": False, "error_kind": "PROFESSIONAL_REQUIRED",
+                                results.append({"ok": False, "error_kind": "MATERIAL_READ_FAILED",
                                                 "message": str(exc), "issues": [str(exc)]})
                         return self._json({"run": self.server.service.get(run_id), "materials": results,
                                            "ok": all(item.get("ok", True) for item in results)})
-                    return self._json(self.server.service.stage_quick_material(run_id, str(payload.get("path", ""))))
+                    return self._json(self.server.service.stage_quick_material(
+                        run_id, str(payload.get("path", "")), str(payload.get("sha256", "")),
+                        str(payload.get("name", "")),
+                    ))
                 if action == "generate":
                     return self._json(self.server.service.quick_generate(run_id))
                 if action == "professional":
@@ -374,15 +389,30 @@ class PayrollHandler(SimpleHTTPRequestHandler):
                         if run.get("monthly_flow_version") == "SUBMISSION_FIRST_V1":
                             return self._json(self.server.service.import_material_file(
                                 run_id, "subject_group", str(payload.get("path", "")),
+                                expected_hash=str(payload.get("sha256", "")),
+                                display_name=str(payload.get("name", "")),
                             ))
                         return self._error("学科组提交表必须先预览并由负责人确认后，才会用于本月工资。", HTTPStatus.CONFLICT)
-                    return self._json(self.server.service.import_file(run_id, role, str(payload.get("path", "")), payload.get("sha256"), payload.get("mapping"), str(payload.get("profile_name", "")), str(payload.get("profile_actor", ""))))
+                    return self._json(self.server.service.import_file(
+                        run_id, role, str(payload.get("path", "")), payload.get("sha256"),
+                        payload.get("mapping"), str(payload.get("profile_name", "")),
+                        str(payload.get("profile_actor", "")),
+                        display_name=str(payload.get("name", "")),
+                    ))
                 if action == "package":
                     return self._json(self.server.service.import_package(run_id, str(payload.get("path", ""))))
                 if action == "material":
-                    return self._json(self.server.service.import_material_file(run_id, str(payload.get("kind", "auto")), str(payload.get("path", "")), str(payload.get("selected_group", ""))))
+                    return self._json(self.server.service.import_material_file(
+                        run_id, str(payload.get("kind", "auto")), str(payload.get("path", "")),
+                        str(payload.get("selected_group", "")),
+                        expected_hash=str(payload.get("sha256", "")),
+                        display_name=str(payload.get("name", "")),
+                    ))
                 if action == "support-preview":
-                    return self._json(self.server.service.stage_support_department_preview(run_id, str(payload.get("path", ""))))
+                    return self._json(self.server.service.stage_support_department_preview(
+                        run_id, str(payload.get("path", "")), str(payload.get("sha256", "")),
+                        str(payload.get("name", "")),
+                    ))
                 if action == "support-cancel":
                     return self._json(self.server.service.cancel_support_department_preview(run_id))
                 if action == "support-remove":

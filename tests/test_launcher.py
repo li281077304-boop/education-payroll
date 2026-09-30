@@ -32,6 +32,7 @@ from payroll_launcher.lifecycle import (
 )
 from payroll_launcher.paths import DEFAULT_PORT, HOST, LauncherConfig, resolve_config
 from payroll_launcher.probe import ProbeKind, probe
+from payroll_ui import health as health_module
 from payroll_ui.health import HEALTH_CONTRACT, HEALTH_PATH, data_dir_fingerprint
 from payroll_ui.server import PayrollHttpServer
 from payroll_ui.service import PayrollService
@@ -138,7 +139,57 @@ def test_health_endpoint_identifies_service_without_token_and_without_business_d
     assert set(body) == {
         "contract", "app", "service", "pid", "port",
         "data_dir_fingerprint", "started_at", "run_count",
+        "release_version", "build_sha", "build_dirty",
     }
+    assert body["release_version"]
+    assert body["build_sha"]
+    assert isinstance(body["build_dirty"], bool)
+
+
+def test_build_identity_does_not_echo_stale_packaged_sha_from_changed_checkout(monkeypatch):
+    expected_sha = "a" * 40
+    actual_sha = "b" * 40
+    outputs = iter([actual_sha + "\n", " M payroll_ui/server.py\n"])
+    monkeypatch.setenv(health_module.BUILD_SHA_ENV, expected_sha)
+    monkeypatch.setenv(health_module.BUILD_DIRTY_ENV, "0")
+    monkeypatch.setattr(
+        health_module.subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, next(outputs), ""),
+    )
+
+    identity = health_module.build_identity()
+
+    assert identity["build_sha"] == actual_sha
+    assert identity["build_dirty"] is True
+
+
+def test_build_identity_uses_embedded_sha_when_frozen_bundle_has_no_git(monkeypatch):
+    expected_sha = "c" * 40
+    monkeypatch.setenv(health_module.BUILD_SHA_ENV, expected_sha)
+    monkeypatch.setenv(health_module.BUILD_DIRTY_ENV, "0")
+    monkeypatch.delenv("PAYROLL_LAUNCHER_REPO_ROOT", raising=False)
+
+    def no_git(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, args[0], "not a git checkout", "")
+
+    monkeypatch.setattr(health_module.subprocess, "run", no_git)
+    identity = health_module.build_identity()
+
+    assert identity == {"release_version": "Payroll-V1", "build_sha": expected_sha, "build_dirty": False}
+
+
+def test_source_launcher_fails_closed_if_checkout_git_identity_is_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setenv(health_module.BUILD_SHA_ENV, "d" * 40)
+    monkeypatch.setenv(health_module.BUILD_DIRTY_ENV, "0")
+    monkeypatch.setenv("PAYROLL_LAUNCHER_REPO_ROOT", str(tmp_path))
+
+    def no_git(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, args[0], "not a git checkout", "")
+
+    monkeypatch.setattr(health_module.subprocess, "run", no_git)
+    identity = health_module.build_identity()
+
+    assert identity == {"release_version": "Payroll-V1", "build_sha": "unknown", "build_dirty": True}
 
 
 def test_health_endpoint_reports_existing_runs_without_leaking_details(tmp_path):
@@ -212,6 +263,32 @@ def test_probe_flags_our_service_when_it_uses_another_data_dir(tmp_path):
     with _ServerFixture(tmp_path / "real") as fixture:
         result = probe(HOST, fixture.port, tmp_path / "other", timeout=2.0)
     assert result.kind is ProbeKind.OTHER_DATA
+
+
+def test_probe_flags_same_data_directory_when_build_identity_differs(tmp_path):
+    data_dir = tmp_path / "app-data"
+    with _ServerFixture(data_dir) as fixture:
+        current = probe(HOST, fixture.port, data_dir, timeout=2.0)
+        expected_sha = current.payload["build_sha"]
+        wrong = probe(HOST, fixture.port, data_dir, timeout=2.0,
+                      expected_build_sha="0" * 40)
+        dirty_mismatch = probe(HOST, fixture.port, data_dir, timeout=2.0,
+                               expected_build_sha=expected_sha,
+                               expected_build_dirty=not current.payload["build_dirty"])
+    assert wrong.kind is ProbeKind.OTHER_BUILD
+    assert dirty_mismatch.kind is ProbeKind.OTHER_BUILD
+
+
+def test_launcher_does_not_reuse_or_stop_a_different_build_implicitly(monkeypatch, tmp_path):
+    data_dir = tmp_path / "app-data"
+    cfg = launch_config(tmp_path, free_port(), data_dir)
+    cfg = paths.replace(cfg, build_sha="0" * 40, build_dirty=False)
+    with _ServerFixture(data_dir) as fixture:
+        cfg = paths.replace(cfg, port=fixture.port)
+        result = ensure_running(cfg)
+    assert not result.ok
+    assert result.state == lifecycle.STATE_BUILD_MISMATCH
+    assert result.pid
 
 
 def test_probe_flags_foreign_json_and_plain_http(tmp_path):
@@ -544,31 +621,44 @@ def test_cli_status_exposes_paths_and_probe_kind(tmp_path, monkeypatch):
 
 
 @MACOS_ONLY
-def test_build_app_script_produces_both_production_entry_points(tmp_path):
+def test_build_app_script_refuses_to_stamp_uncommitted_source(tmp_path):
     output_dir = tmp_path / "dist"
+    source_status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+    ).stdout
     completed = subprocess.run(
         ["sh", str(REPO_ROOT / "macos" / "build_app.sh"), str(output_dir)],
         capture_output=True, text=True, timeout=120,
     )
-    assert completed.returncode == 0, completed.stderr
+    if source_status:
+        assert completed.returncode != 0
+        assert "干净的已提交工作区" in completed.stderr
+        assert not output_dir.exists()
+    else:
+        assert completed.returncode == 0, completed.stderr
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+                              capture_output=True, text=True, check=True).stdout.strip()
+        for name, mode in (("工资核算助手", "open"), ("重启工资服务", "restart")):
+            bundle = output_dir / f"{name}.app"
+            shim = bundle / "Contents" / "MacOS" / "launcher"
+            plist = (bundle / "Contents" / "Info.plist").read_text(encoding="utf-8")
+            identity = json.loads((bundle / "Contents" / "Resources" / "launcher.json").read_text(encoding="utf-8"))
+            assert shim.is_file() and os.access(shim, os.X_OK)
+            assert f"--mode {mode}" in shim.read_text(encoding="utf-8")
+            assert "<key>LSUIElement</key>" in plist
+            assert "<string>launcher</string>" in plist
+            assert name in plist
+            assert identity["build_sha"] == head
+            assert identity["build_dirty"] is False
+            assert identity["release_version"] == "Payroll-V1"
+            assert (bundle / "Contents" / "Resources" / "bootstrap.sh").is_file()
 
-    for name, mode in (("工资核算助手", "open"), ("重启工资服务", "restart")):
-        bundle = output_dir / f"{name}.app"
-        shim = bundle / "Contents" / "MacOS" / "launcher"
-        plist = (bundle / "Contents" / "Info.plist").read_text(encoding="utf-8")
-        assert shim.is_file() and os.access(shim, os.X_OK)
-        assert f"--mode {mode}" in shim.read_text(encoding="utf-8")
-        assert "<key>LSUIElement</key>" in plist
-        assert "<string>launcher</string>" in plist
-        assert name in plist
-        assert (bundle / "Contents" / "Resources" / "launcher.json").is_file()
-        assert (bundle / "Contents" / "Resources" / "bootstrap.sh").is_file()
-
-    shim_text = (output_dir / "工资核算助手.app" / "Contents" / "MacOS" / "launcher").read_text(encoding="utf-8")
-    assert str(REPO_ROOT) not in shim_text, "bundle shim 不得依赖开发仓库路径"
-    assert "Resources/bootstrap.sh" in shim_text
-    assert "$(pwd)" not in shim_text, "启动器不得依赖调用时的 shell cwd"
-    assert "/tmp" not in shim_text
+        shim_text = (output_dir / "工资核算助手.app" / "Contents" / "MacOS" / "launcher").read_text(encoding="utf-8")
+        assert str(REPO_ROOT) not in shim_text, "bundle shim 不得依赖开发仓库路径"
+        assert "Resources/bootstrap.sh" in shim_text
+        assert "$(pwd)" not in shim_text, "启动器不得依赖调用时的 shell cwd"
+        assert "/tmp" not in shim_text
 
 
 def _run_bundle_bootstrap(bundle: Path, home: Path, monkeypatch, *, config: dict,

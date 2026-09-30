@@ -42,7 +42,7 @@ assert(!materials.includes('导入历史工资'));
 assert(!materials.includes('ratingDashboard'));
 assert(!materials.includes('请选择这份资料所属科组'));
 const summary = vm.runInContext('currentTodoSummary()', context);
-assert.equal(summary.pending, 1); // AF rule only; no history/salary/employment todo.
+assert.equal(summary.pending, 2); // AF rule and visible missing-base-salary workflow.
 assert.equal(summary.processed, 0);
 assert.equal(summary.deferred, 0);
 const authority = vm.runInContext('authoritySummary()', context);

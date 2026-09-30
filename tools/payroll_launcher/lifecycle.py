@@ -36,6 +36,7 @@ STATE_REUSED = "reused"
 STATE_STARTED = "started"
 STATE_PORT_TAKEN = "port-taken"
 STATE_OTHER_DATA = "other-data"
+STATE_BUILD_MISMATCH = "build-mismatch"
 STATE_START_FAILED = "start-failed"
 STATE_PYTHON_INVALID = "python-invalid"
 STATE_CONFIG_INVALID = "config-invalid"
@@ -57,7 +58,7 @@ class LaunchResult:
 
     @property
     def can_restart(self) -> bool:
-        return self.state in {STATE_START_FAILED, STATE_OTHER_DATA}
+        return self.state in {STATE_START_FAILED, STATE_OTHER_DATA, STATE_BUILD_MISMATCH}
 
 
 def _now() -> str:
@@ -98,6 +99,9 @@ def write_pid_file(cfg: LauncherConfig, pid: int, detail: dict | None = None) ->
             "repo_root": str(cfg.repo_root),
             "program": str(cfg.python),
             "frozen": cfg.frozen,
+            "release_version": cfg.release_version,
+            "build_sha": cfg.build_sha,
+            "build_dirty": cfg.build_dirty,
             "started_at": _now(),
         }
         if detail:
@@ -163,6 +167,11 @@ def _service_environment(cfg: LauncherConfig) -> dict:
         # there would let a stray checkout shadow them.
         env["PYTHONPATH"] = str(cfg.repo_root)
     env["PYTHONUNBUFFERED"] = "1"
+    env["PAYROLL_RELEASE_VERSION"] = cfg.release_version
+    if cfg.build_sha:
+        env["PAYROLL_BUILD_SHA"] = cfg.build_sha
+    if cfg.build_dirty:
+        env["PAYROLL_BUILD_DIRTY"] = "1"
     # Keep proxy settings from interfering with a loopback connection.
     for key in ("NO_PROXY", "no_proxy"):
         existing = env.get(key, "")
@@ -205,10 +214,11 @@ def wait_for_health(cfg: LauncherConfig, process: subprocess.Popen | None = None
     deadline = time.monotonic() + timeout
     last = ProbeResult(ProbeKind.ABSENT, "尚未监听")
     while time.monotonic() < deadline:
-        last = probe(cfg.host, cfg.port, cfg.data_dir)
+        last = probe(cfg.host, cfg.port, cfg.data_dir, expected_build_sha=cfg.build_sha,
+                     expected_build_dirty=cfg.build_dirty if cfg.build_sha else None)
         if last.kind is ProbeKind.OURS:
             return last
-        if last.kind in {ProbeKind.OTHER_DATA, ProbeKind.FOREIGN}:
+        if last.kind in {ProbeKind.OTHER_DATA, ProbeKind.OTHER_BUILD, ProbeKind.FOREIGN}:
             return last
         if process is not None and process.poll() is not None:
             return last
@@ -239,7 +249,8 @@ class LauncherLock:
 def ensure_running(cfg: LauncherConfig, python_problem: str | None = None) -> LaunchResult:
     """Reuse a healthy service, otherwise start exactly one."""
     with LauncherLock(cfg):
-        existing = probe(cfg.host, cfg.port, cfg.data_dir)
+        existing = probe(cfg.host, cfg.port, cfg.data_dir, expected_build_sha=cfg.build_sha,
+                         expected_build_dirty=cfg.build_dirty if cfg.build_sha else None)
         log_line(cfg, f"probe {cfg.host}:{cfg.port} -> {existing.kind.value} ({existing.detail})")
 
         if existing.kind is ProbeKind.OURS:
@@ -256,6 +267,14 @@ def ensure_running(cfg: LauncherConfig, python_problem: str | None = None) -> La
                 message="工资核算服务正在运行，但它使用的是另一个数据目录。为避免混用真实数据，启动器没有接管它。",
                 url=cfg.base_url, pid=existing.pid,
                 diagnostics=f"端口 {cfg.port} 上是本服务，但数据目录指纹不匹配：{existing.payload}",
+                log_tail=log_tail(cfg),
+            )
+        if existing.kind is ProbeKind.OTHER_BUILD:
+            return LaunchResult(
+                ok=False, state=STATE_BUILD_MISMATCH,
+                message="工资服务已在运行，但版本与当前程序不一致。为保护正在使用的数据，启动器没有自动停止旧服务。请先正常退出旧程序后再重试。",
+                url=cfg.base_url, pid=existing.pid,
+                diagnostics=f"端口 {cfg.port} 上服务版本不匹配：expected={cfg.build_sha or 'unknown'}, actual={(existing.payload or {}).get('build_sha', 'unknown')}",
                 log_tail=log_tail(cfg),
             )
         if existing.kind is ProbeKind.FOREIGN:
@@ -360,10 +379,11 @@ def stop_service(cfg: LauncherConfig, killer=os.kill, waiter=time.sleep) -> tupl
     if str(record.get("data_dir") or "") != str(cfg.data_dir):
         return False, "启动器记录的数据目录与当前不一致，为避免误杀已跳过。"
 
-    status = probe(cfg.host, cfg.port, cfg.data_dir)
+    status = probe(cfg.host, cfg.port, cfg.data_dir, expected_build_sha=cfg.build_sha,
+                   expected_build_dirty=cfg.build_dirty if cfg.build_sha else None)
     if status.kind in {ProbeKind.FOREIGN, ProbeKind.OTHER_DATA}:
         return False, "端口上的服务不是本启动器管理的实例，已跳过停止操作。"
-    if status.kind is ProbeKind.OURS and status.pid is not None and status.pid != pid:
+    if status.kind in {ProbeKind.OURS, ProbeKind.OTHER_BUILD} and status.pid is not None and status.pid != pid:
         return False, "启动器记录与实际服务进程不一致，为避免误杀已跳过。"
 
     if not process_alive(pid):
@@ -411,7 +431,8 @@ def restart_service(cfg: LauncherConfig, python_problem: str | None = None,
         stopped, message = stop_service(cfg, killer=killer, waiter=waiter)
         log_line(cfg, f"restart stop -> {stopped} ({message})")
         if not stopped:
-            current = probe(cfg.host, cfg.port, cfg.data_dir)
+            current = probe(cfg.host, cfg.port, cfg.data_dir, expected_build_sha=cfg.build_sha,
+                            expected_build_dirty=cfg.build_dirty if cfg.build_sha else None)
             if current.kind is ProbeKind.OURS:
                 return LaunchResult(
                     ok=True, state=STATE_REUSED,
@@ -429,7 +450,8 @@ def restart_service(cfg: LauncherConfig, python_problem: str | None = None,
 
 def status(cfg: LauncherConfig) -> dict:
     record = read_pid_file(cfg)
-    current = probe(cfg.host, cfg.port, cfg.data_dir)
+    current = probe(cfg.host, cfg.port, cfg.data_dir, expected_build_sha=cfg.build_sha,
+                    expected_build_dirty=cfg.build_dirty if cfg.build_sha else None)
     owns = None
     if record and record.get("pid"):
         recorded = int(record["pid"])

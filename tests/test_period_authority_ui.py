@@ -108,9 +108,10 @@ def _current_expr(authority: dict, extra: str = "") -> str:
 
 def test_the_materials_page_says_when_the_natural_month_is_only_a_fallback(tmp_path):
     card = _run_ui(tmp_path, _current_expr(FALLBACK_AUTHORITY) + " __result = periodAuthorityCard();")
-    assert "暂按自然月兜底" in card
-    assert "materials-authority-start" in card, "兜底时必须给出设置人工月的入口"
-    assert "2026-08-01" in card and "2026-08-31" in card
+    assert "需要管理员检查工资周期" in card
+    assert "普通核算不需要手动选择日期" in card
+    assert "materials-authority-start" not in card, "普通核算不能要求用户设置人工月"
+    assert "尚未配置" in card
 
 
 def test_the_materials_page_shows_the_authority_and_drops_the_natural_month_wording(tmp_path):

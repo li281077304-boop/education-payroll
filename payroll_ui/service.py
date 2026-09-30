@@ -821,7 +821,7 @@ class PayrollService(CoreFlow):
         if len(self._active_subject_group_materials(run)) + len(run.get("pending_subject_group_imports") or {}) >= 64:
             raise ValueError("本次核算最多管理 64 份学科组资料；请先从本次核算移除不再使用的资料。")
         before = version(source)
-        if self._submission_first(run):
+        if self._submission_first(run) and str(run.get("operator_role") or OPERATOR_DOS) != OPERATOR_SUBJECT_LEADER:
             selected_group = ""
         else:
             selected_group = self._validate_run_material_group(
@@ -1180,12 +1180,19 @@ class PayrollService(CoreFlow):
         headers = rows[0].evidence.get("headers") or []
         return rows if all(any(alias in headers for alias in aliases) for aliases in RENEWAL_ALIASES.values()) else []
 
-    def import_material_file(self, run_id: str, kind: str, path: str, selected_group: str = "") -> dict:
+    def import_material_file(self, run_id: str, kind: str, path: str, selected_group: str = "", *, expected_hash: str = "", display_name: str = "") -> dict:
         """Import a user-facing material and keep the internal role mapping hidden."""
         run = self._load(run_id)
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise ValueError("找不到这份材料，请重新拖入或粘贴文件。")
+        source_display_name = Path(str(display_name or source.name)).name
+        try:
+            source_before = version(source)
+        except OSError as exc:
+            raise ValueError(self._file_error(exc)) from exc
+        if expected_hash and source_before["sha256"] != expected_hash:
+            raise ValueError("已上传的材料副本与本次选择不一致，请重新上传。")
         if kind in {"package", "auto"}:
             if source.suffix.lower() == ".csv":
                 try:
@@ -1227,18 +1234,24 @@ class PayrollService(CoreFlow):
             if self._submission_first(run):
                 preview = self.preview_subject_group_material(run_id, str(source))
                 candidate = preview.get("subject_group_preview") or {}
+                if expected_hash and candidate.get("source_sha256") != expected_hash:
+                    raise ValueError("已上传的学科组资料在预览期间发生变化，请重新上传。")
                 return self.confirm_subject_group_material(
                     run_id, str(candidate.get("role") or preview.get("recognized_role") or "math"),
                     str(candidate.get("source_sha256") or ""), "本次资料导入",
                     candidate_id=str(candidate.get("candidate_id") or ""),
                 )
-            return self.preview_subject_group_material(run_id, str(source), selected_group)
+            preview = self.preview_subject_group_material(run_id, str(source), selected_group)
+            if expected_hash and preview.get("source_sha256") != expected_hash:
+                raise ValueError("已上传的学科组资料在预览期间发生变化，请重新上传。")
+            return preview
         if kind == "schedule":
-            rendered = self.import_file(run_id, "schedule", str(source))
+            rendered = self.import_file(run_id, "schedule", str(source), expected_hash or None,
+                                        display_name=source_display_name)
             return {"run": rendered, "material_kind": "schedule", "recognized_role": "schedule"}
         if kind not in {"renewal", "refund"}:
             raise ValueError("无法识别这类材料。")
-        before = version(source)
+        before = source_before
         monthly_renewal = self._monthly_renewal_rows(source, run["period"]) if kind == "renewal" else []
         result = (None if monthly_renewal else read_renewal_report(source, run["period"])) if kind == "renewal" else read_refund_report(source, run["period"])
         if hasattr(result, "errors") and result.errors:
@@ -1248,15 +1261,35 @@ class PayrollService(CoreFlow):
             raise ValueError(f"未识别到有效的{ '续费' if kind == 'renewal' else '退费' }记录，请检查工作表和表头。")
         if version(source) != before:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
+        if expected_hash and before["sha256"] != expected_hash:
+            raise ValueError("已上传的材料副本与本次选择不一致，请重新上传。")
         reports = ([
             {"period": run["period"], "teacher": item.payload.get("teacher", ""), "sheet": item.evidence.get("sheet", ""),
-             "source_row": item.row, "status": "AWAITING_RUN_CONFIRMATION", "source_file": source.name}
+             "source_row": item.row, "status": "AWAITING_RUN_CONFIRMATION", "source_file": source_display_name}
             for item in records
         ] if monthly_renewal else [item.as_dict() for item in records])
         material = {
-            "name": source.name, "path": str(source), **before,
+            "name": source_display_name, "path": str(source), **before,
             "records": len(reports), "label": "续费表" if kind == "renewal" else "退费表",
         }
+        prior_material = (run.get("material_inputs") or {}).get(kind) or {}
+        if prior_material and prior_material.get("sha256") != before["sha256"]:
+            run.setdefault("peripheral_material_history", []).append({
+                "kind": kind,
+                "material": copy.deepcopy(prior_material),
+                "reports": copy.deepcopy(run.get(f"{kind}_reports") or []),
+                "event": "SOURCE_REPLACED",
+                "archived_at": datetime.now(timezone.utc).isoformat(),
+            })
+        if run.get("core_calculation") or run.get("generated_payroll"):
+            self._invalidate_active_calculation(
+                run,
+                event="PERIPHERAL_MATERIAL_IMPORTED_OR_REPLACED",
+                reason=f"本次{ '续费' if kind == 'renewal' else '退费' }来源已导入或替换，旧计算结果已归档，需要重新核算。",
+                actor="材料导入",
+                metadata={"kind": kind, "previous_sha256": (run.get("material_inputs") or {}).get(kind, {}).get("sha256", ""),
+                          "new_sha256": before["sha256"]},
+            )
         run.setdefault("material_inputs", {})[kind] = material
         run[f"{kind}_reports"] = reports
         if monthly_renewal:
@@ -1292,11 +1325,15 @@ class PayrollService(CoreFlow):
             raise ValueError("这不是极速生成记录，请进入专业核算。")
         return run
 
-    def stage_quick_material(self, run_id: str, path: str) -> dict:
+    def stage_quick_material(self, run_id: str, path: str, expected_hash: str = "", display_name: str = "") -> dict:
         run = self._quick_run(run_id)
         source = Path(path).expanduser().resolve()
         if not source.is_file():
             raise ValueError("找不到这份材料，请重新拖入文件。")
+        source_display_name = Path(str(display_name or source.name)).name
+        fingerprint = version(source)
+        if expected_hash and fingerprint["sha256"] != expected_hash:
+            raise ValueError("已上传的资料副本与本次选择不一致，请重新上传。")
         # Use the same workbook fingerprint and normalized CSV adapters as the
         # ordinary auto-import path; no quick-specific worksheet parser exists.
         kind = "professional_required"
@@ -1360,10 +1397,9 @@ class PayrollService(CoreFlow):
                 # Keep the browser-uploaded path with this Run even though the
                 # quick recognizer cannot classify it. Professional mode can
                 # then inspect/import the same local copy without re-upload.
-                fingerprint = version(source)
                 staged = list(run.get("quick_materials") or [])
                 material = {"kind": "PROFESSIONAL_REQUIRED", "professional_kind": "",
-                            "name": source.name, "path": str(source), **fingerprint}
+                            "name": source_display_name, "path": str(source), **fingerprint}
                 if not any(item.get("sha256") == fingerprint["sha256"] for item in staged):
                     staged.append(material)
                     run["quick_materials"] = staged
@@ -1371,12 +1407,11 @@ class PayrollService(CoreFlow):
                 return {**self._quick_failure(run_id, "PROFESSIONAL_REQUIRED",
                                                "这份资料请进入专业核算使用。"),
                         "run": self.render(run), "detected_kind": kind,
-                        "material": {"name": source.name, "state": "待专业模式识别", "kind": kind}}
+                        "material": {"name": source_display_name, "state": "待专业模式识别", "kind": kind}}
         if professional_kind:
-            fingerprint = version(source)
             staged = list(run.get("quick_materials") or [])
             material = {"kind": "PROFESSIONAL_REQUIRED", "professional_kind": professional_kind,
-                        "name": source.name, "path": str(source), **fingerprint}
+                        "name": source_display_name, "path": str(source), **fingerprint}
             if not any(item.get("sha256") == fingerprint["sha256"] for item in staged):
                 staged.append(material)
                 run["quick_materials"] = staged
@@ -1385,12 +1420,11 @@ class PayrollService(CoreFlow):
                                            "这份资料请进入专业核算使用。"),
                     "run": self.render(run), "detected_kind": "professional_required",
                     "professional_kind": professional_kind,
-                    "material": {"name": source.name, "state": "待专业流程导入", "kind": professional_kind}}
-        fingerprint = version(source)
+                    "material": {"name": source_display_name, "state": "待专业流程导入", "kind": professional_kind}}
         existing = list(run.get("quick_materials") or [])
         if kind == "schedule" and any(item.get("kind") == "schedule" and item.get("sha256") != fingerprint["sha256"] for item in existing):
             material = {"kind": "PROFESSIONAL_REQUIRED", "professional_kind": "",
-                        "name": source.name, "path": str(source), **fingerprint,
+                        "name": source_display_name, "path": str(source), **fingerprint,
                         "transfer_reason": "极速模式一次只接受一份排课表；原文件已保留，可在专业模式选择。"}
             if not any(item.get("sha256") == fingerprint["sha256"] for item in existing):
                 existing.append(material)
@@ -1399,14 +1433,14 @@ class PayrollService(CoreFlow):
             return {**self._quick_failure(run_id, "PROFESSIONAL_REQUIRED",
                                            "检测到多份排课表，请进入专业核算选择本次使用的课表。"),
                     "run": self.render(run), "detected_kind": "professional_required",
-                    "material": {"name": source.name, "state": "待专业模式选择", "kind": "professional_required"}}
-        material = {"kind": kind, "name": source.name, "path": str(source), **fingerprint}
+                    "material": {"name": source_display_name, "state": "待专业模式选择", "kind": "professional_required"}}
+        material = {"kind": kind, "name": source_display_name, "path": str(source), **fingerprint}
         if not any(item.get("kind") == kind and item.get("sha256") == fingerprint["sha256"] for item in existing):
             existing.append(material)
             run["quick_materials"] = existing
             self.store.save(run)
         return {"run": self.render(run), "detected_kind": kind,
-                "material": {"name": source.name, "state": "已识别", "kind": kind}}
+                "material": {"name": source_display_name, "state": "已识别", "kind": kind}}
 
     @staticmethod
     def _quick_failure(run_id: str, kind: str, message: str, issues: list[str] | None = None) -> dict:
@@ -1419,6 +1453,9 @@ class PayrollService(CoreFlow):
         schedules = [item for item in staged if item.get("kind") == "schedule"]
         if len(schedules) != 1:
             return self._quick_failure(run_id, "MISSING_SCHEDULE", "请先上传一份排课表。")
+        if (run.get("period_authority") or {}).get("is_fallback", False):
+            return self._quick_failure(run_id, "ADMIN_CONFIGURATION_ERROR",
+                                       "该月份人工月基础资料未配置，请联系管理员处理。")
         # Star versions are system configuration, not a monthly employee task.
         ratings = [item for item in self.store.list_rating_versions()
                    if item.get("status", "ACTIVE") == "ACTIVE"
@@ -1438,7 +1475,7 @@ class PayrollService(CoreFlow):
                         continue
                 elif any(material.get("source_sha256") == item["sha256"] for material in self._active_subject_group_materials(current)):
                     continue
-                self.import_material_file(run_id, "auto", str(source))
+                self.import_material_file(run_id, "auto", str(source), expected_hash=str(item["sha256"]), display_name=str(item.get("name") or ""))
             current = self._load(run_id)
             if not (current.get("af_policy_confirmation") or {}).get("confirmed"):
                 self.confirm_af_policy(run_id, "QUICK_GENERATE", default_obligation_hours=30, exceptions={})
@@ -1482,19 +1519,25 @@ class PayrollService(CoreFlow):
             try:
                 if item.get("kind") == "schedule":
                     if (self._load(run_id).get("files") or {}).get("schedule", {}).get("sha256") != item.get("sha256"):
-                        self.import_file(run_id, "schedule", str(source))
+                        self.import_file(run_id, "schedule", str(source), item.get("sha256"), display_name=str(item.get("name") or ""))
                     item["transferred_to_professional"] = True
                 elif item.get("kind") == "subject_group":
                     if not any(material.get("source_sha256") == item.get("sha256") for material in self._active_subject_group_materials(self._load(run_id))):
-                        self.import_material_file(run_id, "auto", str(source))
+                        self.import_material_file(run_id, "auto", str(source), expected_hash=str(item.get("sha256") or ""), display_name=str(item.get("name") or ""))
                     item["transferred_to_professional"] = True
                 elif item.get("kind") == "PROFESSIONAL_REQUIRED":
                     kind = str(item.get("professional_kind") or "")
                     if kind in {"renewal", "refund"}:
-                        self.import_material_file(run_id, kind, str(source))
+                        self.import_material_file(
+                            run_id, kind, str(source), expected_hash=str(item.get("sha256") or ""),
+                            display_name=str(item.get("name") or ""),
+                        )
                         item["transferred_to_professional"] = True
                     elif kind == "support":
-                        self.stage_support_department_preview(run_id, str(source))
+                        self.stage_support_department_preview(
+                            run_id, str(source), expected_hash=str(item.get("sha256") or ""),
+                            display_name=str(item.get("name") or ""),
+                        )
                         item["transferred_to_professional"] = True
                     else:
                         item["transferred_to_professional"] = False
@@ -2003,9 +2046,15 @@ class PayrollService(CoreFlow):
         if monthly_flow_version not in {"", MONTHLY_FLOW_SUBMISSION_FIRST}:
             raise ValueError("未知的月度工资流程版本。")
         simple_monthly_flow = monthly_flow_version == MONTHLY_FLOW_SUBMISSION_FIRST
-        persisted_salary = {} if simple_monthly_flow else self._effective_base_salary_inputs(period)
-        persisted_af = None if simple_monthly_flow else self._effective_af_policy(period)
-        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "operator_role": operator_role, "selected_group": selected_group, "selected_groups": normalized_groups, "part_time_payroll_mode": "GROUP_SUBMISSION_ONLY" if production_role_selection else "LEGACY_COMPATIBILITY", **({"monthly_flow_version": MONTHLY_FLOW_SUBMISSION_FIRST} if simple_monthly_flow else {}), "salary_basis_confirmations": {}, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "subject_group_materials": [], "subject_group_candidates": [], "historical_salary_reference_snapshots": [], "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": persisted_af, "base_salary_inputs": persisted_salary, "base_salary_input_snapshot": self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None, "historical_salary_reference_snapshot": None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([]), "support_department_pending_preview": None, "support_department_snapshot": None, "teacher_group_pending_preview": None}
+        # Confirmed G–L profiles are long-term, period-scoped authority and
+        # must remain available in the submission-first monthly flow. Current
+        # month support/group sources can supersede them field-by-field later.
+        persisted_salary = self._effective_base_salary_inputs(period)
+        # The simple monthly flow omits per-run historical salary inputs, but
+        # it still reuses the effective long-term default-hours policy. Only
+        # its month-scoped exceptions are cleared by _effective_af_policy().
+        persisted_af = self._effective_af_policy(period)
+        run = {"id": uuid.uuid4().hex[:12], "period": period, **window, "mode": mode, "operator_role": operator_role, "selected_group": selected_group, "selected_groups": normalized_groups, "part_time_payroll_mode": "GROUP_SUBMISSION_ONLY" if production_role_selection else "LEGACY_COMPATIBILITY", **({"monthly_flow_version": MONTHLY_FLOW_SUBMISSION_FIRST} if simple_monthly_flow else {}), "salary_basis_confirmations": {}, "created_at": datetime.now(timezone.utc).isoformat(), "status": "DRAFT", "files": {}, "subject_group_materials": [], "subject_group_candidates": [], "historical_salary_reference_snapshots": [], "issues": [], "field_records": [], "issue_groups": [], "user_actions": [], "decisions": [], "business_decisions": [], "management": [], "resolutions": [], "resolution_history": [], "rating_version_id": versions[0]["id"] if len(versions) == 1 else None, "policy_version_id": policies[0]["id"] if len(policies) == 1 else None, "class_type_rule_version_id": class_rules[0]["id"] if class_rules else None, "confirmed_hours": {}, "af_policy_confirmation": persisted_af, "base_salary_inputs": persisted_salary, "base_salary_input_snapshot": self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None, "long_term_base_salary_inputs_snapshot": self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None, "historical_salary_reference_snapshot": None, "base_salary_deferred": False, "base_salary_deferred_by": "", "base_salary_deferred_at": None, "run_renewal_result_snapshot": None, "field_status": self._field_status([]), "summary": self._summary([]), "support_department_pending_preview": None, "support_department_snapshot": None, "teacher_group_pending_preview": None}
         self._bind_new_calculation(run)
         if explicit_window:
             # The caller stated the window explicitly; it outranks any stored
@@ -2119,51 +2168,14 @@ class PayrollService(CoreFlow):
         """A role-scoped work list that never mutates the schedule-authoritative Roster."""
         canonical = list(roster if roster is not None else self._roster_facts(run)["teachers"])
         operator_role = str(run.get("operator_role") or OPERATOR_DOS)
-        if self._submission_first(run):
-            materials = self._active_subject_group_materials(run)
-            if not materials:
-                return {
-                    "operator_role": operator_role, "selected_group": "", "selected_groups": [],
-                    "scope_kind": "FULL_SCHEDULE_FALLBACK", "teachers": canonical,
-                    "teacher_ids": [str(item.get("teacher_id") or item.get("display_name") or "") for item in canonical],
-                    "candidate_count": len(canonical), "scope_count": len(canonical),
-                    "canonical_roster_count": len(canonical), "outside_roster": [],
-                    "sources": ["CURRENT_PERIOD_SCHEDULE"],
-                }
-            by_name = {normalize_teacher(item.get("display_name")): item for item in canonical if normalize_teacher(item.get("display_name"))}
-            included: dict[str, dict] = {}
-            sources: dict[str, set[str]] = {}
-            for material in materials:
-                source_label = str(material.get("source_name") or material.get("name") or "学科组提交表")
-                for raw_name in material.get("teacher_names") or []:
-                    name = str(raw_name or "").strip()
-                    key = normalize_teacher(name)
-                    if not key:
-                        continue
-                    target = by_name.get(key)
-                    if target:
-                        teacher = str(target.get("display_name") or name)
-                        identity = str(target.get("teacher_id") or teacher)
-                        included[identity] = {**target, "display_name": teacher}
-                    else:
-                        teacher = name
-                        identity = f"SUBMISSION_NAME:{key}"
-                        included[identity] = {
-                            "teacher_id": identity, "display_name": teacher, "identity_key": key,
-                            "teacher_id_source": "SUBJECT_GROUP_SUBMISSION_NAME", "source_file": source_label,
-                            "source_sheet": material.get("source_sheet", ""), "first_source_row": "",
-                            "schedule_record_count": 0, "subjects": [], "first_lesson_date": "", "last_lesson_date": "",
-                            "scope_sources": ["SUBJECT_GROUP_SUBMISSION"],
-                        }
-                    sources.setdefault(identity, set()).add(source_label)
-            teachers = sorted(included.values(), key=lambda item: str(item.get("display_name") or ""))
+        if self._submission_first(run) and operator_role != OPERATOR_SUBJECT_LEADER:
             return {
                 "operator_role": operator_role, "selected_group": "", "selected_groups": [],
-                "scope_kind": "SUBJECT_GROUP_SUBMISSIONS", "teachers": teachers,
-                "teacher_ids": list(included), "candidate_count": len(included), "scope_count": len(teachers),
+                "scope_kind": "SCHEDULE_ROSTER_WITH_SUBMISSION_VALUES", "teachers": canonical,
+                "teacher_ids": [str(item.get("teacher_id") or item.get("display_name") or "") for item in canonical],
+                "candidate_count": len(canonical), "scope_count": len(canonical),
                 "canonical_roster_count": len(canonical), "outside_roster": [],
-                "sources": ["SUBJECT_GROUP_SUBMISSION"],
-                "teacher_sources": {str(item.get("display_name") or ""): sorted(sources.get(str(item.get("teacher_id") or ""), set())) for item in teachers},
+                "sources": ["CURRENT_PERIOD_SCHEDULE", "SUBJECT_GROUP_VALUES"],
             }
         if operator_role != OPERATOR_SUBJECT_LEADER:
             return {
@@ -2217,17 +2229,32 @@ class PayrollService(CoreFlow):
             target = by_id.get(candidate["teacher_id"]) if candidate["teacher_id"] else None
             target = target or by_name.get(normalize_teacher(candidate["teacher"])) or by_name.get(normalize_teacher(key))
             if target:
+                current_group, _reason = self._suggest_teacher_group(
+                    target.get("subject_counts") or target.get("subjects") or []
+                )
+                # A clear current-period schedule majority outranks stale
+                # long-term profiles, historical references and group sheets.
+                if current_group and current_group not in selected_groups:
+                    continue
                 teacher_id = str(target.get("teacher_id") or target.get("display_name") or "")
                 included[teacher_id] = {**target, "scope_sources": sorted(sources_by_key.get(key, set()))}
             else:
                 outside.append({**candidate, "scope_sources": sorted(sources_by_key.get(key, set())),
                                 "reason": "历史/提交资料属于所选组，但该教师不在本人工月排课 Roster；不新增工资行。"})
+        for target in canonical:
+            current_group, _reason = self._suggest_teacher_group(
+                target.get("subject_counts") or target.get("subjects") or []
+            )
+            if current_group in selected_groups:
+                teacher_id = str(target.get("teacher_id") or target.get("display_name") or "")
+                included[teacher_id] = {**target, "scope_sources": ["CURRENT_PERIOD_SCHEDULE_PRIMARY_SUBJECT"]}
+                sources_by_key.setdefault(teacher_id, set()).add("CURRENT_PERIOD_SCHEDULE_PRIMARY_SUBJECT")
         teachers = sorted(included.values(), key=lambda item: str(item.get("display_name") or ""))
         return {
             "operator_role": operator_role,
             "selected_group": selected_groups[0] if len(selected_groups) == 1 else "",
             "selected_groups": selected_groups, "scope_kind": "SUBJECT_GROUP",
-            "teachers": teachers, "teacher_ids": list(included), "candidate_count": len(candidates),
+            "teachers": teachers, "teacher_ids": list(included), "candidate_count": len(included) + len(outside),
             "scope_count": len(teachers), "canonical_roster_count": len(canonical),
             "outside_roster": outside,
             "sources": sorted({source for values in sources_by_key.values() for source in values}),
@@ -2306,6 +2333,7 @@ class PayrollService(CoreFlow):
                     "first_source_row": "",
                     "schedule_record_count": 0,
                     "subjects": set(),
+                    "subject_counts": {},
                     "lesson_dates": [],
                 }
                 grouped[key] = entry
@@ -2323,6 +2351,7 @@ class PayrollService(CoreFlow):
             subject = str(getattr(record, "subject", "") or "").strip()
             if subject:
                 entry["subjects"].add(subject)
+                entry["subject_counts"][subject] = entry["subject_counts"].get(subject, 0) + 1
             lesson_date = str(getattr(record, "lesson_date", "") or "").strip()
             if lesson_date:
                 entry["lesson_dates"].append(lesson_date[:10])
@@ -2342,6 +2371,7 @@ class PayrollService(CoreFlow):
             entry = grouped[key]
             dates = sorted(entry.pop("lesson_dates"))
             entry["subjects"] = sorted(entry["subjects"])
+            entry["subject_counts"] = dict(sorted(entry["subject_counts"].items()))
             entry["first_lesson_date"] = dates[0] if dates else ""
             entry["last_lesson_date"] = dates[-1] if dates else ""
             teachers.append(entry)
@@ -2451,18 +2481,36 @@ class PayrollService(CoreFlow):
         return item
 
     @staticmethod
-    def _suggest_teacher_group(subjects: list[str] | tuple[str, ...] | set[str]) -> tuple[str, str]:
-        matched: set[str] = set()
-        for subject in subjects:
+    def _suggest_teacher_group(subjects: list[str] | tuple[str, ...] | set[str] | dict[str, int]) -> tuple[str, str]:
+        """Infer a teacher's group from their most frequent current-period subject.
+
+        A stored subject-count map is preferred. Legacy callers that only have
+        a subject collection are treated as a one-count tie, never as evidence
+        that one of those subjects is the teacher's primary discipline.
+        """
+        counts = subjects if isinstance(subjects, dict) else {str(item): 1 for item in subjects}
+        normalized: list[tuple[str, int, set[str]]] = []
+        for subject, raw_count in counts.items():
             text = str(subject or "").strip().lower()
-            for group, words in SUBJECT_GROUP_KEYWORDS.items():
-                if any(word.lower() in text for word in words):
-                    matched.add(group)
-        if len(matched) == 1:
-            return next(iter(matched)), "排课科目候选"
-        if len(matched) > 1:
-            return "", "教师在多个学科出现，需确认长期归组"
-        return "", "排课没有足够的学科归组线索"
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if not text or count <= 0:
+                continue
+            groups = {group for group, words in SUBJECT_GROUP_KEYWORDS.items()
+                      if any(word.lower() in text for word in words)}
+            normalized.append((text, count, groups))
+        if not normalized:
+            return "", "排课没有可识别的学科"
+        maximum = max(item[1] for item in normalized)
+        leaders = [item for item in normalized if item[1] == maximum]
+        if any(not item[2] for item in leaders):
+            return "", "最多课次的学科无法对应科组"
+        groups = set().union(*(item[2] for item in leaders))
+        if len(groups) == 1:
+            return next(iter(groups)), f"按本月排课最多学科自动归入（{maximum} 节）"
+        return "", "最多课次在不同科组并列，需管理员确认"
 
     @staticmethod
     def _normalize_teacher_group_label(value: str) -> str:
@@ -2819,11 +2867,22 @@ class PayrollService(CoreFlow):
             schedule_person = roster_by_name.get(normalize_teacher(name), {})
             teacher_id = str(schedule_person.get("teacher_id") or name)
             group_profile = group_authority.get(teacher_id)
-            candidate, candidate_reason = self._suggest_teacher_group(schedule_person.get("subjects") or [])
+            candidate, candidate_reason = self._suggest_teacher_group(
+                schedule_person.get("subject_counts") or schedule_person.get("subjects") or []
+            )
             item["teacher_id"] = teacher_id
-            item["teacher_group"] = str(group_profile.get("group") or "") if group_profile else candidate
-            item["teacher_group_status"] = "CONFIRMED" if group_profile else ("SUGGESTED" if candidate else "NEEDS_CONFIRMATION")
-            item["teacher_group_source"] = str(group_profile.get("source_label") or "人工确认的长期归组") if group_profile else candidate_reason
+            if candidate:
+                item["teacher_group"] = candidate
+                item["teacher_group_status"] = "AUTO"
+                item["teacher_group_source"] = candidate_reason
+            elif group_profile:
+                item["teacher_group"] = str(group_profile.get("group") or "")
+                item["teacher_group_status"] = "CONFIRMED"
+                item["teacher_group_source"] = str(group_profile.get("source_label") or "已保存的长期归组")
+            else:
+                item["teacher_group"] = ""
+                item["teacher_group_status"] = "NEEDS_CONFIRMATION"
+                item["teacher_group_source"] = candidate_reason
             salary_basis = self._salary_basis_for(run, name, teacher_id, profiles=salary_basis_profiles)
             item["salary_basis"] = salary_basis["state"]
             item["salary_basis_source"] = salary_basis.get("source", "")
@@ -2851,7 +2910,7 @@ class PayrollService(CoreFlow):
                 "needs_confirmation": len(pending),
             },
             "needs_confirmation": pending,
-            "group_needs_confirmation": [item["teacher"] for item in resolved.values() if item.get("teacher_group_status") != "CONFIRMED"],
+            "group_needs_confirmation": [item["teacher"] for item in resolved.values() if item.get("teacher_group_status") not in {"CONFIRMED", "AUTO"}],
             "salary_basis_counts": {
                 SALARY_BASIS_PRESENT: sum(1 for item in resolved.values() if item.get("salary_basis") == SALARY_BASIS_PRESENT),
                 SALARY_BASIS_HOURLY_SUBMISSION: sum(1 for item in resolved.values() if item.get("salary_basis") == SALARY_BASIS_HOURLY_SUBMISSION),
@@ -3164,7 +3223,9 @@ class PayrollService(CoreFlow):
             teacher_id = str(person.get("teacher_id") or "")
             teacher_name = str(person.get("teacher") or "")
             current = roster_by_id.get(teacher_id) or roster_by_name.get(normalize_teacher(teacher_name))
-            suggested, _reason = self._suggest_teacher_group((current or {}).get("subjects") or [])
+            suggested, _reason = self._suggest_teacher_group(
+                (current or {}).get("subject_counts") or (current or {}).get("subjects") or []
+            )
             source_group = self._normalize_teacher_group_label(str(person.get("source_group") or ""))
             item = {
                 "teacher_id": str((current or {}).get("teacher_id") or teacher_id),
@@ -3244,7 +3305,7 @@ class PayrollService(CoreFlow):
         preview["roster"] = roster_summary
         return preview
 
-    def stage_support_department_preview(self, run_id: str, path: str) -> dict:
+    def stage_support_department_preview(self, run_id: str, path: str, expected_hash: str = "", display_name: str = "") -> dict:
         """Persist a lightweight identified/waiting-confirmation marker for the materials page."""
         run = self._load(run_id)
         self._require_fresh(run)
@@ -3252,6 +3313,8 @@ class PayrollService(CoreFlow):
         if not source.is_file():
             raise ValueError("找不到支持部工资资料，请重新选择文件。")
         before = source_fingerprint(source)
+        if expected_hash and before["sha256"] != expected_hash:
+            raise ValueError("已上传的支持部资料与本次选择不一致，请重新上传。")
         preview = self.preview_support_salary_import(run_id, str(source))
         after = source_fingerprint(source)
         if before["sha256"] != after["sha256"]:
@@ -3259,7 +3322,7 @@ class PayrollService(CoreFlow):
         pending = {
             "status": "PENDING_CONFIRMATION",
             "period": run["period"],
-            "source_name": source.name,
+            "source_name": Path(str(display_name or source.name)).name,
             "source_path": str(source),
             "source_sha256": before["sha256"],
             "source_sheet": preview.get("sheet", ""),
@@ -4419,6 +4482,8 @@ class PayrollService(CoreFlow):
         run = self._load(run_id)
         if not str(output_path or "").strip():
             output_path = str(default_output_dir(f"工资表-{run['period']}.xlsx"))
+        if self._submission_first(run) and (run.get("period_authority") or {}).get("is_fallback", False):
+            raise ValueError("该月份人工月基础资料未配置，请联系管理员处理后再生成正式工资表。")
         if self._bind_template_from_run_files(run):
             self.store.save(run)
         if production and not run.get("template_path"):
@@ -4891,19 +4956,24 @@ class PayrollService(CoreFlow):
     def import_requirement(self, role: str = "schedule"):
         return SCHEDULE_AC_REQUIREMENT if role in {"schedule", "check"} else None
 
-    def preview_import_mapping(self, path: str, role: str = "schedule", period: str = "") -> dict:
+    def preview_import_mapping(self, path: str, role: str = "schedule", period: str = "", expected_sha256: str = "") -> dict:
         source = Path(path).expanduser().resolve()
         if not source.is_file():
-            raise ValueError("找不到原始文件。请关闭 Excel/WPS 后重新选择。")
+            raise ValueError("找不到已上传的文件副本，请重新上传该资料。")
+        before = version(source)
+        if expected_sha256 and before["sha256"] != expected_sha256:
+            raise ValueError("已上传材料在字段识别前发生变化，请重新上传。")
         requirement = self.import_requirement(role)
         if requirement is None:
             raise ValueError("该材料类别暂不支持字段映射。")
         analysis = analyze_mapping(source, requirement, profiles=self.store.list_import_profiles(requirement.name))
+        known_ok = False
         if role == "schedule":
             known = read_schedule_excel(source, period or "0000-00")
             known_ok = known.ok and bool(known.records)
-        else:
-            known_ok = False
+        after = version(source)
+        if before != after:
+            raise ValueError("文件在字段识别期间发生变化，请重新上传。")
         fields = []
         for item in requirement.fields:
             header = analysis.mapped_headers.get(item.field, "")
@@ -4929,6 +4999,7 @@ class PayrollService(CoreFlow):
             "profile_id": analysis.profile_id,
             "profile_drift": analysis.profile_drift,
             "mapping": dict(analysis.mapping),
+            "source_sha256": before["sha256"],
         }
 
     def save_import_profile(self, path: str, role: str, mapping: dict, actor: str, name: str = "") -> dict:
@@ -4965,14 +5036,15 @@ class PayrollService(CoreFlow):
         lines.append("可以在“字段识别”里指定每一列代表哪个业务字段，确认后即可继续导入。")
         return "\n".join(lines)
 
-    def import_file(self, run_id: str, role: str, path: str, expected_hash: str | None = None, mapping: dict | None = None, profile_name: str = "", profile_actor: str = "", *, _subject_group_confirmation: bool = False) -> dict:
+    def import_file(self, run_id: str, role: str, path: str, expected_hash: str | None = None, mapping: dict | None = None, profile_name: str = "", profile_actor: str = "", *, _subject_group_confirmation: bool = False, display_name: str = "") -> dict:
         if role not in LABELS:
             raise ValueError("未知材料类别。")
         if role in SCOPE_ROLES and not _subject_group_confirmation:
             raise ValueError("学科组提交表必须先预览并由负责人确认后，才会用于本月工资。")
         source = Path(path).expanduser().resolve()
+        source_display_name = Path(str(display_name or source.name)).name
         if not source.is_file():
-            raise ValueError("找不到原始文件。请关闭 Excel/WPS 后重新选择。")
+            raise ValueError("找不到已上传的资料副本，请重新上传这份文件。")
         try:
             before = version(source)
         except OSError as exc:
@@ -4980,6 +5052,8 @@ class PayrollService(CoreFlow):
         if expected_hash and expected_hash != before["sha256"]:
             raise ValueError("所选原文件与刚才拖放识别的文件不一致。")
         run = self._load(run_id)
+        previous_material = (run.get("files") or {}).get(role) or {}
+        replacing_material = bool(previous_material and previous_material.get("sha256") != before["sha256"])
         if any(key != role and item["sha256"] == before["sha256"] for key, item in run["files"].items()):
             raise ValueError("同一份文件不能同时充当两个材料类别。")
         is_csv = source.suffix.lower() == ".csv"
@@ -5032,27 +5106,36 @@ class PayrollService(CoreFlow):
             raise ValueError(self._file_error(exc)) from exc
         if not unchanged:
             raise ValueError("文件在读取期间发生变化，请关闭 Excel/WPS 后重试。")
+        if replacing_material:
+            self._invalidate_active_calculation(
+                run,
+                event="MATERIAL_SOURCE_REPLACED",
+                reason=f"本次 {LABELS[role]}来源已更换；旧计算结果已归档，需按新材料重新核算。",
+                actor="材料导入",
+                metadata={"role": role, "previous_sha256": previous_material.get("sha256", ""),
+                          "new_sha256": before["sha256"]},
+            )
         if role == "schedule":
             # Persist only course-version snapshots here.  The current payroll
             # source must not become student history used to justify itself.
-            self._save_course_export_snapshots(result.records, before)
+            self._save_course_export_snapshots(result.records, {**before, "path": str(source)}, source_display_name=source_display_name)
         if mapping and profile_name:
             # Remember the confirmed layout so next month's identical file imports
             # without asking again. Drift is still re-checked on every import.
             self.save_import_profile(str(source), role, dict(mapping.get("mapping", {})), profile_actor, profile_name)
-        run["files"][role] = {"name": source.name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets] if workbook is not None else ["CSV"], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets) if workbook is not None else 0, "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets) if workbook is not None else 0, "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets) if workbook is not None else 0}
+        run["files"][role] = {"name": source_display_name, "path": str(source), **before, "label": LABELS[role], "records": len(result.records), "teachers": len({record.teacher for record in result.records if hasattr(record, "teacher")}), "warnings": [issue.code for issue in result.warnings], "warning_messages": [self._warning_message(issue.code) for issue in result.warnings], "sheets": [sheet.name for sheet in workbook.sheets] if workbook is not None else ["CSV"], "formula_count": sum(sheet.formula_count for sheet in workbook.sheets) if workbook is not None else 0, "missing_cache": sum(sheet.formula_cache_missing for sheet in workbook.sheets) if workbook is not None else 0, "external_references": workbook.external_link_count + sum(sheet.external_formula_count for sheet in workbook.sheets) if workbook is not None else 0}
         if role == "schedule":
             run["schedule_roster_snapshot"] = self._build_schedule_roster_snapshot(
-                run, result.records, source_file=source.name, source_sha256=before["sha256"],
+                run, result.records, source_file=source_display_name, source_sha256=before["sha256"],
             )
             self._apply_schedule_roster_authority(run, run["schedule_roster_snapshot"])
             run["period_check"] = self._period_evidence(
-                run, result.records, source.name, source,
+                run, result.records, source_display_name, source,
                 evidence_dates=result.coverage.get("all_lesson_dates", ()) if is_csv else (),
             )
             self._replace_material_period_evidence(
                 run, role,
-                {"role": role, "source_file": source.name, "source_month": run["period_check"].get("source_month"), "basis": "课表实际课程日期"},
+                {"role": role, "source_file": source_display_name, "source_month": run["period_check"].get("source_month"), "basis": "课表实际课程日期"},
             )
             # Grade resolutions are bound to coordinates in the imported
             # schedule workbook. Replacing that source invalidates them.
@@ -5067,7 +5150,7 @@ class PayrollService(CoreFlow):
             if hint:
                 self._replace_material_period_evidence(
                     run, role,
-                    {"role": role, "source_file": source.name, "source_month": hint, "basis": "材料文件名或工作表月份"},
+                    {"role": role, "source_file": source_display_name, "source_month": hint, "basis": "材料文件名或工作表月份"},
                 )
         self._refresh_material_period_check(run)
         # Legacy per-field decisions predate business review cards.  They are
@@ -5251,6 +5334,7 @@ class PayrollService(CoreFlow):
         persisted_salary = self._effective_base_salary_inputs(period)
         run["base_salary_inputs"] = persisted_salary
         run["base_salary_input_snapshot"] = self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None
+        run["long_term_base_salary_inputs_snapshot"] = self._base_salary_snapshot(period, persisted_salary) if persisted_salary else None
         run["base_salary_deferred"] = False
         run["base_salary_deferred_by"] = ""
         run["base_salary_deferred_at"] = None
@@ -6039,8 +6123,13 @@ class PayrollService(CoreFlow):
         if simple_flow:
             resolved_entries: dict[str, dict] = {}
             salary_inputs: dict[str, dict] = {}
+            long_term_inputs = ((run.get("long_term_base_salary_inputs_snapshot") or {}).get("inputs")
+                                or run.get("base_salary_inputs") or {})
             for teacher in sorted(scope_teachers):
                 fields_for_teacher: dict[str, dict] = {}
+                profile = next((entry for key, entry in long_term_inputs.items()
+                                if normalize_teacher(str((entry or {}).get("display_name") or key)) == normalize_teacher(teacher)), {})
+                profile_fields = profile.get("fields") if isinstance(profile, dict) and isinstance(profile.get("fields"), dict) else {}
                 for code in ("B", "D", "E", "F", "G", "H", "I", "J", "K", "L"):
                     support_present, support_value = self._support_field_value(run, teacher, code)
                     group_item = (group_fields.get(teacher) or {}).get(code) or {}
@@ -6052,7 +6141,20 @@ class PayrollService(CoreFlow):
                     elif group_item:
                         selected = {**group_item, "source_type": "SUBJECT_GROUP_SUBMISSION"}
                     else:
-                        selected = {"value": None, "source_type": "BLANK_NO_SOURCE", "source_file": "", "source_sheet": "", "source_cell": "", "source_sha256": ""}
+                        profile_field = profile_fields.get(code)
+                        profile_value = profile_field.get("value") if isinstance(profile_field, dict) else profile_field
+                        if profile_value not in (None, ""):
+                            provenance = profile_field.get("provenance") if isinstance(profile_field, dict) else {}
+                            selected = {
+                                "value": profile_value,
+                                "source_type": "LONG_TERM_BASE_SALARY_PROFILE",
+                                "source_file": str((provenance or {}).get("source_file") or profile_field.get("source") or profile.get("source") or "已确认的长期基本工资资料") if isinstance(profile_field, dict) else str(profile.get("source") or "已确认的长期基本工资资料"),
+                                "source_sheet": str((provenance or {}).get("source_sheet") or "") if isinstance(profile_field, dict) else "",
+                                "source_cell": str((provenance or {}).get("source_cell") or "") if isinstance(profile_field, dict) else "",
+                                "source_sha256": str((provenance or {}).get("source_sha256") or "") if isinstance(profile_field, dict) else "",
+                            }
+                        else:
+                            selected = {"value": None, "source_type": "BLANK_NO_SOURCE", "source_file": "", "source_sheet": "", "source_cell": "", "source_sha256": ""}
                     fields_for_teacher[code] = selected
                 resolved_entries[teacher] = fields_for_teacher
                 g_to_l = {code: {"value": fields_for_teacher[code].get("value"),
@@ -7230,7 +7332,7 @@ class PayrollService(CoreFlow):
                 continue
         return snapshots
 
-    def _save_course_export_snapshots(self, records: list, source: dict[str, Any]) -> int:
+    def _save_course_export_snapshots(self, records: list, source: dict[str, Any], *, source_display_name: str = "") -> int:
         """Persist only course-version evidence, including unstarted rows.
 
         An unstarted row is deliberately excluded from student-grade facts but
@@ -7247,7 +7349,7 @@ class PayrollService(CoreFlow):
                 continue
             coordinate = getattr(class_cell, "coordinate", "")
             sheet = getattr(class_cell, "sheet", "")
-            source_file = str(record.source or source.get("path", ""))
+            source_file = str(source_display_name or record.source or Path(str(source.get("path") or "")).name)
             snapshot = {
                 "id": hashlib.sha256(f"course-snapshot|{source['sha256']}|{coordinate}|{record.lesson_date}|{lesson_start_time}|{record.teacher}|{record.subject}".encode()).hexdigest()[:32],
                 "lesson_date": record.lesson_date,
@@ -7634,6 +7736,21 @@ class PayrollService(CoreFlow):
         roster_facts = self._roster_facts(run, persist=persist_roster and not legacy_workflow_gate)
         processing_scope = self._processing_scope(run, roster_facts.get("teachers") or [])
         employment_view = self.employment_overview(run, processing_scope=processing_scope, roster_facts=roster_facts)
+        base_salary_missing_teachers: list[str] = []
+        if self._submission_first(run) and mode == MODE_GENERATE and run.get("core_calculation"):
+            input_entries = (run.get("payroll_input_fields_snapshot") or {}).get("entries") or {}
+            for person in processing_scope.get("teachers") or []:
+                teacher = str(person.get("display_name") or person.get("teacher") or person.get("teacher_id") or "").strip()
+                entry = input_entries.get(teacher) or {}
+                complete = bool(entry) and all(
+                    (raw.get("value") if isinstance(raw, dict) else raw) not in (None, "")
+                    and not (isinstance(raw, dict) and raw.get("source_type") == "BLANK_NO_SOURCE")
+                    for code in ("G", "H", "I", "J", "K", "L")
+                    for raw in (entry.get(code),)
+                )
+                if teacher and not complete:
+                    base_salary_missing_teachers.append(teacher)
+            base_salary_missing_teachers.sort()
         references = [] if self._submission_first(run) else list(run.get("historical_salary_reference_snapshots") or [])
         latest_reference = {} if self._submission_first(run) else (run.get("historical_salary_reference_snapshot") or {})
         if latest_reference and all(item.get("source_sha256") != latest_reference.get("source_sha256") for item in references):
@@ -7708,6 +7825,7 @@ class PayrollService(CoreFlow):
             "roster_facts": roster_facts,
             "processing_scope": processing_scope,
             "employment": employment_view,
+            "base_salary_missing_teachers": base_salary_missing_teachers,
             "historical_salary_reference_summary": history_reference_summary,
             "support_source": self._support_source_summary(run),
             "support_department_pending_preview": run.get("support_department_pending_preview"),

@@ -700,6 +700,37 @@ def test_user_facing_material_import_keeps_renewal_and_refund_separate(tmp_path)
     assert len(saved["refund_reports"]) == 1
 
 
+def test_peripheral_upload_hash_is_bound_and_replacing_refund_retires_old_calculation(tmp_path):
+    import hashlib
+    import pytest
+    service = PayrollService(tmp_path / "app-data")
+    run = service.create("2026-08", mode="GENERATE")
+    first = tmp_path / "refund-first.csv"
+    first.write_text("教师,学生,金额,状态,说明\n教师甲,学生甲,-100,已确认,脱敏测试\n", encoding="utf-8-sig")
+    first_hash = hashlib.sha256(first.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="上传的材料副本与本次选择不一致"):
+        service.import_material_file(run["id"], "refund", str(first), expected_hash="0" * 64)
+
+    service.import_material_file(run["id"], "refund", str(first), expected_hash=first_hash)
+    stored = service._load(run["id"])
+    stored["core_calculation"] = {"rows": [{"teacher": "教师甲", "fields": {}}]}
+    stored["generated_payroll"] = {"path": str(tmp_path / "old.xlsx"), "rows": []}
+    stored["status"] = "REVIEW_REQUIRED"
+    service.store.save(stored)
+
+    revised = tmp_path / "refund-revised.csv"
+    revised.write_text("教师,学生,金额,状态,说明\n教师甲,学生甲,-120,已确认,脱敏修正版\n", encoding="utf-8-sig")
+    revised_hash = hashlib.sha256(revised.read_bytes()).hexdigest()
+    service.import_material_file(run["id"], "refund", str(revised), expected_hash=revised_hash)
+    refreshed = service._load(run["id"])
+
+    assert refreshed["material_inputs"]["refund"]["sha256"] == revised_hash
+    assert refreshed["peripheral_material_history"][-1]["material"]["sha256"] == first_hash
+    assert "core_calculation" not in refreshed
+    assert "generated_payroll" not in refreshed
+    assert refreshed["recalculation_required"] is True
+
+
 def test_user_facing_auto_material_import_classifies_schedule_and_subject_group(tmp_path):
     service = PayrollService(tmp_path / "app-data")
     run = service.create("2026-08", mode="GENERATE")

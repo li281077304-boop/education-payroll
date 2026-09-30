@@ -30,6 +30,9 @@ APP_MARKER = "education-payroll"
 ENV_CONFIG = "PAYROLL_LAUNCHER_CONFIG"
 ENV_REPO_ROOT = "PAYROLL_LAUNCHER_REPO_ROOT"
 ENV_PYTHON = "PAYROLL_LAUNCHER_PYTHON"
+ENV_BUILD_SHA = "PAYROLL_BUILD_SHA"
+ENV_RELEASE_VERSION = "PAYROLL_RELEASE_VERSION"
+ENV_BUILD_DIRTY = "PAYROLL_BUILD_DIRTY"
 
 SERVICE_FLAG = "--service"
 
@@ -93,6 +96,9 @@ class LauncherConfig:
     # records which of the two shapes we are running so ``service_argv`` and
     # the interpreter preflight do not have to guess.
     frozen: bool = False
+    release_version: str = "Payroll-V1"
+    build_sha: str = ""
+    build_dirty: bool = False
 
     @property
     def state_dir(self) -> Path:
@@ -168,6 +174,7 @@ def _frozen_config(file_config: dict) -> LauncherConfig:
         raise LauncherConfigError(f"找不到工资核算程序：{executable}")
 
     data_dir = Path(str(file_config.get("data_dir") or default_data_dir())).expanduser()
+    build_info = _load_config_file(program / "build-info.json")
     return LauncherConfig(
         repo_root=program,
         python=executable,
@@ -175,6 +182,9 @@ def _frozen_config(file_config: dict) -> LauncherConfig:
         port=int(file_config.get("port") or DEFAULT_PORT),
         data_dir=data_dir,
         frozen=True,
+        release_version=str(build_info.get("release_version") or "Payroll-V1"),
+        build_sha=str(build_info.get("build_sha") or ""),
+        build_dirty=bool(build_info.get("build_dirty", False)),
     )
 
 
@@ -214,7 +224,14 @@ def resolve_config(explicit_config: Path | None = None) -> LauncherConfig:
     data_dir = Path(str(file_config.get("data_dir") or default_data_dir())).expanduser()
     port = int(file_config.get("port") or DEFAULT_PORT)
     host = str(file_config.get("host") or HOST)
-    return LauncherConfig(repo_root=repo_root, python=candidate, host=host, port=port, data_dir=data_dir)
+    return LauncherConfig(
+        repo_root=repo_root, python=candidate, host=host, port=port, data_dir=data_dir,
+        release_version=os.environ.get(ENV_RELEASE_VERSION)
+        or str(file_config.get("release_version") or "Payroll-V1"),
+        build_sha=os.environ.get(ENV_BUILD_SHA) or str(file_config.get("build_sha") or ""),
+        build_dirty=(os.environ.get(ENV_BUILD_DIRTY, "").strip().lower() in {"1", "true", "yes"}
+                     or bool(file_config.get("build_dirty", False))),
+    )
 
 
 def with_overrides(cfg: LauncherConfig, *, data_dir: Path | None = None, port: int | None = None) -> LauncherConfig:

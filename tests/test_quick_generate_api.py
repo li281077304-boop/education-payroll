@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
 from threading import Thread
@@ -24,6 +25,18 @@ def _schedule(path: Path, teachers: list[str], *, day: int = 5) -> Path:
         writer.writerow(["teacher_id", "teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"])
         for index, teacher in enumerate(teachers):
             writer.writerow([f"t-{index}", teacher, "九年级", "数学", "1对1", 1, "已上课", f"2026-08-{day:02d} 10:00"])
+    return path
+
+
+def _period_schedule(path: Path, period: str, teacher: str) -> Path:
+    year, month = map(int, period.split("-"))
+    from calendar import monthrange
+    days = monthrange(year, month)[1]
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["teacher_id", "teacher", "grade", "subject", "class_type", "attended", "lesson_status", "time"])
+        for day in range(1, days + 1):
+            writer.writerow(["demo-teacher", teacher, "九年级", "数学", "1对1", 1, "已上课", f"{year}-{month:02d}-{day:02d} 09:00"])
     return path
 
 
@@ -89,6 +102,75 @@ def test_quick_http_creates_regular_run_imports_materials_generates_and_download
         server.shutdown(); server.server_close(); worker.join()
 
 
+def test_quick_http_does_not_route_missing_upload_copy_to_professional_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    server = PayrollHttpServer(("127.0.0.1", 0), service, Path(__file__).parents[1] / "payroll_ui" / "static")
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+        run = _http_post(base, token, "/api/quick-runs", {"period": "2026-08"})["run"]
+        result = _http_post(base, token, f"/api/quick-runs/{run['id']}/materials",
+                            {"paths": [{"path": str(tmp_path / "missing-server-copy.xlsx"), "sha256": "0" * 64}]})
+        assert result["ok"] is False
+        assert result["materials"][0]["error_kind"] == "MATERIAL_READ_FAILED"
+        assert result["materials"][0]["error_kind"] != "PROFESSIONAL_REQUIRED"
+        assert "找不到这份材料" in result["materials"][0]["message"]
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
+
+
+def test_quick_http_preserves_original_uploaded_name_and_hash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    server = PayrollHttpServer(("127.0.0.1", 0), service, Path(__file__).parents[1] / "payroll_ui" / "static")
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    source = _schedule(tmp_path / "opaque-upload-id.csv", ["教师甲"])
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    try:
+        token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+        run = _http_post(base, token, "/api/quick-runs", {"period": "2026-08"})["run"]
+        result = _http_post(base, token, f"/api/quick-runs/{run['id']}/materials", {
+            "paths": [{"path": str(source), "sha256": digest, "name": "八月排课表.csv"}],
+        })
+        assert result["ok"] is True
+        quick_material = result["run"]["quick_materials"][0]
+        assert quick_material["name"] == "八月排课表.csv"
+        assert quick_material["sha256"] == digest
+        assert result["materials"][0]["material"]["name"] == "八月排课表.csv"
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
+
+
+def test_legacy_group_files_route_rejects_mismatched_upload_hash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from urllib.error import HTTPError
+
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    quick = service.create_quick_run("2026-08")["run"]
+    run = service.quick_to_professional(quick["id"])["run"]
+    group = _group(tmp_path / "opaque-group-copy.csv", ["教师甲"])
+    server = PayrollHttpServer(("127.0.0.1", 0), service, Path(__file__).parents[1] / "payroll_ui" / "static")
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        token = json.loads(urlopen(base + "/api/bootstrap").read())["token"]
+        try:
+            _http_post(base, token, f"/api/runs/{run['id']}/files", {
+                "role": "math", "path": str(group), "sha256": "0" * 64,
+                "name": "original-group.csv",
+            })
+        except HTTPError as exc:
+            assert exc.code == 400
+            assert "与本次选择不一致" in exc.read().decode("utf-8")
+        else:
+            pytest.fail("/files math compatibility route accepted an upload copy with the wrong hash")
+    finally:
+        server.shutdown(); server.server_close(); worker.join()
+
+
 def test_quick_historical_period_uses_its_period_and_rating_authorities(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = PayrollService(tmp_path / "private-payroll-data")
     service.record_period_authority("2026-08", "2026-08-03", "2026-08-30", "USER_CONFIRMED",
@@ -118,6 +200,109 @@ def test_quick_historical_period_uses_its_period_and_rating_authorities(tmp_path
     assert after_upload["period_authority"]["period_start"] == "2026-08-03"
 
 
+def test_new_monthly_flow_run_reuses_long_term_default_af_policy_without_exceptions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    first = service.create_quick_run("2026-08")["run"]
+    service.stage_quick_material(first["id"], str(_schedule(tmp_path / "first-month.csv", ["教师甲"])))
+    service.quick_to_professional(first["id"])
+    service.confirm_af_policy(first["id"], "合成管理员", default_obligation_hours=30,
+                              exceptions={"教师甲": {"obligation_hours": 0, "reason": "仅首 Run 例外"}})
+
+    next_run = service.create_quick_run("2026-08")["run"]
+    policy = next_run["af_policy_confirmation"]
+    assert policy["confirmed"] is True
+    assert policy["default_obligation_hours"] == 30
+    assert policy["exceptions"] == {}
+
+
+def test_two_month_product_chain_reuses_authorities_and_only_needs_next_schedule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PayrollService(tmp_path / "private-payroll-data")
+    service.record_period_authority("2026-08", "2026-08-01", "2026-08-31", "USER_CONFIRMED",
+                                   confirmed_by="合成 UAT", reason="8 月测试周期。")
+    service.record_period_authority("2026-09", "2026-09-01", "2026-09-30", "USER_CONFIRMED",
+                                   confirmed_by="合成 UAT", reason="9 月测试周期。")
+    service.save_rating_version("2026-08", "2026-08", "合成星级 8 月", "aug-v1", [{"teacher": "教师甲", "rating": 3}])
+    september_rating = service.save_rating_version("2026-09", "2026-09", "合成星级 9 月", "sep-v1", [{"teacher": "教师甲", "rating": 3}])
+    september_rating_id = next(item["id"] for item in september_rating if item["effective_from"] == "2026-09")
+    service.register_company_template(str(_sanitized_template(tmp_path)), "合成 UAT")
+    monkeypatch.setattr(service_module, "default_output_dir",
+                        lambda filename=None: (tmp_path / "exports" / str(filename)) if filename else (tmp_path / "exports"))
+
+    august = service.create_quick_run("2026-08")["run"]
+    service.stage_quick_material(august["id"], str(_period_schedule(tmp_path / "august.csv", "2026-08", "教师甲")))
+    aug_result = service.quick_generate(august["id"])
+    assert aug_result["ok"] is True
+
+    september = service.create_quick_run("2026-09")["run"]
+    assert september["period_start"] == "2026-09-01" and september["period_end"] == "2026-09-30"
+    assert september["period_authority"]["is_fallback"] is False
+    assert september["rating_version_id"] == september_rating_id
+    assert september["af_policy_confirmation"]["confirmed"] is True
+    assert september["af_policy_confirmation"]["default_obligation_hours"] == 30
+    assert september["af_policy_confirmation"]["exceptions"] == {}
+    assert september["template"]["source"] == "已登记公司工资模板"
+
+    only_schedule = _period_schedule(tmp_path / "september.csv", "2026-09", "教师甲")
+    service.stage_quick_material(september["id"], str(only_schedule))
+    output = service.quick_generate(september["id"])
+    refreshed = service.get(september["id"])
+    records = service._read_for_run("schedule", only_schedule, service.store.get(september["id"])).records
+
+    assert output["ok"] is True
+    assert len(records) == 30
+    assert all(record.lesson_date.startswith("2026-09-") for record in records)
+    assert refreshed["rating_version_id"] == september["rating_version_id"]
+    assert refreshed["af_policy_confirmation"]["default_obligation_hours"] == 30
+    assert refreshed["files"]["schedule"]["name"] == only_schedule.name
+    assert refreshed["template"]["source"] == "已登记公司工资模板"
+    assert not refreshed.get("subject_group_materials")
+    assert Path(output["path"]).is_file()
+
+
+def test_professional_second_month_schedule_only_reuses_long_term_base_salary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = PayrollService(tmp_path / "private-payroll-data")
+    service.record_period_authority("2026-08", "2026-08-01", "2026-08-31", "USER_CONFIRMED",
+                                   confirmed_by="合成 UAT", reason="8 月测试周期。")
+    service.record_period_authority("2026-09", "2026-09-01", "2026-09-30", "USER_CONFIRMED",
+                                   confirmed_by="合成 UAT", reason="9 月测试周期。")
+    service.save_rating_version("2026-08", "2026-08", "合成星级 8 月", "aug-v1", [{"teacher": "教师甲", "rating": 3}])
+    service.save_rating_version("2026-09", "2026-09", "合成星级 9 月", "sep-v1", [{"teacher": "教师甲", "rating": 3}])
+    service.register_company_template(str(_sanitized_template(tmp_path)), "合成 UAT")
+    monkeypatch.setattr(service_module, "default_output_dir",
+                        lambda filename=None: (tmp_path / "exports" / str(filename)) if filename else (tmp_path / "exports"))
+    salary_fields = {code: {"value": value, "source": "合成长期基本工资资料"} for code, value in {
+        "G": 6000, "H": 500, "I": 200, "J": 300, "K": 26, "L": 26,
+    }.items()}
+
+    august = service.create("2026-08", mode="GENERATE", operator_role="DOS",
+                            monthly_flow_version=MONTHLY_FLOW_SUBMISSION_FIRST)
+    service.import_file(august["id"], "schedule", str(_period_schedule(tmp_path / "august-base.csv", "2026-08", "教师甲")))
+    service.save_base_salary_inputs(august["id"], [{"teacher_id": "demo-teacher", "teacher": "教师甲", "fields": salary_fields}], "合成 UAT", source="合成长期基本工资资料")
+    service.confirm_af_policy(august["id"], "合成 UAT", default_obligation_hours=30, exceptions={})
+    service.check(august["id"])
+    first_export = service.generate_payroll(august["id"], str(tmp_path / "exports" / "august.xlsx"), production=True)
+    assert Path(first_export["path"]).is_file()
+
+    september = service.create("2026-09", mode="GENERATE", operator_role="DOS",
+                               monthly_flow_version=MONTHLY_FLOW_SUBMISSION_FIRST)
+    assert september["base_salary_input_snapshot"]
+    assert september["base_salary_inputs"]["教师甲"]["fields"]["G"]["value"] == 6000
+    assert september["af_policy_confirmation"]["confirmed"] is True
+    assert september["af_policy_confirmation"]["default_obligation_hours"] == 30
+    assert september["af_policy_confirmation"]["exceptions"] == {}
+    assert september["template"]["source"] == "已登记公司工资模板"
+    service.import_file(september["id"], "schedule", str(_period_schedule(tmp_path / "september-base.csv", "2026-09", "教师甲")))
+
+    checked = service.check(september["id"])
+    preview = service.preview_payroll(september["id"])
+    exported = service.generate_payroll(september["id"], str(tmp_path / "exports" / "september.xlsx"), production=True)
+    refreshed = service.get(september["id"])
+    assert checked["generated_payroll"]["rows"][0]["final_fields"]["M"]["state"] == "DETERMINED"
+    assert preview["generated_payroll"]["rows"][0]["final_fields"]["M"]["value"] == 7000
+    assert refreshed["base_salary_missing_teachers"] == []
+    assert Path(exported["path"]).is_file()
+
+
 def test_quick_schedule_only_generates_full_schedule_roster_with_blank_b_to_l(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service(tmp_path, monkeypatch, ["教师甲", "教师乙"])
     run = service.create_quick_run("2026-08")["run"]
@@ -130,6 +315,22 @@ def test_quick_schedule_only_generates_full_schedule_roster_with_blank_b_to_l(tm
     assert all(sheet.cell(row, column).value is None for row in (5, 6) for column in range(2, 13) if column != 3)
     assert service.get(run["id"])["af_policy_confirmation"]["default_obligation_hours"] == 30
     assert service.get(run["id"])["af_policy_confirmation"]["confirmed_by"] == "QUICK_GENERATE"
+
+
+def test_monthly_flow_exposes_missing_base_salary_teachers_for_inline_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲", "教师乙"])
+    run = service.create_quick_run("2026-08")["run"]
+    service.stage_quick_material(run["id"], str(_schedule(tmp_path / "schedule.csv", ["教师甲", "教师乙"])))
+    service.quick_generate(run["id"])
+    rendered = service.get(run["id"])
+    assert set(rendered["base_salary_missing_teachers"]) == {"教师甲", "教师乙"}
+
+    service = _service(tmp_path / "with-group", monkeypatch, ["教师甲", "教师乙"])
+    with_group = service.create_quick_run("2026-08")["run"]
+    service.stage_quick_material(with_group["id"], str(_schedule(tmp_path / "with-group-schedule.csv", ["教师甲", "教师乙"])))
+    service.stage_quick_material(with_group["id"], str(_group(tmp_path / "with-group.csv", ["教师甲", "教师乙"])))
+    service.quick_generate(with_group["id"])
+    assert service.get(with_group["id"])["base_salary_missing_teachers"] == []
 
 
 def test_quick_group_scope_is_submission_union_and_conflicts_stop_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,7 +372,7 @@ def test_quick_group_union_deduplicates_same_teacher_with_identical_values(tmp_p
     assert {row["teacher"] for row in service.get(run["id"])["generated_payroll"]["rows"]} == set(teachers)
 
 
-def test_quick_fifty_one_schedule_teachers_and_fifteen_group_teachers_output_fifteen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_quick_uses_schedule_roster_when_group_submission_covers_only_fifteen_of_fifty_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     schedule_teachers = [f"教师{index:02d}" for index in range(51)]
     service = _service(tmp_path, monkeypatch, schedule_teachers)
     run = service.create_quick_run("2026-08")["run"]
@@ -179,8 +380,10 @@ def test_quick_fifty_one_schedule_teachers_and_fifteen_group_teachers_output_fif
     service.stage_quick_material(run["id"], str(_group(tmp_path / "group.csv", schedule_teachers[:15])))
     result = service.quick_generate(run["id"])
     assert result["ok"] is True
-    assert result["teacher_count"] == 15
-    assert {row["teacher"] for row in service.get(run["id"])["generated_payroll"]["rows"]} == set(schedule_teachers[:15])
+    assert result["teacher_count"] == 51
+    rows = service.get(run["id"])["generated_payroll"]["rows"]
+    assert {row["teacher"] for row in rows} == set(schedule_teachers)
+    assert all(row["final_fields"]["M"]["state"] == "BLOCKED_BY_INPUT" for row in rows[15:])
 
 
 def test_quick_support_material_is_routed_to_professional_and_kept_in_same_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,7 +456,7 @@ def test_quick_orchestrator_contains_no_independent_payroll_formula_engine() -> 
     assert "self.generate_payroll(run_id" in block
 
 
-def test_quick_user_with_unscheduled_submission_teacher_keeps_row_but_routes_core_gap_to_professional(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_quick_group_submission_teacher_outside_schedule_roster_does_not_add_payroll_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = _service(tmp_path, monkeypatch, ["排课教师"])
     run = service.create_quick_run("2026-08")["run"]
     schedule = _schedule(tmp_path / "schedule.csv", ["排课教师"])
@@ -261,10 +464,10 @@ def test_quick_user_with_unscheduled_submission_teacher_keeps_row_but_routes_cor
     service.stage_quick_material(run["id"], str(schedule))
     service.stage_quick_material(run["id"], str(group))
     result = service.quick_generate(run["id"])
-    assert result["ok"] is False
-    assert result["error_kind"] == "NEEDS_PROFESSIONAL_REVIEW"
+    assert result["ok"] is True
     current = service.get(run["id"])
-    assert {row["teacher"] for row in current["core_calculation"]["rows"]} == {"排课教师", "组表无排课教师"}
+    assert {row["teacher"] for row in current["core_calculation"]["rows"]} == {"排课教师"}
+    assert {row["teacher"] for row in current["generated_payroll"]["rows"]} == {"排课教师"}
     assert current["id"] == run["id"]
 
 

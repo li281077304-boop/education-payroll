@@ -45,20 +45,15 @@ def _run_with_schedule(service: PayrollService, tmp_path: Path, teachers: list[t
     return run["id"]
 
 
-def test_new_math_schedule_teacher_does_not_enter_leader_scope_without_confirmed_membership(tmp_path):
+def test_new_math_schedule_teacher_is_auto_included_in_matching_leader_scope(tmp_path):
     service = PayrollService(tmp_path / "sandbox")
     run_id = _run_with_schedule(service, tmp_path, [("new-math", "新数学教师", "数学")], role="SUBJECT_LEADER", group="数学组")
 
     view = service.get(run_id)
 
-    assert view["processing_scope"]["scope_count"] == 0
-    assert view["processing_scope"]["sources"] == []
-
-    service.confirm_staff_batch(run_id, "负责人", group_updates=[{"teacher_id": "new-math", "group": "数学组"}])
-    confirmed = service.get(run_id)
-    assert confirmed["processing_scope"]["scope_count"] == 1
-    assert confirmed["processing_scope"]["teachers"][0]["display_name"] == "新数学教师"
-    assert "CURRENT_SCHEDULE_SUBJECT_CANDIDATE" not in confirmed["processing_scope"]["sources"]
+    assert view["processing_scope"]["scope_count"] == 1
+    assert view["processing_scope"]["teachers"][0]["display_name"] == "新数学教师"
+    assert "CURRENT_PERIOD_SCHEDULE_PRIMARY_SUBJECT" in view["processing_scope"]["sources"]
 
 
 def test_salary_basis_distinguishes_missing_explicit_no_salary_and_valid_salary(tmp_path):

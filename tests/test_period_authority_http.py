@@ -125,10 +125,11 @@ def test_run_creation_persists_operator_role_separately_from_audit_generate_mode
         assert created["selected_group"] == "数学组"
         assert created["mode"] == "GENERATE"
         assert created["monthly_flow_version"] == "SUBMISSION_FIRST_V1"
-        assert created["processing_scope"]["scope_kind"] == "FULL_SCHEDULE_FALLBACK"
+        assert created["processing_scope"]["scope_kind"] == "SUBJECT_GROUP"
+        assert created["processing_scope"]["scope_count"] == 0
         dos = call("/api/runs", {"period": "2026-08", "mode": "AUDIT", "operator_role": "DOS"})
         assert dos["operator_role"] == "DOS"
-        assert dos["processing_scope"]["scope_kind"] == "FULL_SCHEDULE_FALLBACK"
+        assert dos["processing_scope"]["scope_kind"] == "SCHEDULE_ROSTER_WITH_SUBMISSION_VALUES"
     finally:
         server.shutdown()
 

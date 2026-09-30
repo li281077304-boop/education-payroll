@@ -97,7 +97,7 @@ vm.createContext(context);vm.runInContext(source,context);
 vm.runInContext(`current={id:'same-run',ui_mode:'QUICK',monthly_flow_version:'SUBMISSION_FIRST_V1',period:'2026-08',period_start:'2026-08-03',period_end:'2026-08-30'};quickState={stage:'success',uploaded:[],problem:null,result:{teacher_count:15,period:'2026-08',download_url:'/api/quick-runs/same-run/download'}};`,context);
 let page=vm.runInContext('quickRunPage()',context);
 for(const text of ['工资表已生成','教师：15 人','打开工资表','查看专业核算详情'])assert(page.includes(text),text);
-vm.runInContext(`quickState.stage='problem';quickState.problem={issues:[{user_message:'张三的岗位津贴数据不一致'}]};`,context);
+vm.runInContext(`quickState.stage='problem';quickState.problem={error_kind:'NEEDS_PROFESSIONAL_REVIEW',issues:[{user_message:'张三的岗位津贴数据不一致'}]};`,context);
 page=vm.runInContext('quickRunPage()',context);
 assert(page.includes('张三的岗位津贴数据不一致'));
 assert(page.includes('进入专业模式处理'));
@@ -146,13 +146,73 @@ vm.runInContext(`current={id:'same-run',ui_mode:'QUICK',monthly_flow_version:'SU
  assert.equal(vm.runInContext('quickState.stage',context),'upload',JSON.stringify(vm.runInContext('quickState.problem',context)));
  assert.equal(vm.runInContext('quickState.uploaded[0].kind',context),'subject_group');
  assert.equal(vm.runInContext('quickState.uploaded[1].kind',context),'schedule');
- assert.deepEqual(JSON.parse(vm.runInContext('bodies[2]',context)).paths,['/uploads/group.xlsx','/uploads/schedule.xlsx']);
+ assert.deepEqual(JSON.parse(vm.runInContext('bodies[2]',context)).paths,[{name:'group.xlsx',path:'/uploads/group.xlsx'},{name:'schedule.xlsx',path:'/uploads/schedule.xlsx'}]);
  await vm.runInContext('quickGenerate()',context);
  assert.equal(vm.runInContext('quickState.stage',context),'problem');
  assert.equal(vm.runInContext('current.id',context),'same-run');
  assert.equal(vm.runInContext('quickRunPage()',context).includes('教师甲的资料有冲突'),true);
  assert.deepEqual([...vm.runInContext('calls',context)],['/api/upload','/api/upload','/api/quick-runs/same-run/materials','/api/quick-runs/same-run/generate']);
 })().catch(error=>{console.error(error);process.exit(1)});
+    ''')
+
+
+def test_manual_mapping_confirmation_preserves_uploaded_identity_sheet_and_header_row() -> None:
+    _node(r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8').split('(async () => {')[0];
+let page='';
+const selects=[
+ {id:'map-teacher',value:'1'},{id:'map-grade',value:'2'},{id:'map-subject',value:'3'},
+ {id:'map-class_type',value:'4'},{id:'map-actual_student_count',value:'5'}
+];
+const document={querySelectorAll(){return selects;},querySelector(id){return id==='#map-profile-name'?{value:'脱敏格式'}:id==='#map-actor'?{value:'脱敏确认'}:null;},addEventListener(){}};
+const context={document,window:{},console};vm.createContext(context);vm.runInContext(source,context);
+vm.runInContext(`current={id:'run-map'};shell=(html)=>{page=html};showMessage=()=>{};renderRun=()=>{};api=async(path,options)=>{posted={path,body:JSON.parse(options.body)};return {id:'run-map'}};`,context);
+(async()=>{
+ const preview={source_sha256:'b'.repeat(64),sheet:'课程数据第二页',header_row:2,
+  columns:[{column:1,header:'授课人'},{column:2,header:'所在学段'}],fields:[],detected_columns:[]};
+ vm.runInContext(`mappingPage('/server/uploads/8f2a.xlsx','schedule',${JSON.stringify(preview)},'${'b'.repeat(64)}','原始课表.xlsx')`,context);
+ const action=vm.runInContext('[...pendingImportMappings.keys()][0]',context);
+ await vm.runInContext('applyPendingImportMapping',context)(action);
+ const posted=vm.runInContext('posted',context);
+ assert.equal(posted.path,'/api/runs/run-map/files');
+ assert.equal(posted.body.path,'/server/uploads/8f2a.xlsx');
+ assert.equal(posted.body.sha256,'b'.repeat(64));
+ assert.equal(posted.body.name,'原始课表.xlsx');
+ assert.equal(posted.body.mapping.sheet,'课程数据第二页');
+ assert.equal(posted.body.mapping.header_row,2);
+ assert.equal(posted.body.mapping.mapping.class_type,4);
+})().catch(error=>{console.error(error);process.exit(1)});
+''')
+
+
+def test_clicking_material_drop_zone_uses_browser_upload_input_not_native_path_picker() -> None:
+    _node(r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const whole=fs.readFileSync(process.argv[1],'utf8');
+const source=whole.slice(whole.indexOf('function bindMaterialDropZones()'),whole.indexOf('function bytesToBase64'));
+const roles=['schedule','subject_group','renewal','refund','support','package'];
+const zones=roles.map(role=>{const handlers={};return {dataset:{dropRole:role},style:{},handlers,
+  addEventListener(name,fn){handlers[name]=fn},setAttribute(){}}});
+const clicks={};
+const document={
+  addEventListener(){},
+  querySelectorAll(selector){return selector==='[data-drop-role]'?zones:[]},
+  querySelector(selector){
+    const support=selector==='#support-material-file';
+    const role=support?'support':(selector.match(/data-material-file-input="([^"]+)"/)||[])[1];
+    if(!role)return null;
+    return {click(){clicks[role]=(clicks[role]||0)+1}};
+  }
+};
+const context={document,window:{},console};
+vm.createContext(context);vm.runInContext(source,context);
+vm.runInContext(`let nativePickerCalls=0;choose=()=>{nativePickerCalls++};browseMaterialFiles=(role)=>{const input=document.querySelector('[data-material-file-input="'+role+'"]');input?.click()};`,context);
+vm.runInContext('bindMaterialDropZones()',context);
+for(const zone of zones)zone.handlers.click();
+assert.equal(vm.runInContext('nativePickerCalls',context),0,'material card clicks must not send the browser back to an OS path picker');
+for(const role of ['schedule','subject_group','renewal','refund','support'])assert.equal(clicks[role],1,role);
+assert.equal(clicks.package,undefined,'the package zone stays drag/paste only; its separate folder button is the fallback');
 ''')
 
 

@@ -13,6 +13,17 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+BUILD_SHA=$(git -C "$REPO_ROOT" rev-parse --verify HEAD 2>/dev/null || true)
+if [ -z "$BUILD_SHA" ]; then
+    echo "无法确定构建提交号，拒绝生成无法追溯版本的工资助手。" >&2
+    exit 1
+fi
+BUILD_DIRTY=0
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]; then
+    echo "只能从干净的已提交工作区构建 Mac 工资核算助手。" >&2
+    exit 1
+fi
+RELEASE_VERSION="Payroll-V1"
 
 INSTALL=0
 DESKTOP=0
@@ -117,16 +128,20 @@ exec /bin/sh "\$BOOTSTRAP" --mode $mode "\$@"
 SHIM
     chmod +x "$bundle/Contents/MacOS/launcher"
 
-    cat > "$bundle/Contents/Resources/launcher.json" <<JSON
-{
-  "contract": "payroll-launcher/1",
-  "mode": "$mode",
-  "repo_root": "$REPO_ROOT",
-  "python": "$PYTHON",
-  "port": 8760,
-  "data_dir": "$HOME/Library/Application Support/EducationPayroll"
-}
-JSON
+    "$PYTHON" - "$bundle/Contents/Resources/launcher.json" "$mode" "$RELEASE_VERSION" "$BUILD_SHA" "$REPO_ROOT" "$PYTHON" "$HOME/Library/Application Support/EducationPayroll" <<'PY'
+import json
+import sys
+
+target, mode, version, sha, repo_root, python_path, data_dir = sys.argv[1:]
+with open(target, "w", encoding="utf-8") as handle:
+    json.dump({
+        "contract": "payroll-launcher/1", "mode": mode,
+        "release_version": version, "build_sha": sha,
+        "build_dirty": False, "repo_root": repo_root,
+        "python": python_path, "port": 8760, "data_dir": data_dir,
+    }, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+PY
 
     # An unsigned local bundle is fine; clear any inherited quarantine flag.
     xattr -dr com.apple.quarantine "$bundle" 2>/dev/null || true

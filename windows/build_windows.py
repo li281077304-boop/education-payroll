@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -133,10 +134,29 @@ def _run(command: list[str], cwd: Path) -> None:
         raise SystemExit(f"命令失败（退出码 {completed.returncode}）：{' '.join(command)}")
 
 
+def _build_info() -> dict[str, str | bool]:
+    """Stamp the package with the exact clean Git source used for the build."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"], cwd=REPO_ROOT,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO_ROOT,
+            check=True, capture_output=True, text=True,
+        ).stdout.strip())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"无法读取 Git 构建身份：{exc}") from exc
+    if len(sha) != 40 or dirty:
+        raise SystemExit("Windows 发布必须从干净、已提交的源码构建。")
+    return {"release_version": "Payroll-V1", "build_sha": sha, "build_dirty": False}
+
+
 def build(dist_dir: Path) -> Path:
     """Run PyInstaller in a scratch directory and move the result into place."""
     if not SPEC.is_file():
         raise SystemExit(f"找不到打包配置：{SPEC}")
+    build_info = _build_info()
 
     scratch = Path(tempfile.mkdtemp(prefix="payroll-windows-build-"))
     try:
@@ -161,6 +181,9 @@ def build(dist_dir: Path) -> Path:
                 raise SystemExit(f"发布包缺少可执行文件：{built}")
             built.rename(bundle / user_name)
 
+        (bundle / "build-info.json").write_text(
+            json.dumps(build_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
         (bundle / "使用说明.txt").write_text(USAGE_TEXT, encoding="utf-8")
         verify(bundle)
 
@@ -181,7 +204,14 @@ def verify(bundle: Path) -> None:
     for user_name in EXECUTABLE_NAMES.values():
         if not (bundle / user_name).is_file():
             raise SystemExit(f"发布包缺少 {user_name}")
-    print("资源检查通过：静态界面、核心规则、三个可执行文件均在位。")
+    try:
+        info = json.loads((bundle / "build-info.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit("发布包缺少有效的 build-info.json。") from exc
+    if (not isinstance(info, dict) or len(str(info.get("build_sha") or "")) != 40
+            or not info.get("release_version") or info.get("build_dirty") is not False):
+        raise SystemExit("发布包 build-info.json 中的版本身份不完整或不安全。")
+    print("资源检查通过：界面、核心规则、版本身份及三个可执行文件均在位。")
 
 
 def package(bundle: Path, dist_dir: Path) -> tuple[Path, str]:

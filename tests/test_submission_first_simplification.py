@@ -83,7 +83,7 @@ def _core(teacher: str) -> dict:
     }
 
 
-def test_submission_names_define_exact_output_population_even_with_51_schedule_teachers(tmp_path: Path) -> None:
+def test_schedule_roster_remains_authoritative_when_group_submission_covers_only_15_of_51(tmp_path: Path) -> None:
     teachers = [f"教师{index:02d}" for index in range(51)]
     service, run_id = _run(tmp_path, teachers=teachers)
     source = _submission(tmp_path / "group-submission.csv", teachers[:15])
@@ -92,22 +92,22 @@ def test_submission_names_define_exact_output_population_even_with_51_schedule_t
     assert imported["run"]["subject_group_materials"]
     checked = service.check(run_id)
     assert checked["processing_scope_snapshot"]["canonical_roster_count"] == 51
-    assert set(checked["processing_scope_snapshot"]["teachers"]) == set(teachers[:15])
-    assert {row["teacher"] for row in checked["core_calculation"]["rows"]} == set(teachers[:15])
+    assert set(checked["processing_scope_snapshot"]["teachers"]) == set(teachers)
+    assert {row["teacher"] for row in checked["core_calculation"]["rows"]} == set(teachers)
 
     preview = service.preview_payroll(run_id)
-    assert {row["teacher"] for row in preview["generated_payroll"]["rows"]} == set(teachers[:15])
+    assert {row["teacher"] for row in preview["generated_payroll"]["rows"]} == set(teachers)
 
 
-def test_submission_teacher_without_period_schedule_keeps_payroll_row(tmp_path: Path) -> None:
+def test_submission_teacher_without_period_schedule_does_not_add_payroll_row(tmp_path: Path) -> None:
     service, run_id = _run(tmp_path, teachers=["有排课教师"])
     source = _submission_with_fields(tmp_path / "group-submission.csv", [_salary_row("无本月排课教师")])
 
     service.import_material_file(run_id, "subject_group", str(source))
     checked = service.check(run_id)
 
-    assert checked["processing_scope_snapshot"]["teachers"] == ["无本月排课教师"]
-    assert {row["teacher"] for row in checked["core_calculation"]["rows"]} == {"无本月排课教师"}
+    assert checked["processing_scope_snapshot"]["teachers"] == ["有排课教师"]
+    assert {row["teacher"] for row in checked["core_calculation"]["rows"]} == {"有排课教师"}
 
 
 def test_without_submission_full_schedule_population_remains_and_missing_salary_is_allowed(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ class ProbeKind(str, Enum):
     ABSENT = "absent"                     # nothing is listening
     OURS = "ours"                         # our service, on our data directory
     OTHER_DATA = "other_data"             # our service, different data dir
+    OTHER_BUILD = "other_build"           # our service, different release SHA
     FOREIGN = "foreign"                   # something else owns the port
 
 
@@ -50,7 +51,15 @@ def _direct_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def probe(host: str, port: int, data_dir: Path, timeout: float = 0.8) -> ProbeResult:
+def probe(
+    host: str,
+    port: int,
+    data_dir: Path,
+    timeout: float = 0.8,
+    *,
+    expected_build_sha: str = "",
+    expected_build_dirty: bool | None = None,
+) -> ProbeResult:
     """Classify the process on ``host:port`` without side effects."""
     expected = data_dir_fingerprint(data_dir)
     url = f"http://{host}:{port}{HEALTH_PATH}"
@@ -80,5 +89,10 @@ def probe(host: str, port: int, data_dir: Path, timeout: float = 0.8) -> ProbeRe
 
     if payload.get("data_dir_fingerprint") != expected:
         return ProbeResult(ProbeKind.OTHER_DATA, "工资服务正在使用另一个数据目录", payload)
+
+    if expected_build_sha and payload.get("build_sha") != expected_build_sha:
+        return ProbeResult(ProbeKind.OTHER_BUILD, "工资服务运行版本与当前启动器不一致", payload)
+    if expected_build_dirty is not None and bool(payload.get("build_dirty", False)) != expected_build_dirty:
+        return ProbeResult(ProbeKind.OTHER_BUILD, "工资服务工作区状态与当前启动器不一致", payload)
 
     return ProbeResult(ProbeKind.OURS, "工资核算服务已在运行", payload)
