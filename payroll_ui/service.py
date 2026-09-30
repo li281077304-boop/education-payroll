@@ -1195,11 +1195,13 @@ class PayrollService(CoreFlow):
             raise ValueError("已上传的材料副本与本次选择不一致，请重新上传。")
         if kind in {"package", "auto"}:
             if source.suffix.lower() == ".csv":
-                try:
-                    kind = "schedule" if self._read_csv("schedule", source, run["period"]).records else ""
-                except ValueError:
-                    kind = ""
-                if not kind:
+                if self._csv_has_schedule_structure(source):
+                    schedule_result = self._read_for_run("schedule", source, run)
+                    if not schedule_result.records:
+                        message, _source_months = self._schedule_csv_empty_period_message(run, schedule_result)
+                        raise ValueError(message)
+                    kind = "schedule"
+                else:
                     try:
                         kind = "subject_group" if self._read_csv("math", source, run["period"]).records else ""
                     except ValueError:
@@ -1216,6 +1218,8 @@ class PayrollService(CoreFlow):
             else:
                 inspection = inspect_workbook(source)
                 layout = inspection.records[0].fingerprint.layout if inspection.records else ""
+                # A known schedule layout is the strongest type evidence; a
+                # later-export title must not make it a support/payroll input.
                 if layout == LAYOUTS["schedule"]:
                     kind = "schedule"
                 elif layout == LAYOUTS["math"]:
@@ -1339,13 +1343,46 @@ class PayrollService(CoreFlow):
         kind = "professional_required"
         professional_kind = ""
         if source.suffix.lower() == ".csv":
-            for candidate, role in (("schedule", "schedule"), ("subject_group", "math")):
+            if self._csv_has_schedule_structure(source):
                 try:
-                    if self._read_csv(role, source, run["period"]).records:
-                        kind = candidate
-                        break
+                    schedule_result = self._read_for_run("schedule", source, run)
+                except ValueError as exc:
+                    schedule_result = None
+                    schedule_error = str(exc)
+                else:
+                    schedule_error = ""
+                if schedule_result is not None and schedule_result.records:
+                    kind = "schedule"
+                else:
+                    message, source_months = self._schedule_csv_empty_period_message(run, schedule_result) if schedule_result is not None else (
+                        f"这是一份排课表，但读取失败：{schedule_error or 'CSV 数据格式不正确'}。请检查表格内容后重试。", []
+                    )
+                    mismatch = {
+                        "kind": "SCHEDULE_PERIOD_MISMATCH",
+                        "validation_status": "NEEDS_MONTH_REVIEW",
+                        "requested_period": run["period"],
+                        "source_months": source_months,
+                        "name": source_display_name,
+                        "path": str(source),
+                        **fingerprint,
+                    }
+                    staged = [item for item in run.get("quick_materials", [])
+                              if not (item.get("kind") == mismatch["kind"] and item.get("sha256") == fingerprint["sha256"])]
+                    staged.append(mismatch)
+                    run["quick_materials"] = staged
+                    self.store.save(run)
+                    return {
+                        **self._quick_failure(run_id, "SCHEDULE_PERIOD_MISMATCH", message),
+                        "run": self.render(run),
+                        "detected_kind": "schedule-period-mismatch",
+                        "material": {"name": source_display_name, "state": "月份不匹配，已保留副本", "kind": "schedule-period-mismatch"},
+                        "source_months": source_months,
+                    }
+            else:
+                try:
+                    kind = "subject_group" if self._read_csv("math", source, run["period"]).records else "professional_required"
                 except ValueError:
-                    pass
+                    kind = "professional_required"
             if kind == "professional_required":
                 if read_renewal_report(source, run["period"]).records:
                     professional_kind = "renewal"
@@ -1363,10 +1400,12 @@ class PayrollService(CoreFlow):
                 if isinstance(cell.value, str)
             }
             has_support_title = any("教学部薪资表" in value or "支持部提供" in value for value in title_markers)
-            if has_support_title:
-                professional_kind = "support"
-            elif layout == LAYOUTS["schedule"]:
+            # A known schedule layout is stronger evidence than incidental
+            # title text in a later export; never reclassify it as support.
+            if layout == LAYOUTS["schedule"]:
                 kind = "schedule"
+            elif has_support_title:
+                professional_kind = "support"
             elif layout == LAYOUTS["math"]:
                 parsed_group = self._read_for_run("math", source, run)
                 group_roster = [{"display_name": str(item.teacher), "teacher_id": str(getattr(item, "teacher_id", "") or item.teacher)}
@@ -1383,10 +1422,10 @@ class PayrollService(CoreFlow):
                 has_support_comments = any(str(item.get("field_code") or "") in support_codes
                                            for row in support_preview.get("rows", [])
                                            for item in row.get("annotations", []))
-                if has_support_title or (source_support_codes and (has_support_values or has_support_comments)):
-                    professional_kind = "support"
-                elif parsed_group.records and not parsed_group.errors:
+                if parsed_group.records and not parsed_group.errors:
                     kind = "subject_group"
+                elif source_support_codes and (has_support_values or has_support_comments):
+                    professional_kind = "support"
             else:
                 if self._monthly_renewal_rows(source, run["period"]):
                     professional_kind = "renewal"
@@ -7138,6 +7177,44 @@ class PayrollService(CoreFlow):
     def _period_window(run: dict) -> tuple[str, str]:
         window = normalize_period_window(run["period"], run.get("period_start"), run.get("period_end"), run.get("period_boundary_source"))
         return window["period_start"], window["period_end"]
+
+    @staticmethod
+    def _csv_has_schedule_structure(path: Path) -> bool:
+        """Classify CSV structure independently from the selected Run period."""
+        try:
+            with path.open(encoding="utf-8-sig", newline="") as handle:
+                headers = next(csv.reader(handle), [])
+        except (OSError, UnicodeDecodeError, csv.Error):
+            return False
+        def normalize(value: str) -> str:
+            return "".join(str(value or "").strip().split()).lower()
+
+        normalized = {normalize(value) for value in headers}
+        required = {"teacher", "grade", "subject", "class_type", "attended", "lesson_status"}
+        return required.issubset(normalized) and bool(normalized & {"time", "lesson_time", "lesson_date"})
+
+    def _schedule_csv_empty_period_message(self, run: dict, result) -> tuple[str, list[str]]:
+        coverage = getattr(result, "coverage", {}) or {}
+        source_months = sorted({
+            str(value)[:7] for value in coverage.get("all_lesson_dates", ())
+            if len(str(value)) >= 7 and str(value)[4:5] == "-"
+        })
+        if source_months and run["period"] not in source_months:
+            month_text = "、".join(source_months)
+            return (
+                f"这是一份排课表，但没有找到 {run['period']} 的排课记录。文件中的课程日期属于 {month_text}。"
+                "请检查工资月份或上传对应月份排课表。",
+                source_months,
+            )
+        unparseable = int(coverage.get("unparseable_attended", 0) or 0)
+        if unparseable:
+            return (f"这是一份排课表，但有 {unparseable} 条已上课记录无法识别日期，不能用于工资核算。", source_months)
+        start, end = self._period_window(run)
+        return (
+            f"这是一份排课表，但没有找到 {run['period']} 核算周期（{start}～{end}）内的排课记录。"
+            "请检查工资月份或上传对应周期的排课表。",
+            source_months,
+        )
 
     def _read_for_run(self, role: str, path: Path, run: dict):
         """Read a run-bound source while keeping legacy test/provider seams."""

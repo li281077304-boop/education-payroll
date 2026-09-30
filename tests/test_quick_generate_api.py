@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from threading import Thread
 from urllib.request import Request, urlopen
@@ -119,6 +120,77 @@ def test_quick_http_does_not_route_missing_upload_copy_to_professional_mapping(t
         assert "找不到这份材料" in result["materials"][0]["message"]
     finally:
         server.shutdown(); server.server_close(); worker.join()
+
+
+def test_quick_september_august_schedule_is_not_reclassified_as_subject_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    run = service.create_quick_run("2026-09")["run"]
+    source = _schedule(tmp_path / "august-only.csv", ["教师甲"])
+
+    result = service.stage_quick_material(run["id"], str(source), display_name="八月排课表.csv")
+    stored = service.get(run["id"])
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "SCHEDULE_PERIOD_MISMATCH"
+    assert result["detected_kind"] == "schedule-period-mismatch"
+    assert "2026-09" in result["message"] and "2026-08" in result["message"]
+    assert stored["files"].get("schedule") is None
+    assert not stored.get("subject_group_materials")
+    assert stored["quick_materials"][0]["kind"] == "SCHEDULE_PERIOD_MISMATCH"
+    assert stored["quick_materials"][0]["path"] == str(source.resolve())
+    assert service.quick_generate(run["id"])["error_kind"] == "MISSING_SCHEDULE"
+
+
+def test_quick_august_run_accepts_same_schedule_csv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    run = service.create_quick_run("2026-08")["run"]
+    source = _schedule(tmp_path / "august-only.csv", ["教师甲"])
+
+    result = service.stage_quick_material(run["id"], str(source))
+
+    assert result["detected_kind"] == "schedule"
+    assert service.get(run["id"])["quick_materials"][0]["kind"] == "schedule"
+
+
+def test_quick_real_group_csv_remains_subject_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    run = service.create_quick_run("2026-08")["run"]
+    source = _group(tmp_path / "group.csv", ["教师甲"])
+
+    result = service.stage_quick_material(run["id"], str(source))
+
+    assert result["detected_kind"] == "subject_group"
+    assert service.get(run["id"])["quick_materials"][0]["kind"] == "subject_group"
+
+
+def test_professional_auto_import_does_not_fallback_from_out_of_month_schedule_csv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["教师甲"])
+    quick = service.create_quick_run("2026-09")["run"]
+    run = service.quick_to_professional(quick["id"])["run"]
+    source = _schedule(tmp_path / "august-only.csv", ["教师甲"])
+
+    with pytest.raises(ValueError, match="这是一份排课表，但没有找到 2026-09"):
+        service.import_material_file(run["id"], "auto", str(source))
+    stored = service.get(run["id"])
+    assert stored["files"].get("schedule") is None
+    assert not stored.get("subject_group_materials")
+
+
+def test_quick_known_schedule_layout_outranks_incidental_support_title(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = _service(tmp_path, monkeypatch, ["张三", "李四"])
+    run = service.create_quick_run("2026-08")["run"]
+    source = tmp_path / "schedule-with-incidental-title.xlsx"
+    shutil.copyfile(Path(__file__).parent / "fixtures" / "excel" / "fake_schedule.xlsx", source)
+    workbook = load_workbook(source)
+    workbook.active.insert_rows(1)
+    workbook.active.cell(1, 1, "支持部提供：这是后续导出备注，不代表文件类型")
+    workbook.save(source)
+
+    result = service.stage_quick_material(run["id"], str(source))
+
+    assert result["detected_kind"] == "schedule"
+    assert result.get("professional_kind") != "support"
+    assert service.get(run["id"])["quick_materials"][0]["kind"] == "schedule"
 
 
 def test_quick_http_preserves_original_uploaded_name_and_hash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

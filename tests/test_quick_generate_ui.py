@@ -186,6 +186,27 @@ vm.runInContext(`current={id:'run-map'};shell=(html)=>{page=html};showMessage=()
 ''')
 
 
+def test_quick_wrong_month_upload_shows_clear_schedule_mismatch_without_run_pollution() -> None:
+    _node(r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(process.argv[1],'utf8').split('(async () => {')[0];
+const context={document:{querySelector(){return null},addEventListener(){}},window:{},console,btoa:()=>"c2FtcGxl"};
+vm.createContext(context);vm.runInContext(source,context);
+vm.runInContext(`current={id:'quick-september',period:'2026-09',ui_mode:'QUICK',monthly_flow_version:'SUBMISSION_FIRST_V1',files:{},quick_materials:[],subject_group_materials:[]};quickState={stage:'upload',uploaded:[],problem:null,result:null};let calls=[];renderRun=()=>{};showMessage=()=>{};bytesToBase64=()=>'';api=async(path)=>{calls.push(path);if(path==='/api/upload')return {path:'/uploads/server-copy.csv',sha256:'d'.repeat(64)};return {ok:false,run:{...current,quick_materials:[{kind:'SCHEDULE_PERIOD_MISMATCH',name:'八月排课表.csv',sha256:'${'d'.repeat(64)}'}]},materials:[{ok:false,error_kind:'SCHEDULE_PERIOD_MISMATCH',detected_kind:'schedule-period-mismatch',message:'这是一份排课表，但没有找到 2026-09 的排课记录。文件中的课程日期属于 2026-08。请检查工资月份或上传对应月份排课表。'}]}};`,context);
+(async()=>{
+ await vm.runInContext('uploadQuickFiles',context)([{name:'八月排课表.csv',arrayBuffer:async()=>new Uint8Array([1]).buffer}]);
+ const problem=vm.runInContext('quickState.problem',context);
+ assert.equal(problem.error_kind,'SCHEDULE_PERIOD_MISMATCH',JSON.stringify(problem));
+ assert.ok(vm.runInContext('current.quick_materials[0].sha256',context));
+ const page=vm.runInContext('quickRunPage()',context);
+ assert.ok(page.includes('没有找到 2026-09 的排课记录'));
+ assert.ok(page.includes('已上传的资料会保留'));
+ assert.ok(!page.includes('生成工资表'));
+ assert.deepEqual(vm.runInContext('calls',context),['/api/upload','/api/quick-runs/quick-september/materials']);
+})().catch(error=>{console.error(error);process.exit(1)});
+''')
+
+
 def test_clicking_material_drop_zone_uses_browser_upload_input_not_native_path_picker() -> None:
     _node(r'''
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
