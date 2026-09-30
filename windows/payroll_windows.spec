@@ -1,16 +1,36 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller recipe for the Windows release.
 
-Three executables are produced from one entry script, all sharing a single
-``_internal`` runtime folder:
+Three executables are produced from one entry script:
 
 * ``EducationPayroll``      -- 工资核算助手：启动/复用服务并打开浏览器
 * ``RestartPayrollService`` -- 重启工资服务：只结束本启动器启动的服务
 * ``PayrollCommandLine``    -- 工资核算助手-命令行：诊断用
 
-The build script renames them to their Chinese display names.  That keeps
-PyInstaller away from non-ASCII executable names during the build, while the
-entry point still reads its own file name to decide what to do.
+Two deployment shapes are used on purpose:
+
+* the **main entry** is an *onedir* build: a folder with ``EducationPayroll.exe``
+  plus a shared ``_internal`` runtime.  It is the only thing a normal user opens,
+  so keeping the runtime in ``_internal`` keeps startup fast and the exe small.
+* the two **maintenance tools** are *onefile* builds.  They are copied into the
+  ``tools/`` sub-folder of the release, where a PyInstaller onedir executable
+  would fail: such an executable resolves ``sys._MEIPASS`` to an ``_internal``
+  folder *next to itself*, which would not exist once it is moved out of the
+  main folder.  A onefile build unpacks its own runtime into a temporary folder
+  at every launch, so it runs from any location -- exactly what ``tools/`` needs.
+
+The build script renames the executables to their Chinese display names and
+assembles the final release tree::
+
+    dist/EducationPayroll/           <- onedir bundle (main app)
+        EducationPayroll.exe
+        _internal/
+    dist/RestartPayrollService.exe   <- onefile maintenance tool
+    dist/PayrollCommandLine.exe      <- onefile maintenance tool
+
+Renaming after the build keeps PyInstaller away from non-ASCII executable
+names during the build, while the entry point still reads its own file name to
+decide what to do.
 
 Two data sets must be shipped explicitly, otherwise the frozen UI answers 404
 on its own assets or the core rules fail to load:
@@ -104,8 +124,7 @@ analysis = Analysis(
 
 pyz = PYZ(analysis.pure)
 
-EXE_OPTIONS = dict(
-    exclude_binaries=True,
+COMMON_EXE_OPTIONS = dict(
     upx=False,
     debug=False,
     strip=False,
@@ -117,27 +136,21 @@ EXE_OPTIONS = dict(
     entitlements_file=None,
 )
 
-
-def build_exe(name: str, console: bool) -> EXE:
-    return EXE(
-        pyz,
-        analysis.scripts,
-        [],
-        name=name,
-        console=console,
-        icon=None,
-        **EXE_OPTIONS,
-    )
-
-
-app = build_exe("EducationPayroll", console=False)
-restart = build_exe("RestartPayrollService", console=False)
-command_line = build_exe("PayrollCommandLine", console=True)
+# The main entry point: an onedir build so the runtime is shared instead of
+# re-extracted on every launch.
+app = EXE(
+    pyz,
+    analysis.scripts,
+    [],
+    name="EducationPayroll",
+    console=False,
+    icon=None,
+    exclude_binaries=True,
+    **COMMON_EXE_OPTIONS,
+)
 
 bundle = COLLECT(
     app,
-    restart,
-    command_line,
     analysis.binaries,
     analysis.datas,
     strip=False,
@@ -145,3 +158,27 @@ bundle = COLLECT(
     upx_exclude=[],
     name="EducationPayroll",
 )
+
+
+def maintenance_tool(name: str, console: bool) -> EXE:
+    """Build one self-contained (onefile) maintenance executable.
+
+    Onefile embeds the interpreter, the bundled modules and the data files in a
+    single exe, so the result can live in ``tools/`` and still run.
+    """
+    return EXE(
+        pyz,
+        analysis.scripts,
+        analysis.binaries,
+        analysis.datas,
+        [],
+        name=name,
+        console=console,
+        icon=None,
+        exclude_binaries=False,
+        **COMMON_EXE_OPTIONS,
+    )
+
+
+restart = maintenance_tool("RestartPayrollService", console=False)
+command_line = maintenance_tool("PayrollCommandLine", console=True)

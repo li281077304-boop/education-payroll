@@ -1,29 +1,62 @@
 """Build the Windows release package for 工资核算助手.
 
-    python windows/build_windows.py [--output DIR] [--no-zip]
+Two modes are supported:
 
-Produces, under ``windows/dist`` by default::
+1. **Fresh build** (default)::
 
-    EducationPayroll-Windows-v1/
-    └── EducationPayroll/
-        ├── 工资核算助手.exe           <- the only file a user needs to open
+       python windows/build_windows.py [--output DIR] [--no-zip]
+
+   Builds from the current checkout through ``payroll_windows.spec``.  The
+   workspace must be clean *and* ``HEAD`` must sit exactly on an official
+   release tag ``payroll-vX.Y.Z`` -- the version is derived from that tag, never
+   typed by hand.  This fails closed so an un-released or duplicate version can
+   never be produced by accident.
+
+2. **Repackage an existing package** (used to re-brand an already-built
+   artifact without recompiling it)::
+
+       python windows/build_windows.py --repackage <PACKAGE_DIR> [--version V1.0.0]
+
+   Reads the immutable ``build_sha`` from the package's own ``build-info.json``
+   (never from the current ``HEAD``), derives the version from the tag that
+   points at that SHA (``--version`` is only a fallback when no tag is found),
+   rewrites ``build-info.json`` with the correct ``release_version`` while
+   keeping ``build_sha`` / ``build_dirty=false``, and regroups the tree.  No
+   executable is compiled and no executable byte is modified: the frozen
+   executables report their identity from ``build-info.json`` at runtime, so
+   only that metadata file needs to change.
+
+Both modes produce, under ``windows/dist`` by default::
+
+    工资核算助手-{V}-{short}-{platform}/
+    ├── 工资核算助手.exe          <- the only file a user needs to open
+    ├── _internal/                 <- Python runtime + dependencies + assets
+    ├── 使用说明.txt
+    ├── 版本信息.txt               <- generated, never hand-written
+    └── tools/
         ├── 重启工资服务.exe
-        ├── 工资核算助手-命令行.exe
-        ├── 使用说明.txt
-        └── _internal/                 <- Python runtime + dependencies + assets
-    EducationPayroll-Windows-v1.zip
-    EducationPayroll-Windows-v1.zip.sha256
+        └── 工资核算助手-命令行.exe
+    工资核算助手-{V}-{short}-{platform}.zip
+    工资核算助手-{V}-{short}-{platform}.zip.sha256
 
-The whole build is repeatable from the checkout: nothing here is committed to
-Git, and no machine-specific path is baked into the executables.  PyInstaller
-builds ASCII-named executables and this script renames them afterwards, which
-keeps the frozen bootloader away from non-ASCII executable names.
+The maintenance tools live in ``tools/`` and must keep working there.  A
+PyInstaller *onedir* executable resolves its runtime from an ``_internal``
+folder next to itself, so relocating one breaks it; the spec therefore builds
+those two tools as *onefile* executables.  When repackaging a legacy *onedir*
+package, this script detects the failing tool and copies the shared runtime
+into ``tools/`` so the relocated tool still runs (see ``_stage_tools``).
+
+Nothing here is committed to Git, and no machine-specific path is baked into the
+executables.  PyInstaller builds ASCII-named executables and this script renames
+them afterwards, which keeps the frozen bootloader away from non-ASCII
+executable names.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -34,14 +67,31 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC = REPO_ROOT / "windows" / "payroll_windows.spec"
 
-RELEASE_FOLDER_NAME = "EducationPayroll-Windows-v1"
+# PyInstaller's onedir folder name and the entry executable it builds.
 BUNDLE_NAME = "EducationPayroll"
+PYI_ENTRY_EXE = "EducationPayroll.exe"
 
-# PyInstaller builds these; the user sees the Chinese names.
-EXECUTABLE_NAMES = {
-    "EducationPayroll.exe": "工资核算助手.exe",
+# The user-facing entry point.  Only this executable sits at the top level.
+APP_DISPLAY = "工资核算助手.exe"
+
+# PyInstaller build names (ASCII) -> Chinese display names, for the tools that
+# ship inside the ``tools/`` sub-folder.  Order defines the copy/verify order.
+TOOLS = {
     "RestartPayrollService.exe": "重启工资服务.exe",
     "PayrollCommandLine.exe": "工资核算助手-命令行.exe",
+}
+TOOLS_DIR_NAME = "tools"
+
+# ``payroll-v1.0.0`` -> release version ``V1.0.0``.
+RELEASE_TAG_RE = re.compile(r"^payroll-v(\d+\.\d+\.\d+)$")
+VERSION_RE = re.compile(r"^V?(\d+\.\d+\.\d+)$")
+
+# sys.platform -> human readable platform name used in names and metadata.
+PLATFORM_NAMES = {
+    "win32": "Windows",
+    "cygwin": "Windows",
+    "darwin": "Mac",
+    "linux": "Linux",
 }
 
 REQUIRED_BUNDLE_PATHS = (
@@ -79,7 +129,8 @@ USAGE_TEXT = """工资核算助手（Windows 版）使用说明
 
 三、重启服务
 
-  如果页面打不开或提示连接失败，双击「重启工资服务.exe」。
+  如果页面打不开或提示连接失败，双击本目录下 tools 子文件夹里的
+  「重启工资服务.exe」。
   它只会结束由本启动器启动的那一个工资服务进程。
 
 四、出问题怎么办
@@ -93,7 +144,7 @@ USAGE_TEXT = """工资核算助手（Windows 版）使用说明
 
 五、命令行（仅排障用）
 
-  「工资核算助手-命令行.exe」可以查看状态：
+  本目录下 tools 子文件夹里的「工资核算助手-命令行.exe」可以查看状态：
 
       --status        查看服务与数据目录状态
       --stop          安全停止工资服务
@@ -105,6 +156,14 @@ USAGE_TEXT = """工资核算助手（Windows 版）使用说明
   固定使用 127.0.0.1:8760。
   如果该端口被别的程序占用，程序会明确提示，
   不会结束其它程序，也不会偷偷改用别的端口。
+
+七、目录结构
+
+  工资核算助手.exe        主程序（双击它即可）
+  _internal\\              程序运行时（请勿删除或移动）
+  使用说明.txt            本文件
+  版本信息.txt            版本 / Build / 发布日期 / 平台
+  tools\\                 维修工具（平时无需打开）
 """
 
 
@@ -114,15 +173,22 @@ def _discard(path: Path) -> None:
     The tree is renamed into the system temporary directory first and deleted
     there.  That is one filesystem operation instead of a walk of every file,
     so the build stays repeatable for anyone running it inside a repository
-    with a "confirm before deleting many files" policy.
+    with a "confirm before deleting many files" policy.  A plain file (for
+    example the previous ``.zip``) is unlinked in place.
     """
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return
     staging = Path(tempfile.mkdtemp(prefix="payroll-build-cleanup-"))
     try:
         moved = staging / path.name
         shutil.move(str(path), str(moved))
-        shutil.rmtree(moved, ignore_errors=True)
+        if moved.is_dir() and not moved.is_symlink():
+            shutil.rmtree(moved, ignore_errors=True)
+        else:
+            try:
+                moved.unlink()
+            except OSError:
+                pass
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -134,29 +200,259 @@ def _run(command: list[str], cwd: Path) -> None:
         raise SystemExit(f"命令失败（退出码 {completed.returncode}）：{' '.join(command)}")
 
 
-def _build_info() -> dict[str, str | bool]:
-    """Stamp the package with the exact clean Git source used for the build."""
+def _git(*arguments: str) -> str:
+    """Run git read-only and return stripped stdout, failing closed on error."""
     try:
-        sha = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"], cwd=REPO_ROOT,
+        completed = subprocess.run(
+            ["git", *arguments], cwd=REPO_ROOT,
             check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        dirty = bool(subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO_ROOT,
-            check=True, capture_output=True, text=True,
-        ).stdout.strip())
+        )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise SystemExit(f"无法读取 Git 构建身份：{exc}") from exc
-    if len(sha) != 40 or dirty:
-        raise SystemExit("Windows 发布必须从干净、已提交的源码构建。")
-    return {"release_version": "Payroll-V1", "build_sha": sha, "build_dirty": False}
+        raise SystemExit(f"无法读取 Git 信息：{exc}") from exc
+    return completed.stdout.strip()
 
 
-def build(dist_dir: Path) -> Path:
-    """Run PyInstaller in a scratch directory and move the result into place."""
+def _head_sha() -> str:
+    return _git("rev-parse", "--verify", "HEAD")
+
+
+def _is_clean() -> bool:
+    return not bool(_git("status", "--porcelain", "--untracked-files=all"))
+
+
+def _tags_pointing_at(sha: str) -> list[str]:
+    """Every tag that points exactly at ``sha`` (lightweight or annotated)."""
+    return [line.strip() for line in _git("tag", "--points-at", sha).splitlines() if line.strip()]
+
+
+def _version_from_tags(tags: list[str]) -> str | None:
+    """Return the release version (``V1.0.0``) of the first release tag found."""
+    for tag in tags:
+        match = RELEASE_TAG_RE.match(tag)
+        if match:
+            return f"V{match.group(1)}"
+    return None
+
+
+def _normalise_version(value: str) -> str:
+    """Accept ``1.0.0`` or ``V1.0.0`` and return the canonical ``V1.0.0``."""
+    match = VERSION_RE.match(value.strip())
+    if not match:
+        raise SystemExit(f"--version 参数格式不正确：{value}（应形如 V1.0.0）")
+    return f"V{match.group(1)}"
+
+
+def _commit_date(sha: str) -> str:
+    """Release date, taken from the commit the package was built from."""
+    return _git("show", "-s", "--format=%cs", sha)
+
+
+def _platform_name() -> str:
+    return PLATFORM_NAMES.get(sys.platform, sys.platform.capitalize())
+
+
+def _release_folder(version: str, short: str, platform: str) -> str:
+    return f"工资核算助手-{version}-{short}-{platform}"
+
+
+def _build_info(version: str, sha: str) -> dict:
+    """The immutable identity stamped into the package and read at runtime."""
+    return {"release_version": version, "build_sha": sha, "build_dirty": False}
+
+
+def _version_info_text(version: str, short: str, sha: str, date: str, platform: str) -> str:
+    """Render ``版本信息.txt`` -- every value is filled in by the build.
+
+    The exact wording is a release contract (support asks the user to quote
+    "版本号 + Build"), so it must not be reflowed.
+    """
+    return (
+        "工资核算助手\n"
+        f"版本：{version}\n"
+        f"Build：{short}\n"
+        "完整 Build SHA：\n"
+        f"{sha}\n"
+        f"发布日期：{date}\n"
+        f"平台：{platform}\n"
+        "如果需要反馈问题，请同时提供：\n"
+        "版本号 + Build。\n"
+    )
+
+
+def _stage_tools(tools_dir: Path, tools: list[tuple[Path, str]]) -> None:
+    """Copy the maintenance tools and, only when required, their runtime.
+
+    A PyInstaller *onefile* tool (what the current spec builds) carries its own
+    runtime inside the exe and runs from any folder.  A *onedir* tool instead
+    resolves its runtime from an ``_internal`` folder sitting *next to itself*,
+    so copying the exe alone into ``tools/`` would break it.  We mirror
+    PyInstaller's own lookup rule: if an ``_internal`` folder sits beside the
+    source executable, copy it into ``tools/`` as well.
+    """
+    runtime_source: Path | None = None
+    for source, display in tools:
+        shutil.copy2(source, tools_dir / display)
+        sibling = source.parent / "_internal"
+        if runtime_source is None and sibling.is_dir():
+            runtime_source = sibling
+
+    if runtime_source is not None:
+        print("检测到 onedir 维修工具，复制同级 _internal 运行时到 tools/ …")
+        shutil.copytree(runtime_source, tools_dir / "_internal")
+
+
+def _verify_console_tool(tools_dir: Path) -> None:
+    """Prove the relocated console tool can boot from ``tools/``.
+
+    Only the *console* tool is executed: a windowed PyInstaller executable
+    shows a modal error dialog when it cannot find its runtime, which would
+    block an unattended build.  Both tools share the same runtime requirement,
+    so a healthy console tool proves the ``_internal`` layout is correct.
+
+    ``--status`` neither starts a service nor opens a window, so it is safe to
+    run here.
+    """
+    exe = tools_dir / TOOLS["PayrollCommandLine.exe"]
+    try:
+        completed = subprocess.run(
+            [str(exe), "--no-dialog", "--status"],
+            cwd=str(tools_dir), stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(f"{exe.name} 未能在规定时间内启动（缺少运行时？）。") from exc
+    except OSError as exc:
+        raise SystemExit(f"无法运行 {exe.name}：{exc}") from exc
+    if completed.returncode != 0:
+        raise SystemExit(f"{exe.name} 无法在 tools/ 中独立运行（退出码 {completed.returncode}）。")
+
+
+def _assemble_release(
+    release_dir: Path,
+    *,
+    app_exe: Path,
+    internal_dir: Path | None,
+    tools: list[tuple[Path, str]],
+    build_info: dict,
+    usage_text: str,
+    version_info: str,
+) -> Path:
+    """Lay out one release tree and fail closed if anything is missing.
+
+    The layout is the same for a fresh build and a repackage: a single top-level
+    entry, the shared ``_internal`` runtime, the two generated text files and the
+    maintenance tools under ``tools/``.
+    """
+    _discard(release_dir)
+    release_dir.mkdir(parents=True)
+
+    shutil.copy2(app_exe, release_dir / APP_DISPLAY)
+    if internal_dir is not None:
+        shutil.copytree(internal_dir, release_dir / "_internal")
+
+    metadata = json.dumps(build_info, ensure_ascii=False, indent=2) + "\n"
+    (release_dir / "build-info.json").write_text(metadata, encoding="utf-8")
+    (release_dir / "使用说明.txt").write_text(usage_text, encoding="utf-8")
+    (release_dir / "版本信息.txt").write_text(version_info, encoding="utf-8")
+
+    tools_dir = release_dir / TOOLS_DIR_NAME
+    tools_dir.mkdir()
+    _stage_tools(tools_dir, tools)
+    # A frozen executable reads its identity from the ``build-info.json`` of the
+    # folder it lives in (``program_root()``).  The tools now live in ``tools/``,
+    # so they need their own copy to report the same build identity as the app.
+    (tools_dir / "build-info.json").write_text(metadata, encoding="utf-8")
+
+    _verify_console_tool(tools_dir)
+    verify(release_dir)
+    return release_dir
+
+
+def verify(release_dir: Path) -> None:
+    """Fail loudly rather than shipping a broken or mis-laid-out package."""
+    missing = [name for name in REQUIRED_BUNDLE_PATHS if not (release_dir / name).is_file()]
+    if missing:
+        raise SystemExit("发布包缺少必要资源：\n  " + "\n  ".join(missing))
+
+    if not (release_dir / APP_DISPLAY).is_file():
+        raise SystemExit(f"发布包缺少入口可执行文件：{APP_DISPLAY}")
+
+    stray = sorted(path.name for path in release_dir.glob("*.exe"))
+    if set(stray) != {APP_DISPLAY}:
+        raise SystemExit(f"顶层只允许出现入口可执行文件 {APP_DISPLAY}，实际为：{stray}")
+
+    tools_dir = release_dir / TOOLS_DIR_NAME
+    for display in TOOLS.values():
+        if not (tools_dir / display).is_file():
+            raise SystemExit(f"发布包 tools/ 缺少 {display}")
+
+    for name in ("使用说明.txt", "版本信息.txt"):
+        if not (release_dir / name).is_file():
+            raise SystemExit(f"发布包缺少 {name}")
+
+    try:
+        info = json.loads((release_dir / "build-info.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit("发布包缺少有效的 build-info.json。") from exc
+    if (not isinstance(info, dict) or len(str(info.get("build_sha") or "")) != 40
+            or not info.get("release_version") or info.get("build_dirty") is not False):
+        raise SystemExit("发布包 build-info.json 中的版本身份不完整或不安全。")
+
+    print("资源检查通过：界面、核心规则、版本身份、入口与 tools/ 维修工具均在位。")
+
+
+def _locate_app_executable(package_dir: Path) -> Path:
+    for name in (APP_DISPLAY, PYI_ENTRY_EXE):
+        candidate = package_dir / name
+        if candidate.is_file():
+            return candidate
+    raise SystemExit(f"源包中找不到入口可执行文件 {APP_DISPLAY}：{package_dir}")
+
+
+def _locate_internal(package_dir: Path) -> Path:
+    internal = package_dir / "_internal"
+    if internal.is_dir():
+        return internal
+    raise SystemExit(f"源包中找不到 _internal 运行时目录：{package_dir}")
+
+
+def _locate_tool(package_dir: Path, display: str) -> Path:
+    """Find a tool in either the new (``tools/``) or legacy (flat) layout."""
+    for candidate in (package_dir / TOOLS_DIR_NAME / display, package_dir / display):
+        if candidate.is_file():
+            return candidate
+    raise SystemExit(f"源包中找不到维修工具：{display}")
+
+
+def fresh_build(dist_dir: Path, explicit_version: str | None = None) -> Path:
+    """Compile from the checkout through the spec and assemble the release.
+
+    Strict by design: only a clean workspace whose ``HEAD`` is tagged with an
+    official ``payroll-vX.Y.Z`` release tag may produce a package.  Everything
+    (version, short SHA, date, platform) is derived, never typed.
+    """
     if not SPEC.is_file():
         raise SystemExit(f"找不到打包配置：{SPEC}")
-    build_info = _build_info()
+
+    sha = _head_sha()
+    if len(sha) != 40 or not _is_clean():
+        raise SystemExit("Windows 发布必须从干净、已提交的源码构建。")
+
+    version = _version_from_tags(_tags_pointing_at(sha))
+    if version is None:
+        raise SystemExit(
+            "当前 HEAD 未落在正式发布 tag（形如 payroll-vX.Y.Z）上，"
+            "拒绝构建未发布或重复的版本包。请先为该提交打正式 tag。"
+        )
+    if explicit_version is not None and _normalise_version(explicit_version) != version:
+        raise SystemExit(
+            f"--version 与 HEAD 上的发布 tag 不一致（tag 推导为 {version}，参数为 {explicit_version}）。"
+        )
+
+    short = sha[:7]
+    date = _commit_date(sha)
+    platform = _platform_name()
+    release_dir = dist_dir / _release_folder(version, short, platform)
 
     scratch = Path(tempfile.mkdtemp(prefix="payroll-windows-build-"))
     try:
@@ -172,59 +468,90 @@ def build(dist_dir: Path) -> Path:
         )
 
         bundle = scratch / "dist" / BUNDLE_NAME
-        if not bundle.is_dir():
-            raise SystemExit(f"PyInstaller 没有生成 {bundle}")
+        app_exe = bundle / PYI_ENTRY_EXE
+        if not app_exe.is_file():
+            raise SystemExit(f"PyInstaller 没有生成入口可执行文件：{app_exe}")
 
-        for built_name, user_name in EXECUTABLE_NAMES.items():
-            built = bundle / built_name
+        tools: list[tuple[Path, str]] = []
+        for build_name, display in TOOLS.items():
+            built = scratch / "dist" / build_name
             if not built.is_file():
-                raise SystemExit(f"发布包缺少可执行文件：{built}")
-            built.rename(bundle / user_name)
+                raise SystemExit(f"PyInstaller 没有生成维修工具：{built}")
+            tools.append((built, display))
 
-        (bundle / "build-info.json").write_text(
-            json.dumps(build_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        _assemble_release(
+            release_dir,
+            app_exe=app_exe,
+            internal_dir=bundle / "_internal",
+            tools=tools,
+            build_info=_build_info(version, sha),
+            usage_text=USAGE_TEXT,
+            version_info=_version_info_text(version, short, sha, date, platform),
         )
-        (bundle / "使用说明.txt").write_text(USAGE_TEXT, encoding="utf-8")
-        verify(bundle)
-
-        final = dist_dir / BUNDLE_NAME
-        _discard(final)
-        dist_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(bundle), str(final))
-        return final
+        return release_dir
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def verify(bundle: Path) -> None:
-    """Fail loudly rather than shipping a package with a 404 for its own UI."""
-    missing = [name for name in REQUIRED_BUNDLE_PATHS if not (bundle / name).is_file()]
-    if missing:
-        raise SystemExit("发布包缺少必要资源：\n  " + "\n  ".join(missing))
-    for user_name in EXECUTABLE_NAMES.values():
-        if not (bundle / user_name).is_file():
-            raise SystemExit(f"发布包缺少 {user_name}")
+def repackage(package_dir: Path, dist_dir: Path, explicit_version: str | None = None) -> Path:
+    """Re-brand an existing package into the current layout without recompiling.
+
+    The identity is read *from the package*, not from the current checkout: the
+    executable bytes stay untouched and the version is whatever tag points at
+    the package's own ``build_sha``.
+    """
+    if not package_dir.is_dir():
+        raise SystemExit(f"找不到要复用的发布包目录：{package_dir}")
+
     try:
-        info = json.loads((bundle / "build-info.json").read_text(encoding="utf-8"))
+        source_info = json.loads((package_dir / "build-info.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit("发布包缺少有效的 build-info.json。") from exc
-    if (not isinstance(info, dict) or len(str(info.get("build_sha") or "")) != 40
-            or not info.get("release_version") or info.get("build_dirty") is not False):
-        raise SystemExit("发布包 build-info.json 中的版本身份不完整或不安全。")
-    print("资源检查通过：界面、核心规则、版本身份及三个可执行文件均在位。")
+        raise SystemExit(f"源包缺少有效的 build-info.json：{package_dir}") from exc
+
+    sha = str(source_info.get("build_sha") or "").strip()
+    if len(sha) != 40:
+        raise SystemExit("源包 build-info.json 缺少有效的 build_sha，无法安全复用。")
+
+    version = _version_from_tags(_tags_pointing_at(sha))
+    if version is None:
+        if explicit_version is None:
+            raise SystemExit(
+                f"找不到指向 build_sha {sha} 的正式 tag。请确认 tag 存在，或用 --version 指定版本。"
+            )
+        version = _normalise_version(explicit_version)
+    elif explicit_version is not None and _normalise_version(explicit_version) != version:
+        raise SystemExit(
+            f"--version 与指向该 build_sha 的 tag 不一致（tag 推导为 {version}，参数为 {explicit_version}）。"
+        )
+
+    short = sha[:7]
+    date = _commit_date(sha)
+    platform = _platform_name()
+
+    app_exe = _locate_app_executable(package_dir)
+    internal_dir = _locate_internal(package_dir)
+    tools = [(_locate_tool(package_dir, display), display) for display in TOOLS.values()]
+
+    release_dir = dist_dir / _release_folder(version, short, platform)
+    _assemble_release(
+        release_dir,
+        app_exe=app_exe,
+        internal_dir=internal_dir,
+        tools=tools,
+        build_info=_build_info(version, sha),
+        usage_text=USAGE_TEXT,
+        version_info=_version_info_text(version, short, sha, date, platform),
+    )
+    return release_dir
 
 
-def package(bundle: Path, dist_dir: Path) -> tuple[Path, str]:
-    release_dir = dist_dir / RELEASE_FOLDER_NAME
-    _discard(release_dir)
-    release_dir.mkdir(parents=True)
-    shutil.move(str(bundle), str(release_dir / BUNDLE_NAME))
-
-    zip_path = release_dir.with_suffix(".zip")
+def package(release_dir: Path, dist_dir: Path) -> tuple[Path, str]:
+    """Zip the release folder and write its ``.sha256`` sidecar file."""
+    zip_path = dist_dir / f"{release_dir.name}.zip"
     _discard(zip_path)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(release_dir.rglob("*")):
-            archive.write(path, path.relative_to(dist_dir))
+            archive.write(path, path.relative_to(release_dir.parent))
 
     digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     checksum = zip_path.parent / f"{zip_path.name}.sha256"
@@ -237,6 +564,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=REPO_ROOT / "windows" / "dist",
                         help="输出目录（默认 windows/dist，已加入 .gitignore）")
     parser.add_argument("--no-zip", action="store_true", help="只生成程序目录，不打包 ZIP")
+    parser.add_argument("--repackage", type=Path, default=None,
+                        help="复用既有发布包目录并按新布局重组（不重新编译、不改动 EXE 字节）")
+    parser.add_argument("--version", default=None,
+                        help="版本号（如 V1.0.0）；仅在无法从 tag 推导时作为兜底")
     args = parser.parse_args(argv)
 
     dist_dir = args.output.resolve()
@@ -245,15 +576,18 @@ def main(argv: list[str] | None = None) -> int:
     # works in the system temp directory, so clear any leftover.
     _discard(dist_dir.parent / "build")
 
-    bundle = build(dist_dir)
+    if args.repackage is not None:
+        release_dir = repackage(args.repackage.resolve(), dist_dir, explicit_version=args.version)
+    else:
+        release_dir = fresh_build(dist_dir, explicit_version=args.version)
 
-    print(f"\n程序目录：{bundle}")
-    print(f"  入口：{bundle / '工资核算助手.exe'}")
+    print(f"\n发布目录：{release_dir}")
+    print(f"  入口：{release_dir / APP_DISPLAY}")
 
     if args.no_zip:
         return 0
 
-    zip_path, digest = package(bundle, dist_dir)
+    zip_path, digest = package(release_dir, dist_dir)
     print(f"\n发布包：{zip_path}")
     print(f"SHA-256：{digest}")
     return 0
