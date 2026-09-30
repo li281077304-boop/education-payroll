@@ -29,22 +29,23 @@ Two modes are supported:
 Both modes produce, under ``windows/dist`` by default::
 
     工资核算助手-{V}-{short}-{platform}/
-    ├── 工资核算助手.exe          <- the only file a user needs to open
-    ├── _internal/                 <- Python runtime + dependencies + assets
+    ├── 工资核算助手.exe          <- the only file a normal user opens
+    ├── 重启工资服务.exe          <- maintenance tool, not needed normally
+    ├── 工资核算助手-命令行.exe    <- maintenance tool, not needed normally
+    ├── _internal/                 <- one shared runtime for all three
     ├── 使用说明.txt
     ├── 版本信息.txt               <- generated, never hand-written
-    └── tools/
-        ├── 重启工资服务.exe
-        └── 工资核算助手-命令行.exe
+    └── build-info.json
     工资核算助手-{V}-{short}-{platform}.zip
     工资核算助手-{V}-{short}-{platform}.zip.sha256
 
-The maintenance tools live in ``tools/`` and must keep working there.  A
-PyInstaller *onedir* executable resolves its runtime from an ``_internal``
-folder next to itself, so relocating one breaks it; the spec therefore builds
-those two tools as *onefile* executables.  When repackaging a legacy *onedir*
-package, this script detects the failing tool and copies the shared runtime
-into ``tools/`` so the relocated tool still runs (see ``_stage_tools``).
+Why the maintenance tools are *not* hidden in a sub-folder: a PyInstaller
+onedir executable resolves its runtime from an ``_internal`` folder next to
+itself, so relocating one forces either a second copy of ``_internal`` or a
+onefile rebuild -- both duplicate the Python runtime and roughly double the
+package size.  Paying ~+50% size for a cosmetic "clean top level" is not worth
+it, so all three executables stay beside the single shared runtime and
+使用说明.txt states plainly that the two tools are for troubleshooting only.
 
 Nothing here is committed to Git, and no machine-specific path is baked into the
 executables.  PyInstaller builds ASCII-named executables and this script renames
@@ -67,20 +68,19 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPEC = REPO_ROOT / "windows" / "payroll_windows.spec"
 
-# PyInstaller's onedir folder name and the entry executable it builds.
+# PyInstaller's onedir bundle folder and the entry executable it builds.
 BUNDLE_NAME = "EducationPayroll"
 PYI_ENTRY_EXE = "EducationPayroll.exe"
 
-# The user-facing entry point.  Only this executable sits at the top level.
+# The user-facing entry point.
 APP_DISPLAY = "工资核算助手.exe"
 
-# PyInstaller build names (ASCII) -> Chinese display names, for the tools that
-# ship inside the ``tools/`` sub-folder.  Order defines the copy/verify order.
+# PyInstaller build names (ASCII) -> Chinese display names, for the maintenance
+# tools that ship beside the main entry and share its runtime.
 TOOLS = {
     "RestartPayrollService.exe": "重启工资服务.exe",
     "PayrollCommandLine.exe": "工资核算助手-命令行.exe",
 }
-TOOLS_DIR_NAME = "tools"
 
 # ``payroll-v1.0.0`` -> release version ``V1.0.0``.
 RELEASE_TAG_RE = re.compile(r"^payroll-v(\d+\.\d+\.\d+)$")
@@ -127,11 +127,22 @@ USAGE_TEXT = """工资核算助手（Windows 版）使用说明
   这个位置和程序文件夹是分开的。以后升级或重新解压程序，
   只要不删除上面的目录，历史数据都会原样保留。
 
-三、重启服务
+三、另外两个程序是维修工具（正常使用无需打开）
 
-  如果页面打不开或提示连接失败，双击本目录下 tools 子文件夹里的
-  「重启工资服务.exe」。
-  它只会结束由本启动器启动的那一个工资服务进程。
+  同目录下的这两个程序只在排障时使用，
+  正常使用工资核算助手时不需要打开它们：
+
+      重启工资服务.exe
+          页面打不开或提示连接失败时，双击它。
+          它只会结束由本启动器启动的那一个工资服务进程。
+
+      工资核算助手-命令行.exe
+          仅供排障查看状态，双击无效，需在命令行中运行：
+
+              --status        查看服务与数据目录状态
+              --stop          安全停止工资服务
+              --inventory     只读列出历史核算记录
+              --diagnostics   打开最近一次诊断
 
 四、出问题怎么办
 
@@ -142,28 +153,20 @@ USAGE_TEXT = """工资核算助手（Windows 版）使用说明
 
   诊断文件里只有路径和技术信息，不含任何工资、教师或学生数据。
 
-五、命令行（仅排障用）
-
-  本目录下 tools 子文件夹里的「工资核算助手-命令行.exe」可以查看状态：
-
-      --status        查看服务与数据目录状态
-      --stop          安全停止工资服务
-      --inventory     只读列出历史核算记录
-      --diagnostics   打开最近一次诊断
-
-六、端口
+五、端口
 
   固定使用 127.0.0.1:8760。
   如果该端口被别的程序占用，程序会明确提示，
   不会结束其它程序，也不会偷偷改用别的端口。
 
-七、目录结构
+六、目录结构
 
-  工资核算助手.exe        主程序（双击它即可）
-  _internal\\              程序运行时（请勿删除或移动）
-  使用说明.txt            本文件
-  版本信息.txt            版本 / Build / 发布日期 / 平台
-  tools\\                 维修工具（平时无需打开）
+  工资核算助手.exe          主程序（双击它即可）
+  重启工资服务.exe          维修工具（平时无需打开）
+  工资核算助手-命令行.exe    维修工具（平时无需打开）
+  _internal\\                三个程序共用的运行时（请勿删除或移动）
+  使用说明.txt              本文件
+  版本信息.txt              版本 / Build / 发布日期 / 平台
 """
 
 
@@ -279,54 +282,6 @@ def _version_info_text(version: str, short: str, sha: str, date: str, platform: 
     )
 
 
-def _stage_tools(tools_dir: Path, tools: list[tuple[Path, str]]) -> None:
-    """Copy the maintenance tools and, only when required, their runtime.
-
-    A PyInstaller *onefile* tool (what the current spec builds) carries its own
-    runtime inside the exe and runs from any folder.  A *onedir* tool instead
-    resolves its runtime from an ``_internal`` folder sitting *next to itself*,
-    so copying the exe alone into ``tools/`` would break it.  We mirror
-    PyInstaller's own lookup rule: if an ``_internal`` folder sits beside the
-    source executable, copy it into ``tools/`` as well.
-    """
-    runtime_source: Path | None = None
-    for source, display in tools:
-        shutil.copy2(source, tools_dir / display)
-        sibling = source.parent / "_internal"
-        if runtime_source is None and sibling.is_dir():
-            runtime_source = sibling
-
-    if runtime_source is not None:
-        print("检测到 onedir 维修工具，复制同级 _internal 运行时到 tools/ …")
-        shutil.copytree(runtime_source, tools_dir / "_internal")
-
-
-def _verify_console_tool(tools_dir: Path) -> None:
-    """Prove the relocated console tool can boot from ``tools/``.
-
-    Only the *console* tool is executed: a windowed PyInstaller executable
-    shows a modal error dialog when it cannot find its runtime, which would
-    block an unattended build.  Both tools share the same runtime requirement,
-    so a healthy console tool proves the ``_internal`` layout is correct.
-
-    ``--status`` neither starts a service nor opens a window, so it is safe to
-    run here.
-    """
-    exe = tools_dir / TOOLS["PayrollCommandLine.exe"]
-    try:
-        completed = subprocess.run(
-            [str(exe), "--no-dialog", "--status"],
-            cwd=str(tools_dir), stdin=subprocess.DEVNULL,
-            capture_output=True, timeout=120,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise SystemExit(f"{exe.name} 未能在规定时间内启动（缺少运行时？）。") from exc
-    except OSError as exc:
-        raise SystemExit(f"无法运行 {exe.name}：{exc}") from exc
-    if completed.returncode != 0:
-        raise SystemExit(f"{exe.name} 无法在 tools/ 中独立运行（退出码 {completed.returncode}）。")
-
-
 def _assemble_release(
     release_dir: Path,
     *,
@@ -339,9 +294,10 @@ def _assemble_release(
 ) -> Path:
     """Lay out one release tree and fail closed if anything is missing.
 
-    The layout is the same for a fresh build and a repackage: a single top-level
-    entry, the shared ``_internal`` runtime, the two generated text files and the
-    maintenance tools under ``tools/``.
+    The layout is identical for a fresh build and a repackage: the main entry,
+    the two maintenance tools and one shared ``_internal`` runtime all sit at
+    the top level, because a relocated onedir executable would need its own copy
+    of the runtime.
     """
     _discard(release_dir)
     release_dir.mkdir(parents=True)
@@ -349,42 +305,39 @@ def _assemble_release(
     shutil.copy2(app_exe, release_dir / APP_DISPLAY)
     if internal_dir is not None:
         shutil.copytree(internal_dir, release_dir / "_internal")
+    for source, display in tools:
+        shutil.copy2(source, release_dir / display)
 
     metadata = json.dumps(build_info, ensure_ascii=False, indent=2) + "\n"
     (release_dir / "build-info.json").write_text(metadata, encoding="utf-8")
     (release_dir / "使用说明.txt").write_text(usage_text, encoding="utf-8")
     (release_dir / "版本信息.txt").write_text(version_info, encoding="utf-8")
 
-    tools_dir = release_dir / TOOLS_DIR_NAME
-    tools_dir.mkdir()
-    _stage_tools(tools_dir, tools)
-    # A frozen executable reads its identity from the ``build-info.json`` of the
-    # folder it lives in (``program_root()``).  The tools now live in ``tools/``,
-    # so they need their own copy to report the same build identity as the app.
-    (tools_dir / "build-info.json").write_text(metadata, encoding="utf-8")
-
-    _verify_console_tool(tools_dir)
     verify(release_dir)
     return release_dir
 
 
 def verify(release_dir: Path) -> None:
-    """Fail loudly rather than shipping a broken or mis-laid-out package."""
+    """Fail loudly rather than shipping a broken or duplicated package."""
     missing = [name for name in REQUIRED_BUNDLE_PATHS if not (release_dir / name).is_file()]
     if missing:
         raise SystemExit("发布包缺少必要资源：\n  " + "\n  ".join(missing))
 
-    if not (release_dir / APP_DISPLAY).is_file():
-        raise SystemExit(f"发布包缺少入口可执行文件：{APP_DISPLAY}")
+    expected = {APP_DISPLAY, *TOOLS.values()}
+    actual = sorted(path.name for path in release_dir.glob("*.exe"))
+    if set(actual) != expected:
+        raise SystemExit(
+            f"顶层可执行文件应为 {sorted(expected)}，实际为：{actual}"
+        )
 
-    stray = sorted(path.name for path in release_dir.glob("*.exe"))
-    if set(stray) != {APP_DISPLAY}:
-        raise SystemExit(f"顶层只允许出现入口可执行文件 {APP_DISPLAY}，实际为：{stray}")
-
-    tools_dir = release_dir / TOOLS_DIR_NAME
-    for display in TOOLS.values():
-        if not (tools_dir / display).is_file():
-            raise SystemExit(f"发布包 tools/ 缺少 {display}")
+    # One shared runtime only: a second _internal means the Python runtime was
+    # duplicated, which is exactly the size regression this layout avoids.
+    internals = sorted(
+        path.relative_to(release_dir).as_posix()
+        for path in release_dir.rglob("_internal") if path.is_dir()
+    )
+    if internals != ["_internal"]:
+        raise SystemExit(f"发布包必须只有一份 _internal 运行时，实际为：{internals}")
 
     for name in ("使用说明.txt", "版本信息.txt"):
         if not (release_dir / name).is_file():
@@ -398,7 +351,7 @@ def verify(release_dir: Path) -> None:
             or not info.get("release_version") or info.get("build_dirty") is not False):
         raise SystemExit("发布包 build-info.json 中的版本身份不完整或不安全。")
 
-    print("资源检查通过：界面、核心规则、版本身份、入口与 tools/ 维修工具均在位。")
+    print("资源检查通过：界面、核心规则、版本身份、三个可执行文件与唯一共享 runtime 均在位。")
 
 
 def _locate_app_executable(package_dir: Path) -> Path:
@@ -417,8 +370,8 @@ def _locate_internal(package_dir: Path) -> Path:
 
 
 def _locate_tool(package_dir: Path, display: str) -> Path:
-    """Find a tool in either the new (``tools/``) or legacy (flat) layout."""
-    for candidate in (package_dir / TOOLS_DIR_NAME / display, package_dir / display):
+    """Find a tool in the shared (flat) layout, tolerating a legacy tools/ one."""
+    for candidate in (package_dir / display, package_dir / "tools" / display):
         if candidate.is_file():
             return candidate
     raise SystemExit(f"源包中找不到维修工具：{display}")
@@ -472,9 +425,11 @@ def fresh_build(dist_dir: Path, explicit_version: str | None = None) -> Path:
         if not app_exe.is_file():
             raise SystemExit(f"PyInstaller 没有生成入口可执行文件：{app_exe}")
 
+        # All three executables live in the same onedir bundle and share its
+        # single _internal runtime.
         tools: list[tuple[Path, str]] = []
         for build_name, display in TOOLS.items():
-            built = scratch / "dist" / build_name
+            built = bundle / build_name
             if not built.is_file():
                 raise SystemExit(f"PyInstaller 没有生成维修工具：{built}")
             tools.append((built, display))

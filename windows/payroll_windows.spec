@@ -7,30 +7,27 @@ Three executables are produced from one entry script:
 * ``RestartPayrollService`` -- 重启工资服务：只结束本启动器启动的服务
 * ``PayrollCommandLine``    -- 工资核算助手-命令行：诊断用
 
-Two deployment shapes are used on purpose:
+All three are **onedir** executables collected into one bundle folder, so they
+share a single ``_internal`` runtime::
 
-* the **main entry** is an *onedir* build: a folder with ``EducationPayroll.exe``
-  plus a shared ``_internal`` runtime.  It is the only thing a normal user opens,
-  so keeping the runtime in ``_internal`` keeps startup fast and the exe small.
-* the two **maintenance tools** are *onefile* builds.  They are copied into the
-  ``tools/`` sub-folder of the release, where a PyInstaller onedir executable
-  would fail: such an executable resolves ``sys._MEIPASS`` to an ``_internal``
-  folder *next to itself*, which would not exist once it is moved out of the
-  main folder.  A onefile build unpacks its own runtime into a temporary folder
-  at every launch, so it runs from any location -- exactly what ``tools/`` needs.
-
-The build script renames the executables to their Chinese display names and
-assembles the final release tree::
-
-    dist/EducationPayroll/           <- onedir bundle (main app)
+    dist/EducationPayroll/
         EducationPayroll.exe
-        _internal/
-    dist/RestartPayrollService.exe   <- onefile maintenance tool
-    dist/PayrollCommandLine.exe      <- onefile maintenance tool
+        RestartPayrollService.exe
+        PayrollCommandLine.exe
+        _internal/          <- one copy of the Python runtime, shared
 
-Renaming after the build keeps PyInstaller away from non-ASCII executable
-names during the build, while the entry point still reads its own file name to
-decide what to do.
+This shape is a size contract, not a style choice.  A PyInstaller onedir
+executable resolves ``sys._MEIPASS`` to an ``_internal`` folder *next to
+itself*.  Moving a tool into a sub-folder therefore forces one of two bad
+options: copy a second ``_internal`` next to it, or rebuild the tool as
+*onefile* so it carries its own runtime.  Both duplicate the Python runtime and
+roughly double the shipped package for a purely cosmetic gain.  Keeping all
+three beside the shared runtime is what holds the package near 19 MB.
+
+The build script renames the executables to their Chinese display names
+afterwards, which keeps PyInstaller away from non-ASCII executable names during
+the build, while the entry point still reads its own file name to decide what
+to do.
 
 Two data sets must be shipped explicitly, otherwise the frozen UI answers 404
 on its own assets or the core rules fail to load:
@@ -124,7 +121,9 @@ analysis = Analysis(
 
 pyz = PYZ(analysis.pure)
 
-COMMON_EXE_OPTIONS = dict(
+EXE_OPTIONS = dict(
+    # Every executable keeps its binaries in the shared ``_internal`` folder.
+    exclude_binaries=True,
     upx=False,
     debug=False,
     strip=False,
@@ -136,21 +135,28 @@ COMMON_EXE_OPTIONS = dict(
     entitlements_file=None,
 )
 
-# The main entry point: an onedir build so the runtime is shared instead of
-# re-extracted on every launch.
-app = EXE(
-    pyz,
-    analysis.scripts,
-    [],
-    name="EducationPayroll",
-    console=False,
-    icon=None,
-    exclude_binaries=True,
-    **COMMON_EXE_OPTIONS,
-)
 
+def build_exe(name: str, console: bool) -> EXE:
+    return EXE(
+        pyz,
+        analysis.scripts,
+        [],
+        name=name,
+        console=console,
+        icon=None,
+        **EXE_OPTIONS,
+    )
+
+
+app = build_exe("EducationPayroll", console=False)
+restart = build_exe("RestartPayrollService", console=False)
+command_line = build_exe("PayrollCommandLine", console=True)
+
+# One bundle folder: the three executables plus the single shared runtime.
 bundle = COLLECT(
     app,
+    restart,
+    command_line,
     analysis.binaries,
     analysis.datas,
     strip=False,
@@ -158,27 +164,3 @@ bundle = COLLECT(
     upx_exclude=[],
     name="EducationPayroll",
 )
-
-
-def maintenance_tool(name: str, console: bool) -> EXE:
-    """Build one self-contained (onefile) maintenance executable.
-
-    Onefile embeds the interpreter, the bundled modules and the data files in a
-    single exe, so the result can live in ``tools/`` and still run.
-    """
-    return EXE(
-        pyz,
-        analysis.scripts,
-        analysis.binaries,
-        analysis.datas,
-        [],
-        name=name,
-        console=console,
-        icon=None,
-        exclude_binaries=False,
-        **COMMON_EXE_OPTIONS,
-    )
-
-
-restart = maintenance_tool("RestartPayrollService", console=False)
-command_line = maintenance_tool("PayrollCommandLine", console=True)
